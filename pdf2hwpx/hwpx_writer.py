@@ -18,10 +18,11 @@ from typing import Optional
 from xml.sax.saxutils import escape
 
 from .masterpage import MARGINS_WITH_MASTER, PAPER_W, Logo, MasterIds, build_masterpage
-from .model import AnswerEntry, AuxBlock, Document, ImageEl, Para, Passage, Question, Run, TableEl
+from .model import BLANK_BOX, AnswerEntry, AuxBlock, Document, ImageEl, Para, Passage, Question, Run, TableEl
 from .style import DocStyle
 
-SUBJECTIVE_BLANK_LINES = 2  # 서술형 문제 뒤 답 쓰는 빈 줄 수
+SUBJECTIVE_BLANK_LINES = 2
+KEEP_WITH_FIGURE_CHARS = 300  # 그림/표 앞 글이 이 글자 수 이하면 그림과 같은 쪽에 두기  # 서술형 문제 뒤 답 쓰는 빈 줄 수
 PT_TO_HWP = 110  # PDF pt -> HWPUNIT (원본 9.1pt 글자 ≈ 출력 10pt 글자 비율)
 DEFAULT_MARGINS = {"header": 1134, "footer": 1134, "left": 2268, "right": 2268, "top": 2268, "bottom": 2268}
 COL_GAP = 2268
@@ -256,8 +257,23 @@ class HwpxWriter:
                 cp = CP["bold_ul"] if r.underline else CP["bold"]
             else:
                 cp = CP["body_ul"] if r.underline else CP["body"]
-            out.append(f'<hp:run charPrIDRef="{cp}"><hp:t>{escape(r.text)}</hp:t></hp:run>')
+            for part in re.split(f"({BLANK_BOX}+)", r.text):
+                if part.startswith(BLANK_BOX):
+                    out.append(self._blank_box(len(part)))
+                elif part:
+                    out.append(f'<hp:run charPrIDRef="{cp}"><hp:t>{escape(part)}</hp:t></hp:run>')
         return "".join(out) or '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>'
+
+    def _blank_box(self, n_em: int) -> str:
+        """줄 안의 빈칸 네모: 글자처럼 취급하는 빈 칸 하나짜리 표(원본 너비 = 글자 n개)."""
+        self.stats["blank_boxes"] = self.stats.get("blank_boxes", 0) + 1
+        em = int(round(self.style.body_size * 100))
+        w = min(self.col_w - 3000, max(2 * em, int(n_em * em * 0.95)))
+        h = int(em * 1.3)
+        bf = self.styles.add_border_fill()
+        cell = self._tc(0, 0, 1, 1, w, h, bf, self._note_p(0, '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>'),
+                        (0, 0, 0, 0))
+        return self._tbl([[cell]], 1, w, h, bf)
 
     def _p(self, pp: int, inner: str) -> str:
         self.stats["paragraphs"] += 1
@@ -390,16 +406,24 @@ class HwpxWriter:
     # --------------------------------------------------------- blocks ----
     def _passage(self, ps: Passage) -> list[str]:
         S = self.styles
-        out = [self._p(PP["guide"], self._runs_xml(ps.guide.runs, True))] if ps.guide else []
+        # 짧은 머리글 다음에 큰 그림/표가 오면 그림이 다음 쪽으로 밀릴 때 머리글도 함께 넘어가게(다음 문단과 함께)
+        keep_until = -1
+        first_big = next((i for i, p in enumerate(ps.paras) if p.kind in ("image", "table")), None)
+        if first_big is not None and sum(len(p.text) for p in ps.paras[:first_big] if p.kind == "text") <= KEEP_WITH_FIGURE_CHARS:
+            keep_until = first_big
+        guide_pp = S.derive(PP["guide"], keep_next=1) if keep_until >= 0 else PP["guide"]
+        out = [self._p(guide_pp, self._runs_xml(ps.guide.runs, True))] if ps.guide else []
         if ps.boxed:
             self.stats["passage_boxes"] += 1
-        for p in ps.paras:
+        for idx, p in enumerate(ps.paras):
             if ps.boxed:
                 base = PP["passage"]
                 ov: dict = {}
             else:
                 base = PP["passage"]
                 ov = {"border": (2, 0, 0, 0, 0, 0)}
+            if idx < keep_until:
+                ov["keep_next"] = 1
             if p.kind == "blank":
                 out.append(self._empty(S.derive(base, **ov)))
                 continue
@@ -527,6 +551,25 @@ class HwpxWriter:
         left = int(round(g.label_x * kk))
         edges = [g.label_x] + list(g.cols_x) + [g.width]
         widths = [max(600, int(round((b - a) * kk))) for a, b in zip(edges, edges[1:])]
+        # 칸 글자가 칸보다 길면 줄이 바뀌므로("충분히 고민한 후/에") 글자 폭만큼은 넓히고, 남는 칸에서 덜어 온다
+        em = self.style.body_size * 100
+
+        def text_w(runs: list[Run]) -> int:
+            t = "".join(r.text for r in runs)
+            return int(sum(em if ord(c) >= 0x2E80 else 0.55 * em for c in t) + 900)
+        need = [widths[0]] + [max([text_w(g.header[j])] + [text_w(cells[j]) for _, cells in g.rows])
+                              for j in range(len(g.cols_x))]
+        avail = self.col_w - left - 200
+        widths = [max(w, n) for w, n in zip(widths, need)]
+        over = sum(widths) - avail
+        if over > 0:
+            slack = [max(0, w - n) for w, n in zip(widths, need)]
+            total = sum(slack)
+            if total > 0:
+                widths = [w - int(over * sl / total) if total >= over else w - sl for w, sl in zip(widths, slack)]
+            if sum(widths) > avail:  # 그래도 넘치면 전체를 줄인다
+                f = avail / sum(widths)
+                widths = [int(w * f) for w in widths]
         pad = int(round(180 * self.scale))
         center = S.derive(0, align="CENTER")
         rows: list[list[str]] = []

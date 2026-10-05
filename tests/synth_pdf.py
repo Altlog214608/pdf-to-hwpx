@@ -361,6 +361,12 @@ def build_tables(path: str) -> dict:
     top = w.y
     w.text((w.left + w.right) / 2 - tl("<보기>") / 2, top + 13, "<보기>")
     w.text(w.left + 8, top + 30, "다음 표는 [A]를 정리한 것이다.")
+    # 줄 안의 빈칸 네모: "주제 : [        ]" (글자 없는 작은 사각형, 선 4개)
+    w.text(w.left + 8, top + 132, "주제 :")
+    bx0 = w.left + 8 + tl("주제 :") + 4
+    bx1, by0, by1 = bx0 + 120, top + 123, top + 134
+    for a1, a2 in (((bx0, by0), (bx1, by0)), ((bx0, by1), (bx1, by1)), ((bx0, by0), (bx0, by1)), ((bx1, by0), (bx1, by1))):
+        w.page.draw_line(fitz.Point(*a1), fitz.Point(*a2), width=0.3)
     # 표: 3열 x 3행, 1행 첫 칸은 2행까지 병합, 1행 머리 칸 색, 3행 가운데 칸에 그림
     tx0, tx1 = w.left + 10, w.right - 10
     xs = [tx0, tx0 + 60, tx0 + 135, tx1]
@@ -380,7 +386,7 @@ def build_tables(path: str) -> dict:
     ctext(0, ys[2] + 24, "오월")
     w.page.insert_image(fitz.Rect(xs[1] + 15, ys[2] + 6, xs[2] - 15, ys[3] - 6), stream=_picture_png(60, 40, (0.4, 0.6, 0.8)))
     ctext(2, ys[2] + 24, "㉠")
-    bottom = ys[3] + 10
+    bottom = ys[3] + 30
     w.page.draw_line(fitz.Point(w.left, top), fitz.Point(w.right, top), width=0.48)
     w.page.draw_line(fitz.Point(w.left, bottom), fitz.Point(w.right, bottom), width=0.48)
     vseg(w.page, w.left, top, bottom)

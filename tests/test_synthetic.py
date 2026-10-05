@@ -217,7 +217,12 @@ def test_tables_and_brackets(tmp_path):
     with zipfile.ZipFile(res["hwpx"]) as z:
         sec = z.read("Contents/section0.xml").decode("utf-8")
         header = z.read("Contents/header.xml").decode("utf-8")
-    assert sec.count("<hp:tbl ") == 3 and v["checks"]["tables"] == 3  # 괄호, 표, 선택지 격자
+    assert sec.count("<hp:tbl ") == 4 and v["checks"]["tables"] == 4  # 괄호, 표, 선택지 격자, 빈칸 네모
+    # 빈칸 네모: 공백이 아니라 글자처럼 취급하는 빈 네모(표)로
+    from pdf2hwpx.model import BLANK_BOX
+    blank = [p for p in box["paras"] if p.get("text", "").startswith("주제")][0]["text"]
+    assert blank.startswith("주제 :") and blank.endswith(BLANK_BOX) and blank.count(BLANK_BOX) >= 8
+    assert re.search(r'주제 :</hp:t></hp:run><hp:run charPrIDRef="0"><hp:tbl [^>]*rowCnt="1" colCnt="1"', sec.replace("주제 : <", "주제 :<"))
     assert 'rowSpan="2"' in sec and 'treatAsChar="1"' in sec
     # 괄호 칸: 왼쪽/위/아래 선만 있는 테두리( [ 모양 )
     assert re.search(r'<hh:leftBorder type="SOLID"[^>]*/><hh:rightBorder type="NONE"[^>]*/><hh:topBorder type="SOLID"'
@@ -231,3 +236,20 @@ def test_subjective_space_and_subitems(result):
     texts = [p["text"] for p in hx["paragraphs"] if p["section"].endswith("section0.xml")]
     i = next(k for k, t in enumerate(texts) if t.startswith("(2) 위에서 답한"))  # 4번(서술형)의 마지막 문단
     assert texts[i + 1:i + 1 + SUBJECTIVE_BLANK_LINES] == [""] * SUBJECTIVE_BLANK_LINES
+
+
+def test_short_intro_kept_with_figure():
+    """짧은 머리글 다음에 큰 그림/표가 오면 머리글 문단을 '다음 문단과 함께'로 둔다(그림이 다음 쪽으로 밀릴 때 같이 넘어가게)."""
+    import re
+    from pdf2hwpx.hwpx_writer import HwpxWriter
+    from pdf2hwpx.model import Document, ImageEl, Para, Passage, Run
+    img = ImageEl(1, 0, 0, 0, 100, 300, "x", 0)
+    img.png = b"\x89PNG"
+    ps = Passage(1, Para(runs=[Run("※ 다음 글을 읽고 물음에 답하시오.")]),
+                 [Para(runs=[Run("짧은 소개 글입니다.")]), Para(kind="image", image=img)])
+    w = HwpxWriter(Document(source="t", items=[ps]))
+    out = w._passage(ps)
+    pps = [re.search(r'paraPrIDRef="(\d+)"', o).group(1) for o in out]
+    header = w.styles.render_header(1)
+    keep = lambda pid: re.search(rf'<hh:paraPr id="{pid}"[^>]*>.*?keepWithNext="(\d)"', header, re.S).group(1)
+    assert keep(pps[0]) == "1" and keep(pps[1]) == "1"

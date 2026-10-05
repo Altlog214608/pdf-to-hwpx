@@ -7,6 +7,8 @@ from typing import Optional, Union
 # 원문자 아이콘 이미지가 들어간 자리에 임시로 넣는 사설 영역 문자 시작값.
 ICON_PUA_BASE = 0xE000
 CIRCLED_DIGITS = "①②③④⑤⑥⑦⑧⑨⑩"
+# 줄 안의 빈칸 네모(예: "주제 : [      ]"). 글자 크기 1em마다 한 글자씩 넣어 너비를 전한다.
+BLANK_BOX = "\uF8F0"
 
 
 @dataclass

@@ -25,7 +25,7 @@ NGRAM = 6
 
 
 def _compact(s: str) -> str:
-    return re.sub(r"\s+", "", s)
+    return re.sub(r"[\s\uF8F0]+", "", s)  # 빈칸 네모 표시는 HWPX에서 글자가 아니라 네모(표)로 나간다
 
 
 def _shingles(s: str, n: int = NGRAM) -> set[str]:

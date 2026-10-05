@@ -20,7 +20,7 @@ from typing import Optional
 
 import pymupdf as fitz
 
-from .model import Box, Bracket, Cell, FlowItem, Glyph, ICON_PUA_BASE, ImageEl, Line, PageInfo, TableEl
+from .model import BLANK_BOX, Box, Bracket, Cell, FlowItem, Glyph, ICON_PUA_BASE, ImageEl, Line, PageInfo, TableEl
 
 HIDDEN_TEXT_MAX_SIZE = 3.0  # 크기 3pt 미만 글자는 숨은 텍스트(예: "zb1)")
 GAP_SPACE_RATIO = 0.25  # 글자 사이 간격이 글자 크기의 이 비율을 넘으면 공백으로 본다
@@ -578,6 +578,30 @@ def extract(pdf_path: str) -> Extraction:
             kept = rest
             stats["tables"] += len(tables)
 
+        # ---- 줄 안의 빈칸 네모: 글자가 없는 작은 사각형이 같은 높이의 글 줄 옆에 있으면 빈칸 표시로 넣는다 ----
+        blank_rects = []
+        for (bx0, by0, bx1, by1) in _detect_boxes(segs, top, bottom):
+            if not (6 <= by1 - by0 <= 24) or any(t.x0 - 2 <= bx0 and bx1 <= t.x1 + 2 and t.y0 - 2 <= by0 and by1 <= t.y1 + 2
+                                                 for t in tables):
+                continue
+            inside = any(not g.is_space and bx0 < (g.x0 + g.x1) / 2 < bx1 and by0 < (g.y0 + g.y1) / 2 < by1
+                         for f in kept for g in f.glyphs)
+            row = [f for f in kept if min(f.y1, by1) - max(f.y0, by0) >= 0.5 * min(f.y1 - f.y0, by1 - by0)
+                   and (f.x1 <= bx0 + 1 or f.x0 >= bx1 - 1) and min(abs(f.x1 - bx0), abs(f.x0 - bx1)) < 4 * f.size]
+            if inside or not row:
+                continue
+            size = row[0].size
+            n = max(2, round((bx1 - bx0) / size))
+            w = (bx1 - bx0) / n
+            glyphs = [Glyph(BLANK_BOX, bx0 + k * w, by0, bx0 + (k + 1) * w, by1, size) for k in range(n)]
+            for f in kept:  # 네모 자리를 채운 공백 글자는 뺀다
+                f.glyphs = [g for g in f.glyphs if not (g.is_space and bx0 < (g.x0 + g.x1) / 2 < bx1
+                                                        and by0 < (g.y0 + g.y1) / 2 < by1)]
+            kept = [f for f in kept if f.glyphs]
+            kept.append(_Frag(glyphs, bx0, by0, bx1, by1, size))
+            blank_rects.append((bx0, by0, bx1, by1))
+        stats["blank_boxes"] += len(blank_rects)
+
         # ---- 이미지 분류 ----
         content_imgs: list[ImageEl] = []
         for x0, y0, x1, y1, digest, xref in imgs:
@@ -638,7 +662,8 @@ def extract(pdf_path: str) -> Extraction:
         box_rects = _detect_boxes(box_segs, top, bottom)
         # 표의 외곽/칸은 박스가 아니다
         box_rects = [r for r in box_rects if not any(
-            r[0] >= t.x0 - 4 and r[2] <= t.x1 + 4 and r[1] >= t.y0 - 4 and r[3] <= t.y1 + 4 for t in tables)]
+            r[0] >= t.x0 - 4 and r[2] <= t.x1 + 4 and r[1] >= t.y0 - 4 and r[3] <= t.y1 + 4 for t in tables)
+            and r not in blank_rects]
         # 다른 박스 안에 들어 있는 사각형(도식의 칸 등)은 박스가 아니라 바깥 박스의 내부 도형으로 센다
         nested_in: dict[int, int] = {}
         for i, (x0, y0, x1, y1) in enumerate(box_rects):
@@ -664,7 +689,7 @@ def extract(pdf_path: str) -> Extraction:
             return best
 
         # ---- 밑줄 ----
-        edge_h = []
+        edge_h = [(y, x0, x1) for (x0, y0, x1, y1) in blank_rects for y in (y0, y1)]
         for b in boxes:
             edge_h.append((b.y0, b.x0, b.x1))
             edge_h.append((b.y1, b.x0, b.x1))
@@ -725,7 +750,8 @@ def extract(pdf_path: str) -> Extraction:
             stats["dropped_decorative_image"] += len(small)
             content_imgs = [im for im in content_imgs if im not in small]
         def _in_table(x0: float, y0: float, x1: float, y1: float) -> bool:
-            return any(t.x0 - 2 <= x0 and x1 <= t.x1 + 2 and t.y0 - 2 <= y0 and y1 <= t.y1 + 2 for t in tables)
+            return any(t.x0 - 2 <= x0 and x1 <= t.x1 + 2 and t.y0 - 2 <= y0 and y1 <= t.y1 + 2 for t in tables) or \
+                any(bx0 - 2 <= x0 and x1 <= bx1 + 2 and by0 - 2 <= y0 and y1 <= by1 + 2 for bx0, by0, bx1, by1 in blank_rects)
 
 
         def _bracket_seg(s: _Seg) -> bool:
