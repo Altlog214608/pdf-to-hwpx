@@ -20,7 +20,7 @@ from .model import (CIRCLED_DIGITS, AnswerEntry, AuxBlock, Box, Choice, Document
                     Passage, Question, Run)
 
 GUIDE_RE = re.compile(r"^\s*(※|\[\s*\d+\s*[~∼～\-–]\s*\d+\s*\])")
-ANSWER_HEAD_RE = re.compile(r"^\s*(\d{1,2})\s*\)\s*\[\s*정답\s*\]")
+ANSWER_HEAD_RE = re.compile(r"^\s*(\d{1,2})\s*\)\s*\[?\s*정답\s*\]?")  # "1) [정답] ④" / "1) 정답 ④"
 EXPL_RE = re.compile(r"^\s*\[\s*해설\s*\]")
 LABEL_RE = re.compile(r"^\s*(\([가-힣A-Za-z]\)|\[[A-Z가-힣]\]|<[가-힣]\>)\s*$")
 # 줄 머리에 오면 새 문단을 시작하는 표지 (원문자/목록/화자/섹션 라벨 등)
@@ -34,13 +34,17 @@ BodyBounds = Callable[[Line], tuple[float, float]]
 # ------------------------------------------------------------- helpers ----
 
 def _runs_from_glyphs(glyphs: list[Glyph], bold: bool = False) -> list[Run]:
+    """글자 -> 런. 원문의 밑줄과 굵게(지문 속 강조 시어 등)를 보존한다."""
     runs: list[Run] = []
     for g in glyphs:
         ul = g.underline
-        if runs and runs[-1].underline == ul:
+        b = bold or g.bold
+        if g.is_space and runs:  # 공백은 앞 런의 모양을 따라가 런이 잘게 쪼개지지 않게
+            ul, b = runs[-1].underline and ul, runs[-1].bold
+        if runs and runs[-1].underline == ul and runs[-1].bold == b:
             runs[-1].text += g.c
         else:
-            runs.append(Run(g.c, ul, bold))
+            runs.append(Run(g.c, ul, b))
     return runs
 
 
@@ -439,7 +443,7 @@ def build_document(ex: Extraction) -> Document:
         q = by_no.get(a.number)
         if q:
             head = a.head.text
-            q.answer = re.sub(r"^\s*\d{1,2}\s*\)\s*\[\s*정답\s*\]\s*", "", head).strip()
+            q.answer = ANSWER_HEAD_RE.sub("", head, count=1).strip()
             q.explanation = a.paras
 
     # 그림 렌더링 (박스 안/지문/문제 그림)
@@ -565,6 +569,10 @@ def _build_answers(b: Builder, lines: list[Line]) -> list[AnswerEntry]:
         paras = b.paragraphs(cur_body, stanza=False) if cur_body else []
         for p in paras:
             p.align = "LEFT"
+            # '오답 point', '1등급 공략 Tip' 같은 짧은 소제목
+            t = p.text.strip()
+            if p.kind == "text" and 0 < len(t) <= 16 and not re.search(r"[.?!다]$", t) and not MARKER_RE.match(t):
+                p.role = "heading"
         entries.append(AnswerEntry(cur_no, head, paras))
 
     in_body = False
@@ -579,6 +587,9 @@ def _build_answers(b: Builder, lines: list[Line]) -> list[AnswerEntry]:
         if cur_no is None:
             continue
         if EXPL_RE.match(ln.text):
+            in_body = True
+        elif not in_body and not b._is_full(cur_head[-1]):
+            # "1) 정답 ②"처럼 정답 줄이 짧게 끝나면 다음 줄부터 해설(소제목 '오답 point' 등)
             in_body = True
         (cur_body if in_body else cur_head).append(ln)
     flush()

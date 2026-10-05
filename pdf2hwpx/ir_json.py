@@ -10,6 +10,8 @@ def _para(p: Para) -> dict:
         d["text"] = p.text
         if any(r.underline for r in p.runs):
             d["underlined"] = [r.text for r in p.runs if r.underline]
+        if any(r.bold for r in p.runs) and not all(r.bold for r in p.runs):
+            d["bold"] = [r.text.strip() for r in p.runs if r.bold and r.text.strip()]
         if p.align != "LEFT":
             d["align"] = p.align
         if p.indent_pt:

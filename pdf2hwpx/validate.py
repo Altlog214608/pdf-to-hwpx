@@ -173,6 +173,12 @@ def validate(ex: Extraction, doc: Document, hwpx_path: str) -> dict:
         warns.append(f"선택지가 5개가 아닌 문제: {bad_choices}")
     if doc.answers and len(doc.answers) != len(qs):
         causes.append(f"정답 수({len(doc.answers)}) != 문제 수({len(qs)})")
+    # 원문에 정답 머리줄이 있는데 정답부로 인식하지 못한 경우(정답·해설이 마지막 문제에 붙어 버림)
+    from .ir import ANSWER_HEAD_RE
+    src_heads = sum(1 for l in src_lines if ANSWER_HEAD_RE.match(l.text))
+    checks["answer_heads_in_source"] = src_heads
+    if src_heads and len(doc.answers) < src_heads:
+        causes.append(f"정답·해설 인식 실패: 원문 정답 머리줄 {src_heads}개 중 {len(doc.answers)}개만 인식")
     checks["answer_count"] = len(doc.answers)
     checks["loose_items"] = doc.loose_notes[:20]  # 문제/지문 밖 내용(단원 제목 박스 등) — 경고 아님
 

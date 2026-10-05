@@ -68,3 +68,12 @@ def test_2_5_media(tmp_path):
     p2 = [x for x in doc["items"] if x["type"] == "passage"][1]
     t = [p.get("text", p["kind"]) for p in p2["paras"]]
     assert t[t.index("사람이 될 수 있대.") + 1] == "blank"  # 단을 넘는 연 구분
+
+
+def test_choesangwi_bold_and_answers(tmp_path):
+    doc = _doc("[최상위 공략] 2.다양한 빛깔로 만나는, 문학(01)", tmp_path)
+    qs = [x for x in doc["items"] if x["type"] == "question"]
+    assert all(q["answer"] for q in qs)  # '1) 정답 ③' 형식
+    p2 = [x for x in doc["items"] if x["type"] == "passage"][1]
+    bold = [b for p in p2["paras"] for b in p.get("bold", [])]
+    assert "흰 바람벽" in bold  # 지문 속 굵은 강조 시어 보존

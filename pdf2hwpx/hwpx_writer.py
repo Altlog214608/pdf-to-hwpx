@@ -265,7 +265,8 @@ class HwpxWriter:
             for p in a.paras:
                 if p.kind != "text":
                     continue
-                out.append(self._p(S.derive(PP["ans_expl"], left=0, intent=_indent_hwp(p.indent_pt)), self._runs_xml(p.runs)))
+                out.append(self._p(S.derive(PP["ans_expl"], left=0, intent=_indent_hwp(p.indent_pt)),
+                                   self._runs_xml(p.runs, base_bold=p.role == "heading")))
         return out
 
     # ---------------------------------------------------------- build ----
