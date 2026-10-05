@@ -1,0 +1,138 @@
+{
+  "version": "v0.4.9.5.24",
+  "source_file": "v0_4_9_5_24_pdf_parser_integrated.py",
+  "sha256": "5222ee2458ba294623f850845b1c6969e60455e95526841d12daf2a1227567e7",
+  "size_bytes": 1346024,
+  "line_count": 30606,
+  "purpose": "Fix v5.23 CLI orchestration that generated up to three HWPX files in one invocation.",
+  "changes": [
+    "Active main no longer directly calls v049518_upgrade_result.",
+    "Active main no longer directly calls v049519_upgrade_result.",
+    "Active main enters the cumulative v5.24->v5.23 chain exactly once.",
+    "Runtime guard wraps v049510_create_hwpx_with_hancom and blocks a second base writer invocation.",
+    "Persistent output audit records how many new HWPX files were created and verifies the final path is the sole new output.",
+    "All v5.23 image, underline, source-credit, connected-box, physical-spacer and validator behavior is retained."
+  ],
+  "tests": {
+    "py_compile": "PASS",
+    "cli_help": "PASS",
+    "active_main_ast": {
+      "direct_v049518_upgrade_result_calls": 0,
+      "direct_v049519_upgrade_result_calls": 0,
+      "v049524_upgrade_result_calls": 1,
+      "status": "PASS"
+    },
+    "synthetic_single_writer": {
+      "base_writer_invocation_count": 1,
+      "new_hwpx_count": 1,
+      "final_path_is_new_output": true,
+      "status": "PASS"
+    },
+    "synthetic_second_writer_guard": {
+      "second_base_writer_blocked_before_second_write": true,
+      "status": "PASS"
+    },
+    "existing_output_allocation": {
+      "preexisting": "sample.hwpx",
+      "new_output": "sample_run02.hwpx",
+      "additional_run03_created": false,
+      "status": "PASS"
+    },
+    "linux_full_parser_smoke_25q": [
+      {
+        "pdf": "1-1",
+        "question_count": 25,
+        "objective_question_count": 22,
+        "subjective_question_count": 3,
+        "question_flow_status": "PASS",
+        "auxiliary_block_count": 19,
+        "auxiliary_extraction_status": "PASS",
+        "base_writer_invocation_count": 1,
+        "single_hwpx_generation_status": "PASS",
+        "hwpx_platform_status": "SKIPPED",
+        "overall_status": "WARN",
+        "note": "Linux/container has no Windows Hancom COM, so HWPX visual/finalizer checks are SKIPPED and overall is WARN."
+      },
+      {
+        "pdf": "1-2",
+        "question_count": 25,
+        "objective_question_count": 22,
+        "subjective_question_count": 3,
+        "question_flow_status": "PASS",
+        "auxiliary_block_count": 19,
+        "auxiliary_extraction_status": "PASS",
+        "base_writer_invocation_count": 1,
+        "single_hwpx_generation_status": "PASS",
+        "hwpx_platform_status": "SKIPPED",
+        "overall_status": "WARN",
+        "note": "Linux/container has no Windows Hancom COM, so HWPX visual/finalizer checks are SKIPPED and overall is WARN."
+      },
+      {
+        "pdf": "2-1",
+        "question_count": 25,
+        "objective_question_count": 22,
+        "subjective_question_count": 3,
+        "question_flow_status": "PASS",
+        "auxiliary_block_count": 16,
+        "auxiliary_extraction_status": "PASS",
+        "base_writer_invocation_count": 1,
+        "single_hwpx_generation_status": "PASS",
+        "hwpx_platform_status": "SKIPPED",
+        "overall_status": "WARN",
+        "note": "Linux/container has no Windows Hancom COM, so HWPX visual/finalizer checks are SKIPPED and overall is WARN."
+      },
+      {
+        "pdf": "2-2",
+        "question_count": 25,
+        "objective_question_count": 22,
+        "subjective_question_count": 3,
+        "question_flow_status": "PASS",
+        "auxiliary_block_count": 8,
+        "auxiliary_extraction_status": "PASS",
+        "base_writer_invocation_count": 1,
+        "single_hwpx_generation_status": "PASS",
+        "hwpx_platform_status": "SKIPPED",
+        "overall_status": "WARN",
+        "note": "Linux/container has no Windows Hancom COM, so HWPX visual/finalizer checks are SKIPPED and overall is WARN."
+      },
+      {
+        "pdf": "2-3",
+        "question_count": 25,
+        "objective_question_count": 22,
+        "subjective_question_count": 3,
+        "question_flow_status": "PASS",
+        "auxiliary_block_count": 12,
+        "auxiliary_extraction_status": "PASS",
+        "base_writer_invocation_count": 1,
+        "single_hwpx_generation_status": "PASS",
+        "hwpx_platform_status": "SKIPPED",
+        "overall_status": "WARN",
+        "note": "Linux/container has no Windows Hancom COM, so HWPX visual/finalizer checks are SKIPPED and overall is WARN."
+      },
+      {
+        "pdf": "2-4",
+        "question_count": 25,
+        "objective_question_count": 22,
+        "subjective_question_count": 3,
+        "question_flow_status": "PASS",
+        "auxiliary_block_count": 8,
+        "auxiliary_extraction_status": "PASS",
+        "base_writer_invocation_count": 1,
+        "single_hwpx_generation_status": "PASS",
+        "hwpx_platform_status": "SKIPPED",
+        "overall_status": "WARN",
+        "note": "Linux/container has no Windows Hancom COM, so HWPX visual/finalizer checks are SKIPPED and overall is WARN."
+      }
+    ],
+    "pdf_2_5": {
+      "status": "NOT_COMPLETED_IN_120S_CONTAINER_WINDOW",
+      "interpretation": "Not counted as a functional FAIL. The image-heavy 2-5 workbook needs Windows/fresh-run verification; earlier versions also exceeded this environment window."
+    }
+  },
+  "windows_acceptance_required": [
+    "Run v5.24 once and confirm exactly one new HWPX file appears.",
+    "Open that one final HWPX and confirm <보기>/<조건> connected boxes remain visible.",
+    "For 2-5 confirm all 66 picture instances are preserved and logical page/column ownership is correct.",
+    "Do not use --refresh-preview for the first acceptance run."
+  ]
+}
