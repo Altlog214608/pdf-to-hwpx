@@ -13,7 +13,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 from .extract import Extraction
-from .model import AuxBlock, Box, Document, Line
+from .model import AuxBlock, Box, Document, Line, TableEl
 
 NS = {
     "hp": "http://www.hancom.co.kr/hwpml/2011/paragraph",
@@ -25,7 +25,7 @@ NGRAM = 6
 
 
 def _compact(s: str) -> str:
-    return re.sub(r"\s+", "", s)
+    return re.sub(r"[\s\uF8F0]+", "", s)  # 빈칸 네모 표시는 HWPX에서 글자가 아니라 네모(표)로 나간다
 
 
 def _shingles(s: str, n: int = NGRAM) -> set[str]:
@@ -111,6 +111,29 @@ def read_hwpx(path: str) -> dict:
                 boxed = bool(bf_solid.get(prop.get("bf"))) and prop.get("connect") == "1"
                 out["paragraphs"].append({"section": sec, "pp": pid, "text": text, "pics": pics,
                                           "boxed": boxed, "bf": prop.get("bf"), "align": prop.get("align")})
+        # 표: 칸(병합 포함)이 rowCnt x colCnt 격자를 빈틈·겹침 없이 채우는지
+        out["tables"] = 0
+        for sec in sorted(sections):
+            root = xml_parts.get(sec)
+            if root is None:
+                continue
+            for tbl in root.iter(f"{{{NS['hp']}}}tbl"):
+                out["tables"] += 1
+                R, C = int(tbl.get("rowCnt", "0")), int(tbl.get("colCnt", "0"))
+                grid = [[0] * C for _ in range(R)]
+                ok = len(tbl.findall("hp:tr", NS)) == R
+                for tc in (c for tr in tbl.findall("hp:tr", NS) for c in tr.findall("hp:tc", NS)):
+                    addr, span = tc.find("hp:cellAddr", NS), tc.find("hp:cellSpan", NS)
+                    r0, c0 = int(addr.get("rowAddr")), int(addr.get("colAddr"))
+                    rs, cs = int(span.get("rowSpan")), int(span.get("colSpan"))
+                    for r in range(r0, r0 + rs):
+                        for c in range(c0, c0 + cs):
+                            if r < R and c < C:
+                                grid[r][c] += 1
+                            else:
+                                ok = False
+                if not ok or any(v != 1 for row in grid for v in row):
+                    out["errors"].append(f"{sec}: 표 격자 오류(rowCnt={R}, colCnt={C})")
         for n in names:  # 바탕쪽(학원 로고 등)의 그림도 센다
             if re.match(r"Contents/masterpage\d+\.xml", n) and n in xml_parts:
                 out["pictures"] += len(list(xml_parts[n].iter(f"{{{NS['hp']}}}pic")))
@@ -131,11 +154,18 @@ def read_hwpx(path: str) -> dict:
 
 def _source_lines(ex: Extraction) -> list[Line]:
     lines: list[Line] = []
+    def add(items) -> None:
+        for x in items:
+            if isinstance(x, Line):
+                lines.append(x)
+            elif isinstance(x, TableEl):
+                for cl in x.cells:
+                    add(cl.items)
     for it in ex.flow:
-        if isinstance(it, Line):
-            lines.append(it)
-        elif isinstance(it, Box):
-            lines.extend(x for x in it.all_items() if isinstance(x, Line))
+        if isinstance(it, Box):
+            add(it.all_items())
+        else:
+            add([it])
     return lines
 
 
@@ -256,6 +286,7 @@ def validate(ex: Extraction, doc: Document, hwpx_path: str) -> dict:
     if hx.get("bindata_unreferenced"):
         causes.append(f"쓰이지 않는 그림 파일: {hx['bindata_unreferenced'][:3]}")
     checks["masterpages"] = hx.get("masterpages", 0)
+    checks["tables"] = hx.get("tables", 0)
 
     status = "FAIL" if causes else ("WARN" if warns else "PASS")
     return {"status": status, "root_causes": causes, "warnings": warns, "checks": checks}

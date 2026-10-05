@@ -178,3 +178,78 @@ def test_answers_as_endnotes_and_title_color(tmp_path):
     qs[-1].number = 9
     w = HwpxWriter(doc, style=DocStyle(answers_as_endnotes=True))
     assert w.endnotes is None and any("미주" in x for x in doc.warnings)
+
+
+def test_tables_and_brackets(tmp_path):
+    """족보닷컴 형식: [A] 묶음 괄호 지문, <보기> 안 선으로 그린 표(병합 칸·칸 색·칸 안 그림), 표 모양 선택지."""
+    import re
+    import zipfile
+    from tests.synth_pdf import build_tables
+
+    pdf = tmp_path / "t.pdf"
+    build_tables(str(pdf))
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    v = res["validation"]
+    assert v["status"] in ("PASS", "WARN") and not v["root_causes"], v
+    items = res["document"]["items"]
+    ps = [x for x in items if x["type"] == "passage"][0]
+    br = [p for p in ps["paras"] if p["kind"] == "bracket"]
+    assert len(br) == 1 and br[0]["label"] == "[A]"
+    assert [p["text"] for p in br[0]["paras"]][0].startswith("해마다") and len(br[0]["paras"]) == 4
+    assert not any(p.get("text") == "[A]" for p in ps["paras"])  # 표시는 괄호 이름으로만
+
+    q = [x for x in items if x["type"] == "question"][0]
+    box = q["blocks"][0]
+    assert box["title"] == "<보기>" and not box["diagram"]  # 표가 있다고 박스 전체를 그림으로 바꾸지 않는다
+    t = [p for p in box["paras"] if p["kind"] == "table"][0]["table"]
+    assert (t["rows"], t["cols"]) == (3, 3)
+    cells = {(c["r"], c["c"]): c for c in t["cells"]}
+    assert cells[(0, 0)]["rs"] == 2 and cells[(0, 0)]["paras"][0]["text"] == "구분"
+    assert cells[(0, 1)]["fill"] and not cells[(1, 1)]["fill"]
+    assert cells[(2, 1)]["paras"][0]["kind"] == "image"
+    assert all(p.get("align") == "CENTER" for c in t["cells"] for p in c["paras"] if p["kind"] == "text")
+    # 표 모양 선택지: 칸 사이 간격을 전각 공백으로 살리고 한 선택지로 유지
+    assert len(q["choices"]) == 5 and "\u2003" in q["choices"][0] and q["choices"][0].endswith("남풍")
+    # 머리(㉠ ㉡)와 선택지 열을 맞춘 보이지 않는 표로 출력, 머리 줄은 따로 남지 않는다
+    assert q["grid"]["header"] == ["㉠", "㉡"] and q["grid"]["rows"][0] == ["①", "보리", "남풍"]
+    assert not any(b.get("text", "").startswith("㉠") for b in q["blocks"])
+
+    with zipfile.ZipFile(res["hwpx"]) as z:
+        sec = z.read("Contents/section0.xml").decode("utf-8")
+        header = z.read("Contents/header.xml").decode("utf-8")
+    assert sec.count("<hp:tbl ") == 4 and v["checks"]["tables"] == 4  # 괄호, 표, 선택지 격자, 빈칸 네모
+    # 빈칸 네모: 공백이 아니라 글자처럼 취급하는 빈 네모(표)로
+    from pdf2hwpx.model import BLANK_BOX
+    blank = [p for p in box["paras"] if p.get("text", "").startswith("주제")][0]["text"]
+    assert blank.startswith("주제 :") and blank.endswith(BLANK_BOX) and blank.count(BLANK_BOX) >= 8
+    assert re.search(r'주제 :</hp:t></hp:run><hp:run charPrIDRef="0"><hp:tbl [^>]*rowCnt="1" colCnt="1"', sec.replace("주제 : <", "주제 :<"))
+    assert 'rowSpan="2"' in sec and 'treatAsChar="1"' in sec
+    # 괄호 칸: 왼쪽/위/아래 선만 있는 테두리( [ 모양 )
+    assert re.search(r'<hh:leftBorder type="SOLID"[^>]*/><hh:rightBorder type="NONE"[^>]*/><hh:topBorder type="SOLID"'
+                     r'[^>]*/><hh:bottomBorder type="SOLID"', header)
+
+
+def test_subjective_space_and_subitems(result):
+    """서술형 문제 뒤에 답 쓸 빈 줄."""
+    from pdf2hwpx.hwpx_writer import SUBJECTIVE_BLANK_LINES
+    hx = read_hwpx(result["hwpx"])
+    texts = [p["text"] for p in hx["paragraphs"] if p["section"].endswith("section0.xml")]
+    i = next(k for k, t in enumerate(texts) if t.startswith("(2) 위에서 답한"))  # 4번(서술형)의 마지막 문단
+    assert texts[i + 1:i + 1 + SUBJECTIVE_BLANK_LINES] == [""] * SUBJECTIVE_BLANK_LINES
+
+
+def test_short_intro_kept_with_figure():
+    """짧은 머리글 다음에 큰 그림/표가 오면 머리글 문단을 '다음 문단과 함께'로 둔다(그림이 다음 쪽으로 밀릴 때 같이 넘어가게)."""
+    import re
+    from pdf2hwpx.hwpx_writer import HwpxWriter
+    from pdf2hwpx.model import Document, ImageEl, Para, Passage, Run
+    img = ImageEl(1, 0, 0, 0, 100, 300, "x", 0)
+    img.png = b"\x89PNG"
+    ps = Passage(1, Para(runs=[Run("※ 다음 글을 읽고 물음에 답하시오.")]),
+                 [Para(runs=[Run("짧은 소개 글입니다.")]), Para(kind="image", image=img)])
+    w = HwpxWriter(Document(source="t", items=[ps]))
+    out = w._passage(ps)
+    pps = [re.search(r'paraPrIDRef="(\d+)"', o).group(1) for o in out]
+    header = w.styles.render_header(1)
+    keep = lambda pid: re.search(rf'<hh:paraPr id="{pid}"[^>]*>.*?keepWithNext="(\d)"', header, re.S).group(1)
+    assert keep(pps[0]) == "1" and keep(pps[1]) == "1"

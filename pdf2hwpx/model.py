@@ -7,6 +7,8 @@ from typing import Optional, Union
 # 원문자 아이콘 이미지가 들어간 자리에 임시로 넣는 사설 영역 문자 시작값.
 ICON_PUA_BASE = 0xE000
 CIRCLED_DIGITS = "①②③④⑤⑥⑦⑧⑨⑩"
+# 줄 안의 빈칸 네모(예: "주제 : [      ]"). 글자 크기 1em마다 한 글자씩 넣어 너비를 전한다.
+BLANK_BOX = "\uF8F0"
 
 
 @dataclass
@@ -39,6 +41,9 @@ class Line:
     lead_size: float  # 첫 글자 조각의 글자 크기(문제 번호 판별용)
     trailing_space: bool = False  # 텍스트 레이어에서 줄이 공백으로 끝남
     box: Optional[int] = None
+    cell: Optional[tuple[float, float]] = None  # 표 칸 안의 줄이면 그 칸의 (왼쪽, 오른쪽)
+    bracket: Optional[int] = None  # [A] 묶음 괄호 안의 줄이면 괄호 id
+    bracket_label: bool = False    # 묶음 괄호 옆의 [A] 표시 줄
 
     @property
     def text(self) -> str:
@@ -61,6 +66,7 @@ class ImageEl:
     xref: int
     box: Optional[int] = None
     png: Optional[bytes] = None  # 렌더링된 PNG (지연 생성)
+    in_cell: bool = False
 
     @property
     def width(self) -> float:
@@ -104,7 +110,61 @@ class PageInfo:
     col_right: tuple[float, float]  # (left, right) of column 1
 
 
-FlowItem = Union[Line, ImageEl, Box]
+@dataclass
+class Cell:
+    row: int
+    col: int
+    rowspan: int
+    colspan: int
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    fill: Optional[str] = None  # 칸 배경색 "#RRGGBB"
+    items: list = field(default_factory=list)  # Line | ImageEl (원문 순서)
+    paras: list = field(default_factory=list)  # IR 단계에서 채움: list[Para]
+
+
+@dataclass
+class TableEl:
+    """선으로 그려진 표. 칸 경계(xs, ys)와 병합된 칸 목록."""
+    page: int
+    col: int
+    xs: list[float]
+    ys: list[float]
+    cells: list[Cell] = field(default_factory=list)
+    box: Optional[int] = None
+
+    @property
+    def x0(self) -> float:
+        return self.xs[0]
+
+    @property
+    def x1(self) -> float:
+        return self.xs[-1]
+
+    @property
+    def y0(self) -> float:
+        return self.ys[0]
+
+    @property
+    def y1(self) -> float:
+        return self.ys[-1]
+
+
+@dataclass
+class Bracket:
+    """지문 왼쪽의 [A] 묶음 괄호: 세로선 + 위/아래 짧은 가로선."""
+    id: int
+    page: int
+    col: int
+    label: str
+    x: float
+    y0: float
+    y1: float
+
+
+FlowItem = Union[Line, ImageEl, Box, TableEl]
 
 
 # ---------------------------------------------------------------- IR -------
@@ -118,13 +178,16 @@ class Run:
 
 @dataclass
 class Para:
-    """출력 문단. kind: text | blank | image."""
+    """출력 문단. kind: text | blank | image | table | bracket."""
     kind: str = "text"
     runs: list[Run] = field(default_factory=list)
     align: str = "LEFT"  # LEFT | CENTER | RIGHT
     indent_pt: float = 0.0  # +: 첫 줄 들여쓰기, -: 내어쓰기
     image: Optional[ImageEl] = None
     role: str = ""  # label | credit | annotation | ...
+    table: Optional["TableEl"] = None    # kind == "table"
+    label: str = ""                      # kind == "bracket": "[A]"
+    children: list = field(default_factory=list)  # kind == "bracket": 괄호 안 문단들
 
     @property
     def text(self) -> str:
@@ -147,6 +210,16 @@ class Choice:
 
 
 @dataclass
+class ChoiceGrid:
+    """표 모양 선택지(머리 ㉠ ㉡ ㉢ + ① 수리함 좋은 사람 늦기 전에 …): 열 위치를 맞춰 보이지 않는 표로 출력."""
+    label_x: float               # 원문자 위치(단 왼쪽 기준, pt)
+    cols_x: list[float]          # 각 열 시작 위치(단 왼쪽 기준, pt)
+    width: float                 # 단 폭(pt)
+    header: list[list["Run"]]    # 열마다 머리 글자(없으면 빈 목록)
+    rows: list[tuple[str, list[list["Run"]]]]  # (원문자, 열마다 글자)
+
+
+@dataclass
 class Question:
     number: int
     stem: Para
@@ -157,6 +230,7 @@ class Question:
     answer: str = ""
     explanation: list[Para] = field(default_factory=list)
     page: int = 0
+    grid: Optional[ChoiceGrid] = None
 
     @property
     def qtype(self) -> str:
