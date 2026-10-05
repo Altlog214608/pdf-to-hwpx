@@ -1,0 +1,4 @@
+pymupdf
+Pillow
+kiwipiepy
+pywin32; platform_system == "Windows"

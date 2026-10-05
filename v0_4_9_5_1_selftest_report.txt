@@ -1,0 +1,34 @@
+v0.4.9.5.1 self-test
+======================
+Base source: uploaded v0_4_9_5_pdf_parser_integrated(1).py
+
+Static checks
+- Python syntax / py_compile: PASS
+- legacy 'import fitz': none introduced; source uses pymupdf as fitz
+
+Linux smoke test with the reference PDF
+- process exit: 0
+- questions: 20/20
+- passage groups: 10
+- problem images: 12/12
+- render pages: 10
+- render items: 297
+- answers/explanations: 20
+- source-order geometry: inherited v0.4.9.5 logic
+- HWPX writer: SKIPPED on Linux as expected (requires Windows + Hancom Hangul)
+
+v0.4.9.5.1 hotfixes
+- one HWP COM render attempt / one RegisterModule call per run
+- production renderer defaults to safe_sequential
+- native MultiColumn path disabled because v0.4.9.5 serialized colCount=1 on the tested Windows result
+- valid HWPX candidate is preserved even if quality checks are WARN
+- prior output.hwpx is not replaced until the new candidate passes package integrity
+- all Contents/section*.xml files are inspected
+- package/content/layout/image-size checks are separated
+- picture object count and width checks are independent
+- recovery candidate is kept instead of deleted when replacement fails
+
+Windows-only final verification required
+- RegisterModule=True with FilePathCheckerModuleExample.dll
+- output.hwpx creation
+- exact picture sizing after Hancom COM serialization

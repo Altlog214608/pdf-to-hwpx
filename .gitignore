@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+
+# Generated HWPX files
+*.hwpx
+
+# Generated result JSON files
+*_result.json
+*_result_*.json
+*_result_pre_hwpx*.json
+
+*.png
+*.jpeg
+
+# Temporary / output folders
+temp/
+tmp/
+output/
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Test PDFs / source documents
+*.pdf

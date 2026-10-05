@@ -1,0 +1,74 @@
+{
+  "version": "v0.4.9.5.21",
+  "source_file": "/mnt/data/v0_4_9_5_21_pdf_parser_integrated.py",
+  "size_bytes": 1240151,
+  "line_count": 28424,
+  "sha256": "105a4aa4adff5f5f66d77d7f635c0fe465dea7693cd56b5093c20d1a73a5a0ed",
+  "tests": {
+    "py_compile": "PASS",
+    "cli_help_refresh_preview": "PASS",
+    "uploaded_25q_regression": {
+      "aux_semantic_prepare": "PASS",
+      "aux_multiline_count": 7,
+      "passage_prepare": "PASS",
+      "passage_repair_count": 2,
+      "finalizer_first": "APPLIED",
+      "validator_first": "PASS",
+      "critical_failures_first": [],
+      "bottom_clearance": "PASS",
+      "choice_clearance": "PASS",
+      "aux_semantic_validation": "PASS",
+      "aux_literal_validation": "PASS",
+      "passage_semantic_validation": "PASS",
+      "passage_literal_validation": "PASS",
+      "column_separator": "PASS",
+      "q1_last_body_next_values": [
+        280,
+        280
+      ],
+      "q14_semantic_lines": [
+        "1. (가)에 나타난 ‘첫사랑’의 과정과 결과를 모두 포함할 것.",
+        "2. (가)의 핵심 시어(‘도전’, ‘황홀’, ‘상처’)를 활용할 것.",
+        "3. 첫사랑의 가치를 긍정적으로 평가하는 관점을 유지할 것.",
+        "글쓰기:",
+        "첫사랑이란 때로 무모한 ㉠와 같다. 수많은 실패의 가능성 속에서도 순수한 열정으로 끊임없는 도전을 멈추지 않고, 마침내 잠시나마 세상을 다 얻은 듯한 황홀경에 빠지게 한다. 비록 그 순간은 짧고 결국 아픈 상처로 남을지라도, 그 기억은 우리를 더 단단하고 아름다운 사람으로 피어나게 하는 소중한 밑거름이 된다."
+      ],
+      "q18_literal_last_line": "- 매화",
+      "idempotent_second_validation": "PASS",
+      "idempotent_size_equal": true,
+      "size_after_first": 70691,
+      "size_after_second": 70691
+    },
+    "stable_20q_regression": {
+      "aux_semantic_prepare": "PASS",
+      "passage_repair_count": 0,
+      "finalizer": "APPLIED",
+      "validator": "PASS",
+      "critical_failures": [],
+      "example_bottom_clearance": "PASS",
+      "column_separator": "PASS",
+      "image_ownership": "PASS",
+      "image_border": "PASS",
+      "image_order": "PASS",
+      "image_unit_consistency": "PASS"
+    },
+    "fresh_linux_parse": {
+      "source": "/mnt/data/v520_e2e/source.pdf",
+      "status": "PASS_TO_HWPX_BOUNDARY",
+      "question_mix": "22 objective / 3 subjective / 14 cross-region",
+      "auxiliary_semantic_status": "PASS",
+      "passage_semantic_status": "PASS",
+      "windows_hancom_com": "SKIPPED_NON_WINDOWS"
+    }
+  },
+  "policy": {
+    "example_top_spacing_hwpunit": 280,
+    "example_bottom_clearance_hwpunit": 280,
+    "literal_dash_writeback": "preserve source literal; canonicalize only for comparison",
+    "semantic_line_preservation": "semantic anchors only, not every PDF physical wrap",
+    "preview_default": false
+  },
+  "limitations": [
+    "Actual fresh Windows Hancom COM generation cannot be executed in this Linux environment; the user-uploaded Windows-generated v5.20 HWPX was structurally finalized and revalidated with v5.21 instead."
+  ]
+}

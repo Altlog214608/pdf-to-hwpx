@@ -1,0 +1,76 @@
+v0.4.9.5.6 self-test report
+================================
+
+Purpose
+- Fix v0.4.9.5.5 final-output update failures caused by Windows/Hangul file locks.
+- Preserve all v0.4.9.5.5 layout improvements: passage boxes, box padding,
+  reduced outer margins, two-column questions/answers, image anchors,
+  and keep-together rules.
+
+Root cause reproduced from user's v0.4.9.5.5 result
+- The compact candidate itself passed validation.
+- Replacing the existing output.hwpx failed with WinError 5/32.
+- Therefore the old output.hwpx remained visible to the user.
+
+v0.4.9.5.6 output architecture
+- Never writes the user-visible final file through Hancom COM.
+- Native HWPX is written to a fresh staging filename.
+- Editorial passage-box/two-column styling is written to a second fresh file.
+- Compact margins/padding/keep-together styling is written directly to a NEW final file.
+- No candidate -> existing final os.replace step.
+- Default final filename: output_v0_4_9_5_6.hwpx.
+- If that filename already exists, _run02, _run03, ... is allocated automatically.
+- Active build/recovery/candidate names derive from the current staging stem,
+  so stale v0_4_9_5_2 filenames are no longer used by the active path.
+
+Static checks
+- Python syntax compile: PASS.
+
+Regression test using user's v0.4.9.5.5 recovery HWPX
+Editorial direct-to-new-file:
+- status: APPLIED
+- passage box: PASS
+- passage guide: PASS
+- question two-column: PASS
+- answer two-column: PASS
+
+Compact direct-to-new-final:
+- status: APPLIED
+- package: PASS
+- passage box: PASS
+- page margins: PASS
+- passage box padding: PASS
+- question keep-together: PASS
+- answer keep-together: PASS
+- image position: PASS
+
+Orchestration self-test with simulated COM stage
+- final status: created
+- editorial finalize: APPLIED
+- compact finalize: APPLIED
+- native/editorial staging files cleaned after success: PASS
+- final file remained as a separate new path: PASS
+
+Reference PDF Linux smoke test
+- process exit: 0
+- questions: 20 / 20
+- passage groups: 10
+- problem images: 12 / 12
+- answers/explanations: 20
+- render pages: 10
+- render items: 307
+- base parser: PASS
+- image pipeline: PASS
+- source order: PASS
+- HWPX COM: SKIPPED (Linux; Windows + Hancom Hangul required)
+
+Expected Windows result
+- final HWPX path should be output_v0_4_9_5_6.hwpx
+  (or output_v0_4_9_5_6_runNN.hwpx if an older file already exists).
+- passage_box_status: PASS
+- page_margin_status: PASS
+- passage_box_padding_status: PASS
+- question_keep_together_status: PASS
+- answer_keep_together_status: PASS
+- image_position_status: PASS
+- compact_finalize_status: APPLIED

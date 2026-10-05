@@ -1,0 +1,112 @@
+{
+  "version": "v0.4.9.5.19",
+  "source_file": "v0_4_9_5_19_pdf_parser_integrated.py",
+  "sha256": "a51915dad2266b073bda68cd7357d22651beb458734597db366e8de39f20ed53",
+  "source_size_bytes": 1086969,
+  "tests": {
+    "python_compile": {
+      "status": "PASS",
+      "command": "python -m py_compile v0_4_9_5_19_pdf_parser_integrated.py"
+    },
+    "cli_help": {
+      "status": "PASS"
+    },
+    "new_2026_1_1_parser": {
+      "status": "PASS",
+      "question_count": 25,
+      "objective_question_count": 22,
+      "subjective_question_count": 3,
+      "cross_page_or_column_question_count": 14,
+      "auxiliary_block_count": 19,
+      "questions_with_auxiliary_blocks": [
+        1,
+        2,
+        3,
+        4,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        16,
+        17,
+        18,
+        21
+      ],
+      "multi_auxiliary_examples": {
+        "16": [
+          "보기",
+          "보기"
+        ],
+        "17": [
+          "보기",
+          "조건"
+        ],
+        "18": [
+          "보기 1",
+          "보기 2"
+        ]
+      },
+      "base_normalized_text_preserved_count": 25,
+      "split_fallback_count": 0,
+      "real_question_y_applied_count": 25,
+      "choice_geometry_count": 110,
+      "synthetic_question_y_removed": true,
+      "atomic_render_plan_status": "PASS"
+    },
+    "uploaded_v5_18_text_preservation_crosscheck": {
+      "status": "PASS",
+      "questions_compared": 25,
+      "full_normalized_text_preserved": 25,
+      "note": "Physical-line structure was aligned whitespace-insensitively, then visible stem/auxiliary text was sliced from the prior normalized text."
+    },
+    "legacy_20_question_regression": {
+      "status": "PASS",
+      "question_count": 20,
+      "auxiliary_block_count": 3,
+      "auxiliary_questions": [
+        2,
+        3,
+        7
+      ],
+      "expected_choice_count": 100,
+      "question_geometry_status": "PASS",
+      "atomic_render_plan_status": "PASS",
+      "atomic_role_mismatch_count": 0
+    },
+    "xml_finalizer_regression_on_known_good_v5_17_hwpx": {
+      "status": "PASS",
+      "finalizer_status": "APPLIED",
+      "feature_local_status": "PASS",
+      "current_v5_19_validator_status": "PASS",
+      "checks": {
+        "question_internal_order": "PASS",
+        "question_choice_order": "PASS",
+        "question_keep_chain": "PASS",
+        "auxiliary_coverage": "PASS",
+        "connected_full_border": "PASS",
+        "dynamic_enter_growth": "PASS",
+        "title_center_alignment": "PASS",
+        "body_left_alignment": "PASS",
+        "no_pre_aux_blank": "PASS",
+        "question_and_answer_column_separator": "PASS",
+        "source_credit_right_alignment": "PASS"
+      }
+    },
+    "linux_full_pipeline": {
+      "status": "PASS_WITH_PLATFORM_SKIP",
+      "parser_status": "PASS",
+      "auxiliary_extraction_status": "PASS",
+      "question_geometry_status": "PASS",
+      "atomic_render_plan_status": "PASS",
+      "pre_hwpx_checkpoint_version": "v0.4.9.5.19",
+      "hancom_hwpx_stage": "SKIPPED",
+      "reported_final_status": "WARN",
+      "reason": "Hancom COM HWPX writer requires Windows/Hancom; HWPX-specific validators are reported as SKIPPED, not PASS/FAIL."
+    }
+  },
+  "windows_hancom_note": "A fresh Windows/Hancom COM serialization of the new 25-question workbook cannot be executed in this Linux environment. First Windows run should be done on the 1-1 PDF before batch-running the remaining six PDFs."
+}

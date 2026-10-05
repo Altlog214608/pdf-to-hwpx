@@ -1,0 +1,55 @@
+v0.4.9.5.4 self-test report
+================================
+
+Base
+- Built cumulatively from the uploaded v0.4.9.5.3 integrated source.
+- Final version: v0.4.9.5.4
+
+Implemented layout changes
+- Adds "※ 다음 글을 읽고 물음에 답하시오." once per passage group.
+- HWPX postprocess makes each guide paragraph bold.
+- Passage paragraphs are assigned connected 0.2 mm solid borders; questions/choices remain outside.
+- Adds one blank paragraph only before later (나)/(다)/(라)/(마) section labels in the same passage.
+- Changes paragraph alignment from JUSTIFY to LEFT during the editorial HWPX pass to prevent stretched inter-word gaps after the XML two-column conversion.
+- Normalizes stale one-column line-segment widths (> 28000 HU) to a two-column reference width (23376 HU).
+- Keeps question section two-column and changes answer section to two-column as well.
+- Question/answer center gutter: 2268 HWPUNIT (~8 mm).
+- Existing InsertPicture Width/Height-only image logic and image-order/anchor validators remain intact.
+
+Static checks
+- python -m py_compile: PASS
+- CLI --help: PASS
+
+Reference PDF Linux smoke test
+- process exit: 0
+- question count: 20
+- passage groups: 10
+- problem images: 12/12
+- guide items inserted into render plan: 10
+- render items: 307 (297 prior items + 10 passage guides)
+- question geometry: PASS
+- source order: PASS
+- base parser: PASS
+- image pipeline: PASS
+- HWPX COM: SKIPPED on Linux, as expected
+
+Section transition check
+- Extra blank-before markers are limited to actual passage labels such as (나)/(다).
+- (중략) is not treated as a passage-change blank-line marker.
+
+HWPX package/editorial postprocess test
+- Tested against the user's hand-edited reference HWPX, which already contains 10 guide paragraphs.
+- editorial postprocess status: APPLIED
+- guide count: 10/10
+- guide bold style: PASS
+- connected passage border style: PASS
+- question two-column: PASS
+- answer two-column policy: PASS
+- center gutter: PASS
+- word-spacing layout check: PASS
+
+Windows-only verification still required
+- Actual visual opening in the user's installed Hancom Hangul build.
+- Final HWPX should report passage_instruction_status=PASS, passage_box_status=PASS,
+  answer_center_gap_status=PASS, word_spacing_layout_status=PASS.
+- Minor page-flow differences can remain because Hangul recomputes fonts/line wrapping by installed version.

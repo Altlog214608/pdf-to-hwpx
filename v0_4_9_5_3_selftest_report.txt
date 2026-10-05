@@ -1,0 +1,63 @@
+v0.4.9.5.3 self-test report
+========================================================================
+code: v0_4_9_5_3_pdf_parser_integrated.py
+code_size_bytes: 386265
+code_sha256: 75eabef199cb76e9318f3577e885e41170b9f056e43b6b62c9ca80cdbdd18e40
+py_compile: PASS
+module_import: PASS
+
+existing v0.4.9.5.2 output(9).hwpx pre-patch validation:
+  package_status: PASS
+  zip_status: PASS
+  layout_status: WARN
+  question_two_column_found: False
+  answer_sections_one_column: True
+  image_order_status: PASS
+  image_anchor_status: PASS
+  image_answer_boundary_status: PASS
+  image_logical_position_status: PASS
+  image_position_status: PASS
+  question_column_break_count: 9
+  question_page_break_count: 9
+  status: WARN
+
+two-column XML candidate patch:
+  status: CREATED
+  applied: True
+  original_col_counts: [1]
+  patched_col_counts: [2]
+  column_break_count: 9
+  page_break_count: 9
+  reason: None
+
+post-patch validation:
+  package_status: PASS
+  zip_status: PASS
+  layout_status: PASS
+  question_two_column_found: True
+  answer_sections_one_column: True
+  image_order_status: PASS
+  image_anchor_status: PASS
+  image_answer_boundary_status: PASS
+  image_logical_position_status: PASS
+  image_position_status: PASS
+  status: PASS
+  section_column_counts: {'Contents/section0.xml': [2], 'Contents/section1.xml': [1]}
+  changed_zip_members: ['Contents/section0.xml']
+  only_section0_changed: True
+  bin_data_unchanged: True
+  mimetype_first_stored: True
+  logical_picture_position_mismatch_count: 0
+
+Linux parser smoke test (--no-kiwi; COM intentionally unavailable):
+  version: v0.4.9.5.3
+  question_count: 20
+  passage_group_count: 10
+  problem_image_saved: 12
+  answer_count: 20
+  source_order_status: PASS
+  hwpx_status: SKIPPED (expected SKIPPED on Linux)
+  validation_status: PASS
+
+Overall static/package regression: PASS
+Windows Hancom COM generation: requires user Windows/Hancom runtime; not executable in this Linux container.

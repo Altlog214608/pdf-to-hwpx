@@ -1,0 +1,101 @@
+V0.4.9.5.9 SELF-TEST REPORT
+============================
+
+Target source
+-------------
+- v0_4_9_5_8_pdf_parser_integrated(1).py
+- cumulative upgrade; existing stable image/two-column/security pipeline retained
+
+Implemented changes
+-------------------
+1. Connected <보기> box
+   - <보기> title paragraph AND the actual example body paragraph receive the same solid borderFill.
+   - Both paragraphs use connect=1.
+   - Final validator checks exact example body text, same border fill, solid four-side border, and connect=1.
+
+2. Atomic question flow for one-column-fit questions
+   - source geometry + conservative reflow estimate determines question height.
+   - if estimated to fit one column: question stem + example title/body + choices ①~⑤ are one keepWithNext chain.
+   - if current column lacks room, Hangul moves the whole question block to the next column/page rather than leaving a partial question.
+
+3. Oversize-only safe splitting
+   - only questions estimated taller than one usable column use split_safe_oversize.
+   - stem/example remain semantically grouped.
+   - each choice has keepLines=1 and breaks are allowed only BETWEEN whole choice paragraphs.
+
+4. Final-HWPX integrity validator
+   - validates all question stems exist.
+   - validates exact ①→②→③→④→⑤ order.
+   - validates <보기> title + full body are contiguous and both inside one connected solid border.
+   - validates atomic/split-safe keepWithNext/keepLines policy from the final HWPX paraPr styles.
+
+5. Cross-page / cross-column metadata
+   - each passage block now stores source_start_page/source_start_column and source_end_page/source_end_column.
+   - crosses_page_or_column flag is derived and validated.
+
+6. Spacing cleanup
+   - fixes confirmed residual cases conservatively, including:
+     * '보기 어려운것은' / '보 기 어려운것은' -> '보기 어려운 것은'
+     * '적절하지 않은것은' -> '적절하지 않은 것은'
+     * '’며인생' -> '’며 인생'
+   - no whole-sentence re-spacing was reintroduced.
+
+7. Underline detector performance
+   - vector-drawing underline scan is limited to passage groups actually referenced by ⓐ~ⓩ / ㉠~㉿ / (a)~(z)-style question markers.
+
+Tests performed
+---------------
+A. Python syntax
+- python -m py_compile v0_4_9_5_9_pdf_parser_integrated.py
+- PASS
+
+B. 문학(01) PDF parser smoke test (Linux, --no-kiwi; Hancom COM unavailable)
+- question detection: PASS, 20 questions
+- structural final status: PASS
+- atomic questions: 20
+- oversize split questions: 0
+- cross-region metadata: PASS, 3 blocks
+- HWPX creation: SKIPPED only because Linux has no Hancom COM
+
+C. 문학(02) PDF parser smoke test (Linux, --no-kiwi; Hancom COM unavailable)
+- question detection: PASS, 20 questions
+- examples detected: 2, 3, 7
+- labelled underline mapping: 5/5 PASS
+- atomic questions: 20
+- oversize split questions: 0
+- cross-region metadata: PASS, 2 blocks
+- residual q8 spacing became '보기 어려운 것은?'
+- HWPX creation: SKIPPED only because Linux has no Hancom COM
+
+D. Real 문학(02) HWPX package postprocess test
+- source: user's v0.4.9.5.8-generated HWPX
+- connected example title paragraphs: 3/3
+- connected example body paragraphs: 3/3
+- connected example box report: PASS
+- atomic question flow report: 20 atomic / 0 oversize
+- final question_integrity_status: PASS
+- final example_integrity_status: PASS
+- final underline_status: PASS
+- final image_position_status: PASS
+- final continuous_flow_status: PASS
+- overall package validator: PASS
+
+E. Real 문학(01) HWPX regression test
+- connected example title/body: 1/1
+- question_integrity_status: PASS
+- example_integrity_status: PASS
+- underline_status: PASS
+- image_position_status: PASS
+- overall package validator: PASS
+
+F. Synthetic oversize policy test
+- forced q1 estimated target height: 1466.4 pt
+- mode: split_safe_oversize
+- stem keepWithNext=0 (no example)
+- each ①~⑤ choice keepLines=1 / keepWithNext=0
+- final question_integrity_status: PASS
+- proves oversize blocks split only between whole choice paragraphs.
+
+Important platform note
+-----------------------
+The actual Hancom COM writer cannot run in this Linux environment. The final Windows run still needs to be performed on a machine with Hancom Hangul + pywin32. However, the new XML semantic postprocessor and validator were executed against the real user-generated HWPX packages and passed.

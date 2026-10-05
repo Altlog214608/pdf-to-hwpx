@@ -1,0 +1,4 @@
+pymupdf
+kiwipiepy
+pillow
+pywin32

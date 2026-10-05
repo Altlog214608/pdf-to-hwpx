@@ -1,0 +1,34 @@
+V0.4.9.1 self-test report
+=========================
+
+1. Syntax compile: PASS
+2. Actual sample PDF parse: PASS
+   - questions: 20/20
+   - passage groups: 10
+   - problem images saved: 12/12
+   - render pages: 10
+   - render items: 298
+   - table candidates in this Linux/PyMuPDF environment: 9
+   - base parser validation: PASS
+3. Legacy metadata cleanup: PASS
+   - hwpx_v0481 / validation_v0481 / hwpx_v049 / validation_v049 removed from final schema
+   - crop_v045 / crop_v046 / mapping_v045 removed from canonical image assets
+4. Deprecated `import fitz`: removed from integrated source
+5. HWPX COM execution: SKIPPED in Linux test environment (requires Windows + Hancom Hangul)
+6. HWPX ZIP validator regression test against previously generated 3.9 MB Hancom HWPX: PASS
+   - ZIP valid
+   - required HWPX members present
+   - mimetype = application/hwp+zip and stored first
+   - XML parse PASS
+   - BinData images: 12/12
+   - member count: 23
+
+Windows v0.4.9.1 behavior added:
+- Hangul window visible so external-access permission prompts are not hidden.
+- No duplicate v0.4.8.1 HWPX generation.
+- Build to temporary HWPX and replace output.hwpx only after validation PASS.
+- Existing output.hwpx preserved when new rendering fails.
+- Page/column/image/table progress logs flush immediately.
+- COM error stores stage/page/column/item/operation context.
+- Rich two-column renderer retries once with safe sequential renderer on failure.
+- Pre-HWPX JSON checkpoint is saved before COM automation starts.

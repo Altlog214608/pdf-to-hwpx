@@ -1,0 +1,36 @@
+{
+  "version": "v0.4.9.5.17",
+  "source_file": "/mnt/data/v0_4_9_5_17_pdf_parser_integrated.py",
+  "size_bytes": 967163,
+  "line_count": 23098,
+  "sha256": "d663dadeba99d747a58f255d3e4f646e8924f3188a1be3bbfee2a1051e1529bf",
+  "tests": {
+    "py_compile": "PASS",
+    "cli_refresh_preview_option": "PASS",
+    "historical_preview_roundtrip_suppression": "PASS",
+    "suppressed_functions_restored_after_base_call": "PASS",
+    "current_validator_on_uploaded_v516_hwpx": "PASS",
+    "current_validator_version": "v0.4.9.5.17",
+    "example_dynamic_growth_status": "PASS",
+    "section_label_coverage_status": "PASS",
+    "passage_image_ownership_status": "PASS",
+    "linux_opt_in_safe_skip": "PASS",
+    "linux_opt_in_output_folder_candidate_created": false,
+    "default_upgrade_preview_status": "DISABLED_BY_DEFAULT",
+    "default_upgrade_preview_sync_status": "NOT_REQUESTED",
+    "default_upgrade_output_folder_only_final_hwpx": true,
+    "default_upgrade_final_validation": "PASS"
+  },
+  "preview_policy": {
+    "default_resave": false,
+    "opt_in_flag": "--refresh-preview",
+    "candidate_location": "temporary directory outside final output folder",
+    "com_release_before_candidate_action": true,
+    "candidate_validator": "v0.4.9.5.17",
+    "failed_candidate_remains_in_output_folder": false
+  },
+  "limitations": [
+    "Windows Hancom COM Preview round-trip cannot be executed in this Linux environment; Windows branch is guarded and Linux safe-skip was tested.",
+    "The uploaded v5.16 HWPX was revalidated with the new v5.17 validator and passed."
+  ]
+}

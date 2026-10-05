@@ -1,0 +1,49 @@
+v0.4.9.5.2 self-test report
+================================
+
+Base
+- Built cumulatively from uploaded v0.4.9.5.1 integrated source.
+- Final version stamp: v0.4.9.5.2
+
+Static checks
+- Python syntax compile: PASS
+- active FindCtrl() calls: 0
+- active CurSelectedCtrl references: 0
+- native column API: HParameterSet.HColDef
+- one render attempt / one HWP COM session design: enabled
+
+Regression validator test against user's output(8).hwpx
+- package_status: PASS
+- picture_object_count: 12
+- image_order_status: FAIL
+- image_anchor_status: FAIL
+- image_answer_boundary_status: FAIL
+- pictures_after_answer_count: 1
+- detected misplaced filename: group_09_q17-18_fig_02.png
+- detected paragraph index: 388
+This confirms the new validator catches the exact trailing-image regression.
+
+Synthetic repaired-order validator test
+- image_order_status: PASS
+- image_anchor_status: PASS
+- image_answer_boundary_status: PASS
+- image_position_status: PASS
+- overall validator status: PASS
+
+Linux smoke test with the reference PDF
+- process exit: 0
+- questions: 20 / 20
+- passage groups: 10
+- problem images: 12 / 12
+- render pages: 10
+- render items: 297
+- answers/explanations: 20
+- base validation: PASS
+- image validation: PASS
+- source-order validation: PASS
+- HWPX COM: SKIPPED (Linux environment; Windows + Hancom Hangul required)
+
+Windows-only verification still required
+- HColDef MultiColumn serialization to actual colCount=2
+- final output.hwpx image_order_status / image_anchor_status / image_answer_boundary_status
+- unattended Hancom security registration on the user's installed Hangul build
