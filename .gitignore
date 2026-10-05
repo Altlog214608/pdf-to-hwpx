@@ -17,6 +17,7 @@ venv/
 
 *.png
 *.jpeg
+*.zip
 
 # Temporary / output folders
 temp/
