@@ -108,3 +108,32 @@ def test_plain_answer_format(tmp_path):
     assert [qs[n]["answer"] for n in (1, 2, 3, 5)] == ["③", "⑤", "①", "①"]
     assert qs[5]["after"] == [] or all(a.get("text", "") != "1) 정답" for a in qs[5]["after"])
     assert qs[1]["explanation"][0] == "오답 point"
+
+
+def test_doc_style_masterpage(tmp_path):
+    """글꼴/크기와 바탕쪽(학원 이름·로고, 제목, 바깥 테두리) 옵션."""
+    import zipfile
+    import pymupdf as fitz
+    from pdf2hwpx.style import DocStyle
+
+    pdf = tmp_path / "s.pdf"
+    build(str(pdf))
+    d = fitz.open()
+    pg = d.new_page(width=120, height=24)
+    pg.draw_rect(pg.rect, color=(0, 0, 0), fill=(0, 0, 0))
+    logo = pg.get_pixmap().tobytes("png")
+    for logo_bytes, name in ((None, "김한춘국어전문학원"), (logo, "")):
+        st = DocStyle(body_font="나눔명조", body_size=11, title="[중간 대비] 합성 시험", academy_name=name,
+                      logo=logo_bytes, frame=True)
+        res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=st)
+        assert res["validation"]["status"] == "PASS", res["validation"]
+        with zipfile.ZipFile(res["hwpx"]) as z:
+            names = z.namelist()
+            header = z.read("Contents/header.xml").decode("utf-8")
+            sec0 = z.read("Contents/section0.xml").decode("utf-8")
+            mp = z.read("Contents/masterpage0.xml").decode("utf-8")
+        assert "Contents/masterpage0.xml" in names and "Contents/masterpage1.xml" in names
+        assert 'face="나눔명조"' in header and '<hh:charPr id="0" height="1100"' in header
+        assert '<hp:masterPage idRef="masterpage0"/>' in sec0 and 'masterPageCnt="1"' in sec0
+        assert "[중간 대비] 합성 시험" in mp and 'textWrap="BEHIND_TEXT"' in mp
+        assert (name in mp) if name else ("<hp:pic" in mp)

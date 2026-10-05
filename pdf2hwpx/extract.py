@@ -75,6 +75,7 @@ class Extraction:
     body_size: float
     doc: fitz.Document
     stats: dict = field(default_factory=dict)
+    header_texts: list = field(default_factory=list)
 
     def render(self, page: int, rect: tuple[float, float, float, float]) -> bytes:
         p = self.doc[page - 1]
@@ -284,6 +285,7 @@ def extract(pdf_path: str) -> Extraction:
                 and not k[0].startswith("※")}
 
     pages: list[PageModel] = []
+    header_texts: list[tuple[int, str, float, float]] = []  # 머리글/배너 영역 글자(제목 후보용)
     icon_digests: dict[str, str] = {}
     all_sizes: list[float] = []
     stats = Counter()
@@ -305,6 +307,8 @@ def extract(pdf_path: str) -> Extraction:
             txt = "".join(g.c for g in f.glyphs).strip()
             if f.cy <= top or f.cy >= bottom:
                 stats["dropped_band_text"] += 1
+                if txt:
+                    header_texts.append((pno, txt, f.size, f.y0))
                 continue
             if (f.y1 <= 0.12 * H or f.y0 >= 0.88 * H) and (_repeat_key(f) in repeated or re.fullmatch(r"-\s*\d+\s*-", txt)):
                 stats["dropped_repeated_text"] += 1
@@ -492,7 +496,9 @@ def extract(pdf_path: str) -> Extraction:
             it.png = None
     stats["pages"] = len(pages)
     stats["boxes"] = sum(1 for it in flow if isinstance(it, Box))
-    return Extraction(pdf_path, pages, flow, icon_digests, body_size, doc, dict(stats))
+    ex = Extraction(pdf_path, pages, flow, icon_digests, body_size, doc, dict(stats))
+    ex.header_texts = header_texts
+    return ex
 
 
 TITLE_RE = re.compile(r"^\s*[<〈＜《]\s*[^<>〈〉＜＞]{1,14}\s*[>〉＞》]\s*$")

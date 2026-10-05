@@ -12,6 +12,7 @@ from .extract import extract
 from .hwpx_writer import HwpxWriter
 from .ir import build_document
 from .ir_json import document_to_json
+from .style import DocStyle
 from .validate import validate
 
 
@@ -36,7 +37,8 @@ def _preview_png(ex) -> Optional[bytes]:
 
 
 def convert(pdf_path: str, out_dir: Optional[str] = None, overwrite: bool = False,
-            write_json: bool = True, debug: bool = False, hwpx_path: Optional[str] = None) -> dict:
+            write_json: bool = True, debug: bool = False, hwpx_path: Optional[str] = None,
+            style: Optional[DocStyle] = None) -> dict:
     pdf = Path(pdf_path)
     if not pdf.exists():
         raise FileNotFoundError(pdf_path)
@@ -46,7 +48,7 @@ def convert(pdf_path: str, out_dir: Optional[str] = None, overwrite: bool = Fals
 
     ex = extract(str(pdf))
     doc = build_document(ex)
-    writer = HwpxWriter(doc, preview_png=_preview_png(ex))
+    writer = HwpxWriter(doc, preview_png=_preview_png(ex), style=style)
     write_stats = writer.write(str(out))
     report = validate(ex, doc, str(out))
     result = {

@@ -98,6 +98,20 @@ def read_hwpx(path: str) -> dict:
                 boxed = bool(bf_solid.get(prop.get("bf"))) and prop.get("connect") == "1"
                 out["paragraphs"].append({"section": sec, "pp": pid, "text": text, "pics": pics,
                                           "boxed": boxed, "bf": prop.get("bf"), "align": prop.get("align")})
+        for n in names:  # 바탕쪽(학원 로고 등)의 그림도 센다
+            if re.match(r"Contents/masterpage\d+\.xml", n) and n in xml_parts:
+                out["pictures"] += len(list(xml_parts[n].iter(f"{{{NS['hp']}}}pic")))
+        out["masterpages"] = len([n for n in names if re.match(r"Contents/masterpage\d+\.xml", n)])
+        refs = set()
+        for n, root in xml_parts.items():
+            if n.startswith("Contents/section") or n.startswith("Contents/masterpage"):
+                refs |= {e.get("binaryItemIDRef") for e in root.iter("{http://www.hancom.co.kr/hwpml/2011/core}img")}
+        items = {}
+        if hpf is not None:
+            items = {it.get("id"): it.get("href") for it in hpf.iter(f"{{{NS['opf']}}}item")}
+        out["image_refs_missing"] = sorted(r for r in refs if items.get(r) not in names)
+        out["bindata_unreferenced"] = sorted(n for n in names if n.startswith("BinData/") and n not in
+                                             {items.get(r) for r in refs})
         out["bindata"] = len([n for n in names if n.startswith("BinData/")])
     return out
 
@@ -221,8 +235,11 @@ def validate(ex: Extraction, doc: Document, hwpx_path: str) -> dict:
     # ---- 그림 ----
     checks["pictures"] = hx["pictures"]
     checks["bindata"] = hx["bindata"]
-    if hx["pictures"] != hx["bindata"]:
-        causes.append(f"그림 개체 수 {hx['pictures']} != BinData {hx['bindata']}")
+    if hx.get("image_refs_missing"):
+        causes.append(f"그림이 가리키는 파일이 없음: {hx['image_refs_missing'][:3]}")
+    if hx.get("bindata_unreferenced"):
+        causes.append(f"쓰이지 않는 그림 파일: {hx['bindata_unreferenced'][:3]}")
+    checks["masterpages"] = hx.get("masterpages", 0)
 
     status = "FAIL" if causes else ("WARN" if warns else "PASS")
     return {"status": status, "root_causes": causes, "warnings": warns, "checks": checks}

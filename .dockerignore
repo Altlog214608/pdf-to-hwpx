@@ -1,0 +1,9 @@
+.git
+**/__pycache__
+tests
+docs
+*.pdf
+*.hwpx
+*_result*.json
+.venv
+venv
