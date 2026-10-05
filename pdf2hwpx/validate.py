@@ -174,9 +174,11 @@ def validate(ex: Extraction, doc: Document, hwpx_path: str) -> dict:
     if doc.answers and len(doc.answers) != len(qs):
         causes.append(f"정답 수({len(doc.answers)}) != 문제 수({len(qs)})")
     checks["answer_count"] = len(doc.answers)
+    checks["loose_items"] = doc.loose_notes[:20]  # 문제/지문 밖 내용(단원 제목 박스 등) — 경고 아님
 
     # ---- 박스 ----
-    expected_aux = sum(1 for q in qs for b in q.blocks if isinstance(b, AuxBlock))
+    expected_aux = sum(1 for q in qs for b in q.blocks + q.after if isinstance(b, AuxBlock)) \
+        + sum(1 for it in doc.items if isinstance(it, AuxBlock))
     expected_passage = sum(1 for p in doc.passages if p.boxed and p.paras)
     groups = []
     cur = None

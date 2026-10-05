@@ -72,3 +72,20 @@ def test_hwpx_package(result):
     for i, p in enumerate(sec0[:-1]):
         if p["boxed"] and not sec0[i + 1]["boxed"]:
             assert sec0[i + 1]["text"] == "" or re.match(r"^\d+\.", sec0[i + 1]["text"]), sec0[i + 1]
+
+
+def test_v051_review_fixes(result):
+    qs = {q["number"]: q for q in _items(result, "question")}
+    # 문제 옆 장식 배지는 그림으로 들어가지 않는다
+    assert all(b.get("kind") != "image" for b in qs[1]["blocks"])
+    # 서술형 하위 문항은 줄마다 쪼개지지 않고 한 문단
+    subs = [b for b in qs[4]["blocks"] if b.get("kind") == "text"]
+    assert len(subs) == 1 and subs[0]["text"].startswith("(2)") and subs[0]["text"].endswith("서술하시오.")
+    # 선택지 뒤에 나온 단원 제목 박스는 선택지 뒤에 그대로 (선택지 앞으로 끌려오지 않음)
+    assert qs[5]["blocks"][-1]["title"] == "<보기 2>"
+    assert qs[5]["after"] and qs[5]["after"][0]["type"] == "aux"
+    assert qs[5]["after"][0]["paras"][0]["text"] == "2. 서사 갈래의 이해"
+    # [A] 표시는 시 행에 붙지 않는다
+    p1 = _items(result, "passage")[0]
+    texts = [p.get("text", "") for p in p1["paras"]]
+    assert "[A]" in texts and "나는 오래 너를 기다렸다" in texts

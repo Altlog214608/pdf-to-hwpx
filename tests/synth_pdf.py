@@ -186,15 +186,23 @@ def build(path: str) -> dict:
         rows[-1] = ((lambda y, words=words, ind=ind: w.justified(words, w.left + 5 + ind, w.right - 2.3, y + 9, last=True)), 13.4)
     rows.append(row_text(DIALOG, 8.0))
     rows.append(row_text("(나)"))
-    for ln in POEM:
-        rows.append(row_text(ln) if ln else ((lambda y: None), 19.0))
+    for k, ln in enumerate(POEM):
+        if k == 1:  # 시 행 왼쪽에 붙은 [A] 표시
+            rows.append(((lambda y, ln=ln: (w.text(w.left + 5, y + 9, "[A]"), w.text(w.left + 45, y + 9, ln))), 13.4))
+        else:
+            rows.append(row_text(ln, 23.0) if ln else ((lambda y: None), 19.0))
     credit = "- 홍길동, 「시험」"
     rows.append(((lambda y: w.text(w.right - 2.3 - tl(credit), y + 9, credit)), 13.4))
     boxed_split(w, rows)
 
-    def question(n: int, stem: str):
+    badge = _picture_png(74, 40, (0.85, 0.45, 0.3))
+
+    def question(n: int, stem: str, with_badge: bool = False):
         if w.y > BOTTOM - 120:
             w.next_col()
+        if with_badge:  # 문제 위의 '빈출' 배지(장식 그림)
+            w.page.insert_image(fitz.Rect(w.right - 37, w.y - 2, w.right, w.y + 18), stream=badge, keep_proportion=False)
+            w.y += 20
         w.text(w.left, w.y + 14, f"{n}.", 13.7)
         w.text(w.left + (24 if n < 10 else 30), w.y + 13, stem)
         w.y += 24
@@ -216,7 +224,7 @@ def build(path: str) -> dict:
                 w.y += 16
         w.y += 20
 
-    question(1, "(가)와 (나)에 대해 고른 것은?")
+    question(1, "(가)와 (나)에 대해 고른 것은?", with_badge=True)
     choices(["ㄱ, ㄴ", "ㄱ, ㄷ", "ㄴ, ㄷ", "ㄴ, ㄹ", "ㄷ, ㄹ"], two_per_line=True)
 
     # ---------- 2번: <보기> 안의 그림 ----------
@@ -254,6 +262,11 @@ def build(path: str) -> dict:
             ((lambda y: w.text(w.left + 5, y + 9, "- 작품의 주제를 먼저 언급할 것.")), 13.4),
             ((lambda y: w.text(w.left + 5, y + 9, "- 인물의 행동을 근거로 들 것.")), 13.4)]
     boxed_lines(w, rows)
+    sub = "(2) 위에서 답한 장면이 작품 전체의 주제를 드러내는 데 어떤 역할을 하는지 구체적인 근거를 들어 서술하시오."
+    for words, at_space, ind in w.wrap(sub, 226.8 - 20, cont_indent=12.0):
+        w.justified([*words[:-1], words[-1] + (" " if at_space else "")], w.left + 8 + ind, w.right - 2.3, w.y + 9, last=not at_space)
+        w.y += 13.4
+    w.y += 12
 
     # ---------- 지문 2: 그림만 있는 지문 ----------
     if w.y > BOTTOM - 260:
@@ -283,6 +296,11 @@ def build(path: str) -> dict:
             ((lambda y: w.page.insert_image(fitz.Rect(w.left + 30, y, w.left + 170, y + 70), stream=pic)), 74.0)]
     boxed_lines(w, rows)
     choices(["생동감이 커진다.", "갈등이 사라진다.", "시점이 바뀐다.", "배경이 바뀐다.", "주제가 바뀐다."])
+    rows = [((lambda y: w.text(w.left + 5, y + 9, "2. 서사 갈래의 이해")), 13.4),
+            ((lambda y: w.text(w.left + 5, y + 9, "(1) 단원 제목 박스")), 13.4)]
+    if w.y > BOTTOM - 60:
+        w.next_col()
+    boxed_lines(w, rows)
 
     # ---------- 정답 및 해설 ----------
     w.new_page()

@@ -423,13 +423,13 @@ def extract(pdf_path: str) -> Extraction:
             if b and im.x0 >= b.x0 - 3 and im.x1 <= b.x1 + 3:
                 im.box = b.id
                 b.items.append(im)
+        # 박스 밖의 작은 그림(‘빈출’ 배지 등 편집 장식)은 내용이 아니다
+        small = [im for im in content_imgs if im.box is None and im.height < 26 and im.width < 120]
+        if small:
+            stats["dropped_decorative_image"] += len(small)
+            content_imgs = [im for im in content_imgs if im not in small]
         for b in boxes:
             n = 0
-            for k, s in enumerate(underline_segs):
-                if k in used_underlines:
-                    continue
-                if b.x0 + 2 < s.x0 and s.x1 < b.x1 - 2 and b.y0 + 2 < s.y0 < b.y1 - 2:
-                    n += 1
             for s in segs:
                 if s.vertical and b.x0 + 3 < s.x0 < b.x1 - 3 and b.y0 - 1 <= s.y0 and s.y1 <= b.y1 + 1:
                     n += 1
@@ -512,7 +512,9 @@ def _split_far_fragments(frags: list[_Frag]) -> list[list[_Frag]]:
         prev = out[-1][-1]
         first = next((g for g in f.glyphs if not g.is_space), None)
         starts_marker = first is not None and (first.icon is not None or first.c in "①②③④⑤⑥⑦⑧⑨⑩")
-        if f.x0 - prev.x1 > 3.0 * max(f.size, prev.size) and not starts_marker:
+        side_label = any(re.fullmatch(r"\s*\[[A-Z가-힣]\]\s*", "".join(g.c for g in x.glyphs)) for x in (f, prev))
+        gap = f.x0 - prev.x1
+        if (gap > 3.0 * max(f.size, prev.size) and not starts_marker) or (side_label and gap > 0.8 * f.size):
             out.append([f])
         else:
             out[-1].append(f)

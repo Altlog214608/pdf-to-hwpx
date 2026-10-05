@@ -198,14 +198,13 @@ class Builder:
             p.indent_pt = round(r0 - self.rx(lines[1]), 1)
         else:
             p.indent_pt = round(r0 - base_left, 1) if r0 - base_left > 0.4 * first.size else 0.0
-        cx = (first.x0 + first.x1) / 2
         if len(lines) <= 2 and all(l.x1 >= right - tol for l in lines) and first.x0 > left + 0.3 * width:
             p.align = "RIGHT"
             p.indent_pt = 0.0
             if re.match(r"^\s*[-–—]", p.text):
                 p.role = "credit"
-        elif len(lines) == 1 and abs(cx - (left + right) / 2) < 0.06 * width and first.x0 > left + 0.15 * width \
-                and first.x1 < right - 0.15 * width:
+        elif len(lines) == 1 and abs((first.x0 - left) - (right - first.x1)) < 0.04 * width \
+                and first.x0 > left + 0.15 * width:  # 좌우 여백이 같을 때만 가운데 정렬
             p.align = "CENTER"
             p.indent_pt = 0.0
         if LABEL_RE.match(p.text):
@@ -402,10 +401,10 @@ def build_document(ex: Extraction) -> Document:
             continue
         # 문제/지문 밖의 내용도 버리지 않는다
         if isinstance(it, Box):
-            doc.items.extend(b.paragraphs(it.all_items()))
+            doc.items.append(b.aux_from_box(it))
         else:
             doc.items.extend(b.paragraphs([it]))
-        doc.warnings.append(f"문제/지문에 속하지 않은 내용(p{it.page}): {getattr(it, 'text', '[그림/박스]')[:30]}")
+        doc.loose_notes.append(f"p{it.page}: {getattr(it, 'text', '[그림/박스]')[:30]}")
         i += 1
 
     # 정답/해설
@@ -434,7 +433,8 @@ def build_document(ex: Extraction) -> Document:
         "objective": sum(1 for q in doc.questions if q.qtype == "objective"),
         "subjective": sum(1 for q in doc.questions if q.qtype == "subjective"),
         "passages": len(doc.passages),
-        "aux_blocks": sum(1 for q in doc.questions for x in q.blocks if isinstance(x, AuxBlock)),
+        "aux_blocks": sum(1 for q in doc.questions for x in q.blocks + q.after if isinstance(x, AuxBlock)),
+        "loose_items": len(doc.loose_notes),
         "answers": len(doc.answers),
         "icon_labels": {d[:8]: l for d, l in labels.items()},
         "expected_questions_found": headers and len(headers) == len(doc.answers),
@@ -465,46 +465,59 @@ def _choice_split(ln: Line) -> list[Line]:
 
 
 def _build_question(b: Builder, number: int, items: list, passage: Optional[Passage]) -> Question:
+    """원문 순서를 지킨다: 발문 -> (보조박스/그림/기타 문단) -> 선택지 -> (선택지 뒤에 나온 내용)."""
     header: Line = items[0]
     stem_lines = [header]
     blocks: list = []
+    after: list = []
     choice_lines: list[list[Line]] = []
+    pending: list = []  # 박스/그림 사이의 일반 줄 (한꺼번에 문단으로 묶는다)
     state = "stem"
-    after: list[Para] = []
+
+    def target() -> list:
+        return after if state == "after" else blocks
+
+    def flush():
+        if pending:
+            target().extend(b.paragraphs(list(pending)))
+            pending.clear()
+
     for it in items[1:]:
-        if isinstance(it, Box):
-            state = "blocks"
-            blocks.append(b.aux_from_box(it))
-            continue
-        if isinstance(it, ImageEl):
-            state = "blocks" if state == "stem" else state
-            blocks.append(Para(kind="image", image=it, align="CENTER"))
+        if isinstance(it, (Box, ImageEl)):
+            if state == "choices" and len(choice_lines) >= 5:
+                state = "after"  # 선택지가 끝난 뒤의 박스/그림은 선택지 앞으로 끌어오지 않는다
+            flush()
+            if state in ("stem", "choices"):
+                state = "blocks" if state == "stem" else state
+            dst = after if state == "after" else blocks
+            dst.append(b.aux_from_box(it) if isinstance(it, Box) else Para(kind="image", image=it, align="CENTER"))
             continue
         for ln in _choice_split(it):
             t = ln.text.lstrip()
-            if t[:1] in CIRCLED_DIGITS:
+            if t[:1] in CIRCLED_DIGITS and state != "after":
+                flush()
                 choice_lines.append([ln])
                 state = "choices"
             elif state == "choices" and choice_lines:
                 prev = choice_lines[-1][-1]
-                far = (prev.page, prev.col) == (ln.page, ln.col) and ln.y0 - prev.y0 > 2.5 * ln.size
+                far = (prev.page, prev.col) != (ln.page, ln.col) or ln.y0 - prev.y0 > 2.5 * ln.size
                 if len(choice_lines) >= 5 and (far or not b._is_full(prev)):
-                    after.extend(b.paragraphs([ln]))
+                    state = "after"
+                    pending.append(ln)
                 else:
                     choice_lines[-1].append(ln)
             elif state == "stem":
                 stem_lines.append(ln)
             else:
-                blocks.extend(b.paragraphs([ln]))
+                pending.append(ln)
+    flush()
     stem = b.single_para(stem_lines, bold=True)
     choices = []
     for cl in choice_lines:
         p = b.single_para(cl)
-        label = p.text.lstrip()[:1]
-        choices.append(Choice(label, p))
-    q = Question(number=number, stem=stem, passage_id=passage.id if passage else None,
-                 blocks=blocks, choices=choices, after=after, page=header.page)
-    return q
+        choices.append(Choice(p.text.lstrip()[:1], p))
+    return Question(number=number, stem=stem, passage_id=passage.id if passage else None,
+                    blocks=blocks, choices=choices, after=after, page=header.page)
 
 
 def _build_answers(b: Builder, lines: list[Line]) -> list[AnswerEntry]:
@@ -549,10 +562,12 @@ def _iter_images(doc: Document):
         if isinstance(it, Passage):
             yield from from_paras(it.paras)
         elif isinstance(it, Question):
-            for b in it.blocks:
+            for b in it.blocks + it.after:
                 if isinstance(b, AuxBlock):
                     yield from from_paras(b.paras)
                 else:
                     yield from from_paras([b])
+        elif isinstance(it, AuxBlock):
+            yield from from_paras(it.paras)
         elif isinstance(it, Para):
             yield from from_paras([it])

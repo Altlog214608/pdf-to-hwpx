@@ -152,7 +152,7 @@ class Question:
     passage_id: Optional[int]
     blocks: list[Union[AuxBlock, Para]] = field(default_factory=list)  # 보조박스/그림/기타 문단 (원문 순서)
     choices: list[Choice] = field(default_factory=list)
-    after: list[Para] = field(default_factory=list)  # 선택지 뒤에 남은 문단(드묾)
+    after: list = field(default_factory=list)  # 선택지 뒤에 나온 문단/박스/그림 (원문 순서)
     answer: str = ""
     explanation: list[Para] = field(default_factory=list)
     page: int = 0
@@ -181,11 +181,12 @@ class AnswerEntry:
 @dataclass
 class Document:
     source: str
-    items: list[Union[Passage, Question]] = field(default_factory=list)
+    items: list = field(default_factory=list)  # Passage | Question | AuxBlock | Para (원문 순서)
     answers: list[AnswerEntry] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
-    image_only_lines: list = field(default_factory=list)  # 도식 박스처럼 그림으로 대체된 원문 줄
+    image_only_lines: list = field(default_factory=list)
+    loose_notes: list[str] = field(default_factory=list)  # 문제/지문 밖 내용(단원 제목 등) 기록  # 도식 박스처럼 그림으로 대체된 원문 줄
 
     @property
     def questions(self) -> list[Question]:

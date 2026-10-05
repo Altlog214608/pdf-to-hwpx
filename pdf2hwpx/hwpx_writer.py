@@ -231,19 +231,25 @@ class HwpxWriter:
         out = [self._p(stem_pp, self._runs_xml(q.stem.runs, True))]
         n_blocks = len(q.blocks)
         for i, b in enumerate(q.blocks):
-            last = i == n_blocks - 1 and not q.choices
-            if isinstance(b, AuxBlock):
-                out.extend(self._aux(b, last))
-            elif b.kind == "image":
-                out.append(self._p(S.derive(PP["choice"], align="CENTER", left=0, intent=0), self._pic(b.image, IMG_MAX_FREE)))
-            elif b.kind == "text":
-                out.append(self._p(S.derive(PP["choice"], left=0, intent=0), self._runs_xml(b.runs)))
+            out.extend(self._block(b, i == n_blocks - 1 and not q.choices and not q.after))
         for i, c in enumerate(q.choices):
             base = PP["choice_last"] if i == len(q.choices) - 1 else PP["choice"]
             out.append(self._p(S.derive(base, left=1100, intent=-1430), self._runs_xml(c.para.runs)))
-        for p in q.after:
-            out.append(self._p(PP["plain"], self._runs_xml(p.runs)))
+        for i, b in enumerate(q.after):
+            out.extend(self._block(b, i == len(q.after) - 1))
         return out
+
+    def _block(self, b, last: bool) -> list[str]:
+        """문제 안의 보조박스/그림/일반 문단 (선택지 앞이든 뒤든 같은 규칙)."""
+        S = self.styles
+        if isinstance(b, AuxBlock):
+            return self._aux(b, last)
+        if b.kind == "image":
+            return [self._p(S.derive(PP["choice"], align="CENTER", left=0, intent=0), self._pic(b.image, IMG_MAX_FREE))]
+        if b.kind == "text":
+            ov = {"align": b.align} if b.align in ("RIGHT", "CENTER") else {"intent": _indent_hwp(b.indent_pt)}
+            return [self._p(S.derive(PP["choice"], left=0, **ov), self._runs_xml(b.runs))]
+        return []
 
     def _answers(self) -> list[str]:
         S = self.styles
@@ -278,6 +284,9 @@ class HwpxWriter:
                 prev_passage = True
             elif isinstance(it, Question):
                 body.extend(self._question(it, prev_passage))
+                prev_passage = False
+            elif isinstance(it, AuxBlock):
+                body.extend(self._aux(it, True))
                 prev_passage = False
             elif isinstance(it, Para):
                 if it.kind == "image":

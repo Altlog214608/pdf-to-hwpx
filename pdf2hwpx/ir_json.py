@@ -22,6 +22,13 @@ def _para(p: Para) -> dict:
     return d
 
 
+def _block(b) -> dict:
+    if isinstance(b, AuxBlock):
+        return {"type": "aux", "title": b.title, "kind": b.kind, "diagram": b.diagram is not None,
+                "paras": [_para(p) for p in b.paras]}
+    return _para(b)
+
+
 def document_to_json(doc: Document) -> dict:
     items = []
     for it in doc.items:
@@ -29,18 +36,14 @@ def document_to_json(doc: Document) -> dict:
             items.append({"type": "passage", "id": it.id, "boxed": it.boxed, "questions": it.question_numbers,
                           "guide": it.guide.text if it.guide else "", "paras": [_para(p) for p in it.paras]})
         elif isinstance(it, Question):
-            blocks = []
-            for b in it.blocks:
-                if isinstance(b, AuxBlock):
-                    blocks.append({"type": "aux", "title": b.title, "kind": b.kind, "diagram": b.diagram is not None,
-                                   "paras": [_para(p) for p in b.paras]})
-                else:
-                    blocks.append(_para(b))
+            blocks = [_block(b) for b in it.blocks]
             items.append({"type": "question", "number": it.number, "qtype": it.qtype, "passage": it.passage_id,
                           "stem": it.stem.text, "blocks": blocks,
                           "choices": [c.para.text for c in it.choices], "answer": it.answer,
                           "explanation": [p.text for p in it.explanation if p.kind == "text"],
-                          "after": [p.text for p in it.after]})
+                          "after": [_block(b) for b in it.after]})
+        elif isinstance(it, AuxBlock):
+            items.append({"type": "loose_box", **_block(it)})
         elif isinstance(it, Para):
             items.append({"type": "loose", **_para(it)})
-    return {"items": items, "warnings": doc.warnings}
+    return {"items": items, "warnings": doc.warnings, "loose_items": doc.loose_notes}
