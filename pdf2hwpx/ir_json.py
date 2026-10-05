@@ -52,7 +52,10 @@ def document_to_json(doc: Document) -> dict:
                           "choices": [c.para.text for c in it.choices],
                           "choice_credits": {c.label: [x.text for x in c.extra] for c in it.choices if c.extra}, "answer": it.answer,
                           "explanation": [p.text for p in it.explanation if p.kind == "text"],
-                          "after": [_block(b) for b in it.after]})
+                          "after": [_block(b) for b in it.after],
+                          **({"grid": {"header": ["".join(r.text for r in h) for h in it.grid.header],
+                                       "rows": [[lab] + ["".join(r.text for r in c) for c in cells]
+                                                for lab, cells in it.grid.rows]}} if it.grid else {})})
         elif isinstance(it, AuxBlock):
             items.append({"type": "loose_box", **_block(it)})
         elif isinstance(it, Para):

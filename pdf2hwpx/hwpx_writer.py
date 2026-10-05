@@ -21,6 +21,7 @@ from .masterpage import MARGINS_WITH_MASTER, PAPER_W, Logo, MasterIds, build_mas
 from .model import AnswerEntry, AuxBlock, Document, ImageEl, Para, Passage, Question, Run, TableEl
 from .style import DocStyle
 
+SUBJECTIVE_BLANK_LINES = 2  # 서술형 문제 뒤 답 쓰는 빈 줄 수
 PT_TO_HWP = 110  # PDF pt -> HWPUNIT (원본 9.1pt 글자 ≈ 출력 10pt 글자 비율)
 DEFAULT_MARGINS = {"header": 1134, "footer": 1134, "left": 2268, "right": 2268, "top": 2268, "bottom": 2268}
 COL_GAP = 2268
@@ -379,8 +380,10 @@ class HwpxWriter:
                 row.append(self._tc(0, 0, 1, n, label_w, 1000 * n, none_bf, lab, (0, 0, 0, 0)))
                 row.append(self._tc(1, 0, 1, n, tick_w, 1000 * n, tick_bf,
                                     self._note_p(0, '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>'), (0, 0, 0, 0)))
+            # 한 칸 한 문단이면 줄 간격(150%)이 칸 사이에 생기지 않으므로 위/아래 여백으로 채운다
+            gap = int(round(250 * self.scale))
             row.append(self._tc(2, i, 1, 1, text_w, 1000, none_bf, self._cell_paras([c], text_w - 300, base, ov),
-                                (200, 0, 0, 0), valign="TOP"))
+                                (200, 0, gap, gap), valign="TOP"))
             rows.append(row)
         return self._tbl(rows, 3, label_w + tick_w + text_w, 1000 * n, none_bf)
 
@@ -497,7 +500,10 @@ class HwpxWriter:
         n_blocks = len(q.blocks)
         for i, b in enumerate(q.blocks):
             out.extend(self._block(b, i == n_blocks - 1 and not q.choices and not q.after))
-        for i, c in enumerate(q.choices):
+        use_grid = q.grid is not None and not any(c.extra for c in q.choices)
+        if use_grid:
+            out.append(self._choice_grid(q))
+        for i, c in enumerate(q.choices if not use_grid else []):
             base = PP["choice_last"] if i == len(q.choices) - 1 else PP["choice"]
             if c.extra:  # 출전 줄이 뒤따르면 선택지 문단은 다음 줄과 붙어 있게
                 base = PP["choice"]
@@ -508,7 +514,34 @@ class HwpxWriter:
                 out.append(self._p(S.derive(xb, align="RIGHT", left=1100, intent=0), self._runs_xml(x.runs)))
         for i, b in enumerate(q.after):
             out.extend(self._block(b, i == len(q.after) - 1))
+        if q.qtype == "subjective":  # 서술형: 답을 쓸 빈 줄
+            out.extend(self._empty(PP["plain"]) for _ in range(SUBJECTIVE_BLANK_LINES))
         return out
+
+    def _choice_grid(self, q: Question) -> str:
+        """표 모양 선택지: 머리(㉠ ㉡ ㉢)와 각 선택지 칸을 원본 열 위치에 맞춘 테두리 없는 표."""
+        S, g = self.styles, q.grid
+        none_bf = S.add_border_fill(sides_on=())
+        span = max(1.0, g.width - g.label_x)
+        kk = min(PT_TO_HWP, (self.col_w - 300) / span)
+        left = int(round(g.label_x * kk))
+        edges = [g.label_x] + list(g.cols_x) + [g.width]
+        widths = [max(600, int(round((b - a) * kk))) for a, b in zip(edges, edges[1:])]
+        pad = int(round(180 * self.scale))
+        center = S.derive(0, align="CENTER")
+        rows: list[list[str]] = []
+        all_rows = ([("", g.header)] if any(g.header) else []) + list(g.rows)
+        for r, (lab, cells) in enumerate(all_rows):
+            row = [self._tc(0, r, 1, 1, widths[0], 1000, none_bf,
+                            self._note_p(0, self._runs_xml([Run(lab)]) if lab else '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>'),
+                            (0, 0, pad, pad))]
+            for j, runs in enumerate(cells):
+                inner = self._runs_xml(runs) if runs else '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>'
+                row.append(self._tc(j + 1, r, 1, 1, widths[j + 1], 1000, none_bf, self._note_p(center, inner),
+                                    (0, 0, pad, pad)))
+            rows.append(row)
+        tbl = self._tbl(rows, len(widths), sum(widths), 1000 * len(rows), none_bf)
+        return self._p(S.derive(PP["choice_last"], left=left, intent=0), tbl)
 
     def _block(self, b, last: bool) -> list[str]:
         """문제 안의 보조박스/그림/일반 문단 (선택지 앞이든 뒤든 같은 규칙)."""

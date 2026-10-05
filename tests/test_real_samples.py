@@ -98,4 +98,4 @@ def test_jokbo_tables_and_brackets(tmp_path):
     assert " " in qs[17]["choices"][4] and qs[17]["choices"][4].endswith("정책을 결정한 후에")
     brackets = [p for x in doc["items"] if x["type"] == "passage" for p in x["paras"] if p["kind"] == "bracket"]
     assert [b["label"] for b in brackets] == ["[A]", "[B]", "[A]"]
-    assert res["validation"]["checks"]["tables"] >= 9  # 표 6 + 괄호 3
+    assert res["validation"]["checks"]["tables"] >= 10  # 표 6 + 괄호 3 + 선택지 격자 1

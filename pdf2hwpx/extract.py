@@ -764,7 +764,7 @@ def extract(pdf_path: str) -> Extraction:
         flow: list[FlowItem] = []
         for col in (0, 1):
             items: list = [b for b in boxes if b.col == col]
-            items += [ln for ln in lines if ln.col == col and ln.box is None]
+            items += [ln for ln in lines if ln.col == col and ln.box is None and ln.cell is None]
             items += [im for im in content_imgs if im.col == col and im.box is None]
             items += [t for t in tables if t.col == col and t.box is None]
             items.sort(key=lambda it: (it.y0, it.x0))
@@ -831,8 +831,11 @@ def _split_far_fragments(frags: list[_Frag]) -> list[list[_Frag]]:
             out.append([f])
         else:
             out[-1].append(f)
-    # 짧은 조각 3개 이상이 한 줄에 띄엄띄엄 있으면(표 모양 선택지의 머리 ㉠ ㉡ ㉢ 등) 한 줄로 둔다
-    if len(out) >= 3 and all(len("".join(g.c for x in grp for g in x.glyphs).strip()) <= 12 for grp in out) \
+    # 짧은 조각이 한 줄에 띄엄띄엄 있으면(표 모양 선택지의 머리 ㉠ ㉡ ㉢ 등) 한 줄로 둔다.
+    # 2개뿐이면 더 짧은 조각(기호 수준)만, 출전(- 작가)이나 [A] 표시는 제외
+    texts = ["".join(g.c for x in grp for g in x.glyphs).strip() for grp in out]
+    limit = 12 if len(out) >= 3 else 6
+    if len(out) >= 2 and all(len(t) <= limit for t in texts) and not any(t.startswith(("-", "–", "—")) for t in texts) \
             and not any(re.fullmatch(r"\s*\[[A-Z가-힣]\]\s*", "".join(g.c for g in x.glyphs)) for grp in out for x in grp):
         return [[x for grp in out for x in grp]]
     return out

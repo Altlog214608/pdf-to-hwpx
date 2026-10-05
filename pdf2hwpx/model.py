@@ -208,6 +208,16 @@ class Choice:
 
 
 @dataclass
+class ChoiceGrid:
+    """표 모양 선택지(머리 ㉠ ㉡ ㉢ + ① 수리함 좋은 사람 늦기 전에 …): 열 위치를 맞춰 보이지 않는 표로 출력."""
+    label_x: float               # 원문자 위치(단 왼쪽 기준, pt)
+    cols_x: list[float]          # 각 열 시작 위치(단 왼쪽 기준, pt)
+    width: float                 # 단 폭(pt)
+    header: list[list["Run"]]    # 열마다 머리 글자(없으면 빈 목록)
+    rows: list[tuple[str, list[list["Run"]]]]  # (원문자, 열마다 글자)
+
+
+@dataclass
 class Question:
     number: int
     stem: Para
@@ -218,6 +228,7 @@ class Question:
     answer: str = ""
     explanation: list[Para] = field(default_factory=list)
     page: int = 0
+    grid: Optional[ChoiceGrid] = None
 
     @property
     def qtype(self) -> str:

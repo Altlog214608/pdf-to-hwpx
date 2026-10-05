@@ -209,13 +209,25 @@ def test_tables_and_brackets(tmp_path):
     assert cells[(2, 1)]["paras"][0]["kind"] == "image"
     assert all(p.get("align") == "CENTER" for c in t["cells"] for p in c["paras"] if p["kind"] == "text")
     # 표 모양 선택지: 칸 사이 간격을 전각 공백으로 살리고 한 선택지로 유지
-    assert len(q["choices"]) == 5 and " " in q["choices"][0] and q["choices"][0].endswith("남풍")
+    assert len(q["choices"]) == 5 and "\u2003" in q["choices"][0] and q["choices"][0].endswith("남풍")
+    # 머리(㉠ ㉡)와 선택지 열을 맞춘 보이지 않는 표로 출력, 머리 줄은 따로 남지 않는다
+    assert q["grid"]["header"] == ["㉠", "㉡"] and q["grid"]["rows"][0] == ["①", "보리", "남풍"]
+    assert not any(b.get("text", "").startswith("㉠") for b in q["blocks"])
 
     with zipfile.ZipFile(res["hwpx"]) as z:
         sec = z.read("Contents/section0.xml").decode("utf-8")
         header = z.read("Contents/header.xml").decode("utf-8")
-    assert sec.count("<hp:tbl ") == 2 and v["checks"]["tables"] == 2
+    assert sec.count("<hp:tbl ") == 3 and v["checks"]["tables"] == 3  # 괄호, 표, 선택지 격자
     assert 'rowSpan="2"' in sec and 'treatAsChar="1"' in sec
     # 괄호 칸: 왼쪽/위/아래 선만 있는 테두리( [ 모양 )
     assert re.search(r'<hh:leftBorder type="SOLID"[^>]*/><hh:rightBorder type="NONE"[^>]*/><hh:topBorder type="SOLID"'
                      r'[^>]*/><hh:bottomBorder type="SOLID"', header)
+
+
+def test_subjective_space_and_subitems(result):
+    """서술형 문제 뒤에 답 쓸 빈 줄."""
+    from pdf2hwpx.hwpx_writer import SUBJECTIVE_BLANK_LINES
+    hx = read_hwpx(result["hwpx"])
+    texts = [p["text"] for p in hx["paragraphs"] if p["section"].endswith("section0.xml")]
+    i = next(k for k, t in enumerate(texts) if t.startswith("(2) 위에서 답한"))  # 4번(서술형)의 마지막 문단
+    assert texts[i + 1:i + 1 + SUBJECTIVE_BLANK_LINES] == [""] * SUBJECTIVE_BLANK_LINES
