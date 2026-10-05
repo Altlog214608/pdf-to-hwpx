@@ -1,0 +1,10 @@
+# pdf-to-hwpx — 작업 규칙
+
+- 현재 버전은 `pdf2hwpx/` 패키지(v0.5)와 실행 파일 `v0_5_pdf_to_hwpx.py`. `v0_4_9_5_*.py`는 과거 버전(수정하지 않음).
+- 단계: extract(PDF→페이지 모델) → ir(논리 구조) → hwpx_writer(순수 XML) → validate. 단계 경계를 지킬 것.
+- HWPX는 후처리 패치 없이 IR에서 한 번에 생성한다. 스타일은 `pdf2hwpx/template/header.xml`의 검증된 id를
+  재사용하고 변형은 `Styles.derive()`로만 추가한다.
+- 특정 PDF 한 개만 맞추는 하드코딩 금지. 기하(좌표) 기반 규칙으로 일반화하고, 합성 PDF 테스트(`tests/synth_pdf.py`)에
+  해당 특징을 추가해 회귀를 막는다.
+- 변경 후: `python -m pytest tests -q` (실제 PDF가 있으면 `PDF2HWPX_SAMPLES=폴더`).
+- 사용자는 Windows PowerShell 한 줄 명령을 선호한다. 한글(Hancom)에서 실제로 열어 보는 확인은 사용자가 한다.
