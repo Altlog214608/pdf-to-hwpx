@@ -108,3 +108,73 @@ def test_plain_answer_format(tmp_path):
     assert [qs[n]["answer"] for n in (1, 2, 3, 5)] == ["③", "⑤", "①", "①"]
     assert qs[5]["after"] == [] or all(a.get("text", "") != "1) 정답" for a in qs[5]["after"])
     assert qs[1]["explanation"][0] == "오답 point"
+
+
+def test_doc_style_masterpage(tmp_path):
+    """글꼴/크기와 바탕쪽(학원 이름·로고, 제목, 바깥 테두리) 옵션."""
+    import zipfile
+    import pymupdf as fitz
+    from pdf2hwpx.style import DocStyle
+
+    pdf = tmp_path / "s.pdf"
+    build(str(pdf))
+    d = fitz.open()
+    pg = d.new_page(width=120, height=24)
+    pg.draw_rect(pg.rect, color=(0, 0, 0), fill=(0, 0, 0))
+    logo = pg.get_pixmap().tobytes("png")
+    for logo_bytes, name in ((None, "김한춘국어전문학원"), (logo, "")):
+        st = DocStyle(body_font="나눔명조", body_size=11, title="[중간 대비] 합성 시험", academy_name=name,
+                      logo=logo_bytes, frame=True)
+        res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=st)
+        assert res["validation"]["status"] == "PASS", res["validation"]
+        with zipfile.ZipFile(res["hwpx"]) as z:
+            names = z.namelist()
+            header = z.read("Contents/header.xml").decode("utf-8")
+            sec0 = z.read("Contents/section0.xml").decode("utf-8")
+            mp = z.read("Contents/masterpage0.xml").decode("utf-8")
+        assert "Contents/masterpage0.xml" in names and "Contents/masterpage1.xml" in names
+        assert 'face="나눔명조"' in header and '<hh:charPr id="0" height="1100"' in header
+        assert '<hp:masterPage idRef="masterpage0"/>' in sec0 and 'masterPageCnt="1"' in sec0
+        assert "[중간 대비] 합성 시험" in mp and 'textWrap="BEHIND_TEXT"' in mp
+        assert (name in mp) if name else ("<hp:pic" in mp)
+
+
+def test_answers_as_endnotes_and_title_color(tmp_path):
+    """정답·해설을 각 문제 첫 줄에 연결된 미주로(수작업 시험지 방식), 제목 글자 색."""
+    import re
+    import zipfile
+    from pdf2hwpx.style import DocStyle
+
+    pdf = tmp_path / "s.pdf"
+    build(str(pdf))
+    st = DocStyle(title="[중간 대비] 합성", title_color="#666666", answers_as_endnotes=True)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=st)
+    v = res["validation"]
+    assert v["status"] == "PASS", v
+    assert v["checks"]["endnotes"] == v["checks"]["answer_count"] == 5
+    with zipfile.ZipFile(res["hwpx"]) as z:
+        names = z.namelist()
+        header = z.read("Contents/header.xml").decode("utf-8")
+        sec0 = z.read("Contents/section0.xml").decode("utf-8")
+    assert "Contents/section1.xml" not in names and "Contents/masterpage1.xml" not in names
+    assert re.search(r'<hh:charPr id="\d+" height="1400" textColor="#666666"', header)
+    # 미주 표시는 문제 첫 문단 맨 앞, 1pt 흰 글자로 숨김
+    hidden = re.search(r'<hh:charPr id="(\d+)" height="100" textColor="#FFFFFF"', header).group(1)
+    notes = re.findall(rf'<hp:run charPrIDRef="{hidden}"><hp:ctrl><hp:endNote number="(\d+)"', sec0)
+    assert notes == ["1", "2", "3", "4", "5"]
+    # 미주 본문: 자동 번호 `1)`이 원래 정답 줄의 번호를 대신하고, 나머지 정답 글자는 그대로
+    first = re.search(r"<hp:endNote .*?</hp:endNote>", sec0, re.S).group(0)
+    text = "".join(re.findall(r"<hp:t>([^<]*)</hp:t>", first))
+    assert '<hp:autoNum num="1" numType="ENDNOTE">' in first and "③" in text and not text.lstrip().startswith("1)")
+    assert "[정답 및 해설]" not in sec0
+
+    # 문제 번호가 연속이 아니면(미주 자동 번호와 어긋남) 문서 끝 정답으로 되돌리고 알린다
+    from pdf2hwpx.hwpx_writer import HwpxWriter
+    from pdf2hwpx.model import Question
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.ir import build_document
+    doc = build_document(extract(str(pdf)))
+    qs = [it for it in doc.items if isinstance(it, Question)]
+    qs[-1].number = 9
+    w = HwpxWriter(doc, style=DocStyle(answers_as_endnotes=True))
+    assert w.endnotes is None and any("미주" in x for x in doc.warnings)

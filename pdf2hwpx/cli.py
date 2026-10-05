@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import VERSION
 from .convert import convert
+from .style import DocStyle
 
 
 def _expand(inputs: list[str]) -> list[Path]:
@@ -29,12 +30,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--overwrite", action="store_true", help="같은 이름 HWPX가 있으면 덮어쓰기 (기본: _run02.. 새 이름)")
     ap.add_argument("--no-json", action="store_true", help="결과 JSON을 쓰지 않음")
     ap.add_argument("--debug", action="store_true", help="JSON에 줄 단위 추출 정보 포함")
+    ap.add_argument("--font", default="함초롬바탕", help="본문 글꼴 (기본: 함초롬바탕)")
+    ap.add_argument("--size", type=float, default=10.0, help="본문 글자 크기 pt (기본: 10)")
+    ap.add_argument("--title", default="", help="바탕쪽 제목, 예: \"[중간 대비] 2. 품격을 높이는 언어생활 ①\"")
+    ap.add_argument("--academy", default="", help="바탕쪽 학원 이름(검은 칸 흰 글씨)")
+    ap.add_argument("--logo", help="학원 로고 그림 파일(PNG/JPG). 지정하면 학원 이름 대신 사용")
+    ap.add_argument("--frame", action="store_true", help="페이지 바깥 네모 테두리")
+    ap.add_argument("--title-color", default="#000000", help="제목 글자 색, 예: #555555")
+    ap.add_argument("--endnotes", action="store_true", help="정답·해설을 각 문제에 연결된 미주로 넣기")
     args = ap.parse_args(argv)
     try:  # Windows 콘솔(cp949)에서 특수 문자 때문에 멈추지 않게
         sys.stdout.reconfigure(errors="replace")  # type: ignore[attr-defined]
     except Exception:
         pass
 
+    logo = Path(args.logo).read_bytes() if args.logo else None
+    style = DocStyle(body_font=args.font, body_size=args.size, title=args.title, academy_name=args.academy,
+                     logo=logo, frame=args.frame, title_color=args.title_color,
+                     answers_as_endnotes=args.endnotes).validate()
     pdfs = _expand(args.inputs)
     if not pdfs:
         print("입력 PDF가 없습니다.", file=sys.stderr)
@@ -45,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         t0 = time.time()
         try:
             res = convert(str(pdf), out_dir=args.out_dir, overwrite=args.overwrite,
-                          write_json=not args.no_json, debug=args.debug)
+                          write_json=not args.no_json, debug=args.debug, style=style)
         except Exception as e:  # 한 파일 실패가 일괄 실행을 멈추지 않게
             rows.append({"file": pdf.name, "status": "ERROR", "error": f"{type(e).__name__}: {e}"})
             worst = max(worst, 2)

@@ -17,12 +17,13 @@ from importlib import resources
 from typing import Optional
 from xml.sax.saxutils import escape
 
-from .model import AuxBlock, Document, ImageEl, Para, Passage, Question, Run
+from .masterpage import MARGINS_WITH_MASTER, PAPER_W, Logo, MasterIds, build_masterpage
+from .model import AnswerEntry, AuxBlock, Document, ImageEl, Para, Passage, Question, Run
+from .style import DocStyle
 
 PT_TO_HWP = 110  # PDF pt -> HWPUNIT (원본 9.1pt 글자 ≈ 출력 10pt 글자 비율)
-COL_WIDTH = 26362  # A4, 여백 2268, 단 간격 2268 기준 단 폭(HWPUNIT)
-IMG_MAX_IN_BOX = COL_WIDTH - 3000
-IMG_MAX_FREE = COL_WIDTH - 600
+DEFAULT_MARGINS = {"header": 1134, "footer": 1134, "left": 2268, "right": 2268, "top": 2268, "bottom": 2268}
+COL_GAP = 2268
 
 # 템플릿 문단 모양 id
 PP = {
@@ -34,6 +35,23 @@ PP = {
 }
 # 템플릿 글자 모양 id
 CP = {"body": 0, "body_ul": 8, "guide": 7, "bold": 9, "bold_ul": 10}
+
+
+ANSWER_NUM_RE = re.compile(r"^\s*\d{1,2}\s*\)\s*")
+
+
+def _strip_prefix(runs: list[Run], pat: re.Pattern) -> list[Run]:
+    """글자 모양을 유지한 채 runs 앞부분에서 pat에 맞는 글자를 지운다(정답 줄의 `1)` 등)."""
+    m = pat.match("".join(r.text for r in runs))
+    cut = m.end() if m else 0
+    out = []
+    for r in runs:
+        if cut >= len(r.text):
+            cut -= len(r.text)
+            continue
+        out.append(Run(r.text[cut:], bold=r.bold, underline=r.underline) if cut else r)
+        cut = 0
+    return out
 
 
 def _tpl(name: str) -> str:
@@ -49,6 +67,57 @@ class Styles:
         self.next_para = max(self.para_xml) + 1
         self.new_paras: list[str] = []
         self.cache: dict[tuple, int] = {}
+        self.char_xml: dict[int, str] = {int(m.group(1)): m.group(0) for m in
+                                         re.finditer(r'<hh:charPr id="(\d+)".*?</hh:charPr>', header_xml, re.S)}
+        self.new_chars: list[str] = []
+        self.bf_ids = [int(x) for x in re.findall(r'<hh:borderFill id="(\d+)"', header_xml)]
+        self.new_bfs: list[str] = []
+
+    # ---- 글꼴/글자 크기 (템플릿: 글꼴 0 = 제목용 돋움, 1 = 본문용 바탕) ----
+    def set_fonts(self, body_font: str, title_font: str) -> None:
+        def repl(m: re.Match) -> str:
+            fid = m.group(1)
+            face = body_font if fid == "1" else title_font if fid == "0" else None
+            if face is None:
+                return m.group(0)
+            return re.sub(r'face="[^"]*"', f'face="{escape(face, {chr(34): "&quot;"})}"', m.group(0), count=1)
+        self.header = re.sub(r'<hh:font id="(\d+)" face="[^"]*"', repl, self.header)
+
+    def set_char_height(self, char_ids: list[int], height: int) -> None:
+        for cid in char_ids:
+            old = self.char_xml[cid]
+            new = re.sub(r' height="\d+"', f' height="{height}"', old, count=1)
+            self.header = self.header.replace(old, new)
+            self.char_xml[cid] = new
+
+    def add_char(self, base: int, height: int, color: str = "#000000", bold: bool = True,
+                 font_id: int = 0) -> int:
+        x = self.char_xml[base]
+        cid = max(self.char_xml) + 1
+        x = re.sub(r'<hh:charPr id="\d+"', f'<hh:charPr id="{cid}"', x, count=1)
+        x = re.sub(r' height="\d+"', f' height="{height}"', x, count=1)
+        x = re.sub(r'textColor="#[0-9A-Fa-f]{6}"', f'textColor="{color}"', x, count=1)
+        x = re.sub(r'<hh:fontRef [^>]*/>', '<hh:fontRef ' + " ".join(
+            f'{k}="{font_id}"' for k in ("hangul", "latin", "hanja", "japanese", "other", "symbol", "user")) + '/>', x, count=1)
+        x = re.sub(r'<hh:underline type="\w+"', '<hh:underline type="NONE"', x, count=1)
+        x = x.replace("<hh:bold/>", "")
+        if bold:
+            x = x.replace("</hh:charPr>", "<hh:bold/></hh:charPr>")
+        self.char_xml[cid] = x
+        self.new_chars.append(x)
+        return cid
+
+    def add_border_fill(self, width: str = "0.12 mm", fill: Optional[str] = None) -> int:
+        bid = max(self.bf_ids) + 1
+        self.bf_ids.append(bid)
+        sides = "".join(f'<hh:{s}Border type="SOLID" width="{width}" color="#000000"/>' for s in ("left", "right", "top", "bottom"))
+        brush = (f'<hc:fillBrush><hc:winBrush faceColor="{fill}" hatchColor="#999999" alpha="0"/></hc:fillBrush>'
+                 if fill else "")
+        self.new_bfs.append(
+            f'<hh:borderFill id="{bid}" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0">'
+            '<hh:slash type="NONE" Crooked="0" isCounter="0"/><hh:backSlash type="NONE" Crooked="0" isCounter="0"/>'
+            f'{sides}<hh:diagonal type="SOLID" width="0.1 mm" color="#000000"/>{brush}</hh:borderFill>')
+        return bid
 
     def derive(self, base: int, **ov) -> int:
         """템플릿 문단 모양 base를 복제하고 일부 속성만 바꾼 새 id를 돌려준다."""
@@ -86,8 +155,14 @@ class Styles:
         h = self.header
         if self.new_paras:
             h = h.replace("</hh:paraProperties>", "".join(self.new_paras) + "</hh:paraProperties>")
+        if self.new_chars:
+            h = h.replace("</hh:charProperties>", "".join(self.new_chars) + "</hh:charProperties>")
+        if self.new_bfs:
+            h = h.replace("</hh:borderFills>", "".join(self.new_bfs) + "</hh:borderFills>")
         n = len(self.para_xml)
         h = re.sub(r'<hh:paraProperties itemCnt="\d+"', f'<hh:paraProperties itemCnt="{n}"', h)
+        h = re.sub(r'<hh:charProperties itemCnt="\d+"', f'<hh:charProperties itemCnt="{len(self.char_xml)}"', h)
+        h = re.sub(r'<hh:borderFills itemCnt="\d+"', f'<hh:borderFills itemCnt="{len(self.bf_ids)}"', h)
         h = re.sub(r'secCnt="\d+"', f'secCnt="{sec_cnt}"', h)
         return h
 
@@ -98,13 +173,71 @@ def _indent_hwp(pt: float, lo: int = -3000, hi: int = 3000) -> int:
 
 
 class HwpxWriter:
-    def __init__(self, doc: Document, preview_png: Optional[bytes] = None):
+    def __init__(self, doc: Document, preview_png: Optional[bytes] = None, style: Optional[DocStyle] = None):
         self.doc = doc
+        self.style = (style or DocStyle()).validate()
         self.styles = Styles(_tpl("header.xml"))
         self.images: list[tuple[str, bytes]] = []
         self.preview_png = preview_png
         self._rng = random.Random(20260)
         self.stats = {"aux_boxes": 0, "passage_boxes": 0, "spacers": 0, "pictures": 0, "paragraphs": 0}
+        st = self.style
+        # 글꼴/크기: 본문 글자 모양(0, 7, 8, 9, 10)은 모두 글꼴 1을 쓴다
+        self.styles.set_fonts(st.body_font, st.title_font)
+        self.scale = st.body_size / 10.0
+        self.styles.set_char_height([CP["body"], CP["body_ul"], CP["guide"], CP["bold"], CP["bold_ul"]],
+                                    int(round(st.body_size * 100)))
+        self.margins = dict(MARGINS_WITH_MASTER if st.uses_masterpage else DEFAULT_MARGINS)
+        col_w = (PAPER_W - self.margins["left"] - self.margins["right"] - COL_GAP) // 2
+        self.img_max_in_box = col_w - 3000
+        self.img_max_free = col_w - 600
+        self.master_ids: Optional[MasterIds] = None
+        self.logo: Optional[Logo] = None
+        if st.uses_masterpage:
+            S = self.styles
+            self.master_ids = MasterIds(
+                frame_bf=S.add_border_fill(), black_bf=S.add_border_fill(fill="#000000"),
+                title_cp=S.add_char(CP["bold"], int(st.title_size * 100), color=st.title_color, font_id=0),
+                academy_cp=S.add_char(CP["bold"], int(st.title_size * 100), color="#FFFFFF", font_id=0),
+                center_pp=S.derive(0, align="CENTER"), plain_pp=0, plain_cp=0)
+            if st.logo:
+                self.logo = self._add_logo(st.logo)
+        self.endnotes = self._plan_endnotes()
+        self.hidden_cp = (self.styles.add_char(CP["body"], 100, color="#FFFFFF", bold=False, font_id=1)
+                          if self.endnotes else None)
+
+    def _plan_endnotes(self) -> Optional[dict[int, AnswerEntry]]:
+        """미주 번호는 한글이 1, 2, 3…으로 자동으로 매기므로 문제 번호가 연속이고 모든 문제에 정답이 있을 때만 쓴다."""
+        if not self.style.answers_as_endnotes or not self.doc.answers:
+            return None
+        nums = [it.number for it in self.doc.items if isinstance(it, Question)]
+        ans = {a.number: a for a in self.doc.answers}
+        reason = None
+        if not nums:
+            reason = "문제를 찾지 못함"
+        elif nums != list(range(nums[0], nums[0] + len(nums))):
+            reason = "문제 번호가 연속이 아님"
+        elif len(ans) != len(self.doc.answers) or set(ans) != set(nums):
+            reason = "정답 번호와 문제 번호가 일치하지 않음"
+        if reason:
+            self.doc.warnings.append(f"정답을 미주로 넣지 못하고 문서 끝에 모았습니다({reason}).")
+            self.stats["endnotes"] = 0
+            return None
+        self.stats["endnotes"] = len(nums)
+        return ans
+    def _add_logo(self, data: bytes) -> Optional[Logo]:
+        try:
+            import pymupdf as fitz
+            pix = fitz.Pixmap(data)
+            png = pix.tobytes("png")
+        except Exception:
+            return None
+        name = f"image{len(self.images) + 1}"
+        self.images.append((name, png))
+        return Logo(name, pix.width, pix.height)
+
+    def _hang(self, v: int) -> int:
+        return int(round(v * self.scale / 10.0)) * 10
 
     # ------------------------------------------------------------ xml ----
     def _runs_xml(self, runs: list[Run], base_bold: bool = False) -> str:
@@ -175,7 +308,7 @@ class HwpxWriter:
                 out.append(self._empty(S.derive(base, **ov)))
                 continue
             if p.kind == "image":
-                out.append(self._p(S.derive(base, align="CENTER", **ov), self._pic(p.image, IMG_MAX_IN_BOX)))
+                out.append(self._p(S.derive(base, align="CENTER", **ov), self._pic(p.image, self.img_max_in_box)))
                 continue
             if p.role == "label" and ps.boxed:
                 pp = PP["passage_label"]
@@ -208,7 +341,7 @@ class HwpxWriter:
             if i == 0 and not blk.title:
                 ov.update(prev=280, offset_top=120)
             if p.kind == "image":
-                out.append(self._p(S.derive(base, align="CENTER", intent=0, **ov), self._pic(p.image, IMG_MAX_IN_BOX)))
+                out.append(self._p(S.derive(base, align="CENTER", intent=0, **ov), self._pic(p.image, self.img_max_in_box)))
                 continue
             if p.kind == "blank":
                 out.append(self._empty(S.derive(base, **ov)))
@@ -223,12 +356,38 @@ class HwpxWriter:
         self.stats["spacers"] += 1
         return out
 
+    def _note_p(self, pp: int, inner: str) -> str:
+        return (f'<hp:p id="2147483648" paraPrIDRef="{pp}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+                f'{inner}</hp:p>')
+
+    def _endnote(self, a: AnswerEntry) -> str:
+        """문제 첫 줄 앞에 숨긴(1pt 흰 글자) 미주 표시를 넣고, 정답·해설은 미주 본문으로 문서 끝에 모은다.
+        수작업 시험지와 같은 방식: 미주 번호 `1)`이 원래 정답 줄의 번호를 대신한다."""
+        S = self.styles
+        num = a.number
+        auto = (f'<hp:run charPrIDRef="{CP["body"]}"><hp:ctrl><hp:autoNum num="{num}" numType="ENDNOTE">'
+                '<hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/>'
+                '</hp:autoNum></hp:ctrl><hp:t> </hp:t></hp:run>')
+        head_runs = _strip_prefix(a.head.runs, ANSWER_NUM_RE)
+        paras = [self._note_p(PP["ans_head"], auto + (self._runs_xml(head_runs) if head_runs else ""))]
+        for p in a.paras:
+            if p.kind != "text":
+                continue
+            paras.append(self._note_p(S.derive(PP["ans_expl"], left=0, intent=_indent_hwp(p.indent_pt)),
+                                      self._runs_xml(p.runs, base_bold=p.role == "heading")))
+        inst = self._rng.randint(10 ** 9, 2 * 10 ** 9)
+        return (f'<hp:run charPrIDRef="{self.hidden_cp}"><hp:ctrl><hp:endNote number="{num}" suffixChar="41" instId="{inst}">'
+                '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" '
+                'linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">'
+                f'{"".join(paras)}</hp:subList></hp:endNote></hp:ctrl></hp:run>')
+
     def _question(self, q: Question, first_after_passage: bool) -> list[str]:
         S = self.styles
         digits = len(str(q.number))
-        hang = 1400 if digits == 1 else 1950
+        hang = self._hang(1400 if digits == 1 else 1950)
         stem_pp = S.derive(PP["stem_first"] if first_after_passage else PP["stem"], intent=-hang)
-        out = [self._p(stem_pp, self._runs_xml(q.stem.runs, True))]
+        note = self._endnote(self.endnotes[q.number]) if self.endnotes else ""
+        out = [self._p(stem_pp, note + self._runs_xml(q.stem.runs, True))]
         n_blocks = len(q.blocks)
         for i, b in enumerate(q.blocks):
             out.extend(self._block(b, i == n_blocks - 1 and not q.choices and not q.after))
@@ -236,7 +395,7 @@ class HwpxWriter:
             base = PP["choice_last"] if i == len(q.choices) - 1 else PP["choice"]
             if c.extra:  # 출전 줄이 뒤따르면 선택지 문단은 다음 줄과 붙어 있게
                 base = PP["choice"]
-            out.append(self._p(S.derive(base, left=1100, intent=-1430), self._runs_xml(c.para.runs)))
+            out.append(self._p(S.derive(base, left=1100, intent=-self._hang(1430)), self._runs_xml(c.para.runs)))
             for k, x in enumerate(c.extra):
                 last_extra = i == len(q.choices) - 1 and k == len(c.extra) - 1
                 xb = PP["choice_last"] if last_extra else PP["choice"]
@@ -251,7 +410,7 @@ class HwpxWriter:
         if isinstance(b, AuxBlock):
             return self._aux(b, last)
         if b.kind == "image":
-            return [self._p(S.derive(PP["choice"], align="CENTER", left=0, intent=0), self._pic(b.image, IMG_MAX_FREE))]
+            return [self._p(S.derive(PP["choice"], align="CENTER", left=0, intent=0), self._pic(b.image, self.img_max_free))]
         if b.kind == "text":
             ov = {"align": b.align} if b.align in ("RIGHT", "CENTER") else {"intent": _indent_hwp(b.indent_pt)}
             return [self._p(S.derive(PP["choice"], left=0, **ov), self._runs_xml(b.runs))]
@@ -270,9 +429,20 @@ class HwpxWriter:
         return out
 
     # ---------------------------------------------------------- build ----
-    def section_xml(self, paras: list[str]) -> str:
+    def section_xml(self, paras: list[str], master_id: Optional[str] = None) -> str:
         open_tag = _tpl("section_open.xml")
         secpr = _tpl("secpr.xml")
+        m = self.margins
+        secpr = re.sub(r'<hp:margin header="\d+" footer="\d+" gutter="0" left="\d+" right="\d+" top="\d+" bottom="\d+"/>',
+                       f'<hp:margin header="{m["header"]}" footer="{m["footer"]}" gutter="0" left="{m["left"]}" '
+                       f'right="{m["right"]}" top="{m["top"]}" bottom="{m["bottom"]}"/>', secpr, count=1)
+        if self.endnotes:  # 미주 번호를 첫 문제 번호부터
+            first_no = min(self.endnotes)
+            secpr = re.sub(r'(<hp:endNotePr>.*?<hp:numbering type="CONTINUOUS" newNum=")\d+"',
+                           lambda mm: f'{mm.group(1)}{first_no}"', secpr, count=1, flags=re.S)
+        if master_id:
+            secpr = secpr.replace('masterPageCnt="0"', 'masterPageCnt="1"')
+            secpr = secpr.replace("</hp:secPr>", f'<hp:masterPage idRef="{master_id}"/></hp:secPr>')
         if not paras:
             paras = [self._empty(0)]
         first = paras[0]
@@ -297,13 +467,20 @@ class HwpxWriter:
                 prev_passage = False
             elif isinstance(it, Para):
                 if it.kind == "image":
-                    body.append(self._p(PP["plain"], self._pic(it.image, IMG_MAX_FREE)))
+                    body.append(self._p(PP["plain"], self._pic(it.image, self.img_max_free)))
                 elif it.kind == "text":
                     body.append(self._p(PP["plain"], self._runs_xml(it.runs)))
-        sections = [self.section_xml(body)]
-        if self.doc.answers:
-            sections.append(self.section_xml(self._answers()))
+        mp = self.master_ids is not None
+        sections = [self.section_xml(body, "masterpage0" if mp else None)]
+        if self.doc.answers and not self.endnotes:
+            sections.append(self.section_xml(self._answers(), "masterpage1" if mp else None))
         return sections
+
+    def masterpages(self, n_sections: int) -> list[tuple[str, str]]:
+        if self.master_ids is None:
+            return []
+        return [(f"masterpage{i}", build_masterpage(f"masterpage{i}", self.style, self.master_ids, self.margins, self.logo))
+                for i in range(n_sections)]
 
     def preview_text(self) -> str:
         lines = []
@@ -320,6 +497,7 @@ class HwpxWriter:
 
     def write(self, path: str) -> dict:
         sections = self.build_sections()
+        masters = self.masterpages(len(sections))
         header = self.styles.render_header(len(sections))
         manifest_items = ['<opf:item id="header" href="Contents/header.xml" media-type="application/xml"/>']
         spine = ['<opf:itemref idref="header" linear="yes"/>']
@@ -328,6 +506,8 @@ class HwpxWriter:
             spine.append(f'<opf:itemref idref="section{i}" linear="yes"/>')
         for name, _ in self.images:
             manifest_items.append(f'<opf:item id="{name}" href="BinData/{name}.png" media-type="image/png" isEmbeded="1"/>')
+        for mid, _ in masters:
+            manifest_items.append(f'<opf:item id="{mid}" href="Contents/{mid}.xml" media-type="application/xml"/>')
         manifest_items.append('<opf:item id="settings" href="settings.xml" media-type="application/xml"/>')
         ns = re.search(r"<hh:head (xmlns[^>]*?) version=", header).group(1)
         content_hpf = (
@@ -360,6 +540,8 @@ class HwpxWriter:
             z.writestr("Contents/header.xml", header, compress_type=zipfile.ZIP_DEFLATED)
             for name, data in self.images:
                 z.writestr(f"BinData/{name}.png", data, compress_type=zipfile.ZIP_STORED)
+            for mid, mx in masters:
+                z.writestr(f"Contents/{mid}.xml", mx, compress_type=zipfile.ZIP_DEFLATED)
             for i, s in enumerate(sections):
                 z.writestr(f"Contents/section{i}.xml", s, compress_type=zipfile.ZIP_DEFLATED)
             z.writestr("settings.xml", settings, compress_type=zipfile.ZIP_DEFLATED)
@@ -372,4 +554,5 @@ class HwpxWriter:
             z.writestr("META-INF/container.rdf", rdf, compress_type=zipfile.ZIP_DEFLATED)
         with open(path, "wb") as f:
             f.write(buf.getvalue())
-        return dict(self.stats, sections=len(sections), new_para_styles=len(self.styles.new_paras))
+        return dict(self.stats, sections=len(sections), new_para_styles=len(self.styles.new_paras),
+                    masterpages=len(masters), style=self.style.summary())

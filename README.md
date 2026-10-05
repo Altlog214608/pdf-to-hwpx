@@ -12,9 +12,19 @@ pip install -r requirements.txt; python .\v0_5_pdf_to_hwpx.py ".\[꼭 나오는 
 - 폴더 일괄 변환: `python .\v0_5_pdf_to_hwpx.py .\pdfs --out-dir .\out`
 - 테스트: `python -m pytest tests -q` (실제 PDF 회귀: `$env:PDF2HWPX_SAMPLES=".\pdfs"; python -m pytest tests -q`)
 
+## 웹사이트 (v0.6)
+
+```powershell
+pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\server.py
+```
+
+http://127.0.0.1:8000 에서 PDF를 끌어다 놓고, 학원 이름·로고·시험 제목·바깥 테두리·본문 글꼴과 크기를 미리 보며 정한 뒤
+내려받습니다. 파일은 페이지를 떠나거나 일정 시간이 지나면 서버에서 삭제됩니다. 실행 설정과 AWS 배포는 [docs/WEB.md](docs/WEB.md).
+
 ```
 pdf2hwpx/            변환기 패키지 (extract → ir → hwpx_writer → validate)
 v0_5_pdf_to_hwpx.py  실행 파일
+webapp/              웹 서버(FastAPI)와 화면(static/)
 tests/               합성 PDF 테스트 + 실제 PDF 회귀 테스트
 docs/                변경 기록(V0_5.md)과 분석 문서
 ```

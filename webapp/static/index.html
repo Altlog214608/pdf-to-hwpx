@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PDF → 한글(HWPX) 변환</title>
+  <meta name="description" content="국어 문제집 PDF를 편집 가능한 한글(HWPX) 파일로 바꿉니다.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://cdn.jsdelivr.net">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nanum+Gothic:wght@400;700&family=Nanum+Myeongjo:wght@400;700&family=Noto+Sans+KR:wght@400;700&family=Noto+Serif+KR:wght@400;700&display=swap">
+  <link rel="stylesheet" href="app.css">
+  <script>/* 화면 테마: 저장된 선택 > 시스템 설정 (깜빡임 없이 먼저 적용) */
+    try { var th = localStorage.getItem("pdf2hwpx:theme"); if (th === "dark" || th === "light") document.documentElement.dataset.theme = th; } catch (e) {}
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="처음으로">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32"><rect x="3" y="3" width="26" height="26" rx="8"/><path d="M10 11h12M10 16h12M10 21h7"/></svg>
+      </span>
+      <span class="brand-text">PDF <span class="arrow">→</span> 한글</span>
+    </a>
+    <ol class="steps" aria-label="진행 단계">
+      <li data-step="1" class="is-active"><span>1</span>PDF 올리기</li>
+      <li data-step="2"><span>2</span>디자인 설정</li>
+      <li data-step="3"><span>3</span>다운로드</li>
+    </ol>
+    <div class="privacy" title="업로드한 파일은 변환에만 쓰이고 자동으로 삭제됩니다">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6l7-3z"/></svg>
+      <span>파일은 저장되지 않고 자동 삭제됩니다</span>
+    </div>
+    <button class="theme-btn" id="btn-theme" type="button" aria-label="어두운 화면으로 바꾸기" title="화면 밝기 바꾸기">
+      <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>
+      <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+    </button>
+  </header>
+
+  <main id="app">
+    <!-- 1단계: 업로드 -->
+    <section id="stage-upload" class="stage is-visible" aria-labelledby="hero-title">
+      <div class="hero">
+        <h1 id="hero-title">문제집 PDF를<br><em>편집 가능한 한글 파일</em>로</h1>
+        <p class="lead">지문·문제·&lt;보기&gt; 박스·선택지·정답과 해설까지 구조를 살려 HWPX로 바꿉니다.<br>학원 이름과 시험 제목, 글꼴도 미리 보며 정할 수 있어요.</p>
+      </div>
+      <button id="dropzone" class="dropzone" type="button" aria-describedby="drop-hint">
+        <span class="dz-icon" aria-hidden="true">
+          <svg viewBox="0 0 64 64"><path class="doc" d="M18 6h20l14 14v34a4 4 0 0 1-4 4H18a4 4 0 0 1-4-4V10a4 4 0 0 1 4-4z"/><path class="fold" d="M38 6v14h14"/><text x="33" y="45" text-anchor="middle">PDF</text></svg>
+        </span>
+        <span class="dz-title">PDF를 여기로 끌어다 놓거나 <u>클릭해서 선택</u></span>
+        <span id="drop-hint" class="dz-hint">최대 <b data-cfg="max_mb">40</b>MB · <b data-cfg="max_pages">80</b>쪽 · 글자를 긁을 수 있는 PDF</span>
+      </button>
+      <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
+      <ul class="features" aria-label="특징">
+        <li><b>구조 보존</b>지문 박스, &lt;보기&gt;, 시의 연 구분, 밑줄까지</li>
+        <li><b>바로 편집</b>박스 안에서 Enter를 눌러도 테두리가 늘어나요</li>
+        <li><b>안전한 처리</b>변환이 끝나면 일정 시간 뒤 서버에서 삭제</li>
+      </ul>
+      <div id="upload-progress" class="upload-progress" hidden>
+        <div class="up-file"><span class="up-name"></span><span class="up-state">업로드 중…</span></div>
+        <div class="bar"><i></i></div>
+      </div>
+    </section>
+
+    <!-- 2·3단계: 작업 공간 -->
+    <section id="stage-work" class="stage" aria-label="디자인 설정과 미리보기">
+      <div class="work-grid">
+        <div class="col-left">
+          <article class="card source-card">
+            <header class="card-head">
+              <h2>원본 PDF</h2>
+              <span class="file-chip" id="file-chip"></span>
+              <button class="btn-ghost" id="btn-new" type="button" title="다른 PDF 올리기">새 PDF</button>
+            </header>
+            <div class="source-view" id="source-view">
+              <img id="source-img" alt="원본 PDF 첫 쪽" draggable="false">
+              <div class="source-fade"></div>
+              <button class="btn-chip" id="btn-source-expand" type="button">전체 보기</button>
+            </div>
+            <dl class="stats" id="source-stats"></dl>
+          </article>
+
+          <article class="card settings-card" aria-labelledby="settings-title">
+            <header class="card-head"><h2 id="settings-title">디자인 설정</h2><span class="hint">오른쪽 미리보기를 눌러도 바로 고칠 수 있어요</span></header>
+
+            <fieldset class="group">
+              <legend>머리 부분 <span class="sub">모든 페이지 맨 위에 반복돼요 (한글 ‘바탕쪽’)</span></legend>
+              <div class="seg" role="radiogroup" aria-label="학원 표시 방식">
+                <button type="button" role="radio" aria-checked="true" data-academy-mode="text">학원 이름 글자</button>
+                <button type="button" role="radio" aria-checked="false" data-academy-mode="logo">로고 그림</button>
+                <button type="button" role="radio" aria-checked="false" data-academy-mode="none">표시 안 함</button>
+              </div>
+              <label class="field" data-academy-pane="text">
+                <span>학원 이름</span>
+                <input id="in-academy" type="text" maxlength="30" placeholder="예: 김한춘 국어전문학원" autocomplete="organization">
+              </label>
+              <div class="field logo-field" data-academy-pane="logo" hidden>
+                <span>로고 그림 <small>PNG·JPG, 가로로 긴 그림 권장</small></span>
+                <div class="logo-row">
+                  <button class="btn-outline" id="btn-logo" type="button">그림 선택</button>
+                  <img id="logo-thumb" alt="" hidden>
+                  <button class="btn-ghost" id="btn-logo-remove" type="button" hidden>지우기</button>
+                </div>
+                <input id="logo-input" type="file" accept="image/png,image/jpeg" hidden>
+              </div>
+              <label class="field">
+                <span>시험 제목</span>
+                <input id="in-title" type="text" maxlength="80" placeholder="예: [중간 대비] 2. 품격을 높이는 언어생활 ①">
+              </label>
+              <div class="chips" id="title-chips" aria-label="제목 후보"></div>
+              <div class="field">
+                <span>제목 글자 색</span>
+                <div class="swatches" id="title-colors" role="radiogroup" aria-label="제목 글자 색">
+                  <button type="button" role="radio" data-color="#000000" style="--c:#000000" title="검정"></button>
+                  <button type="button" role="radio" data-color="#404040" style="--c:#404040" title="짙은 회색"></button>
+                  <button type="button" role="radio" data-color="#666666" style="--c:#666666" title="회색"></button>
+                  <button type="button" role="radio" data-color="#1F3A68" style="--c:#1F3A68" title="남색"></button>
+                  <button type="button" role="radio" data-color="#8B1E2D" style="--c:#8B1E2D" title="자주"></button>
+                  <label class="swatch-custom" title="직접 고르기"><input id="in-title-color" type="color" value="#000000" aria-label="제목 색 직접 고르기"><span>직접</span></label>
+                </div>
+              </div>
+              <label class="switch">
+                <input id="in-frame" type="checkbox" checked>
+                <span class="track" aria-hidden="true"><i></i></span>
+                <span>페이지 바깥 네모 테두리</span>
+              </label>
+            </fieldset>
+
+            <fieldset class="group">
+              <legend>본문 글자</legend>
+              <div class="row-2">
+                <label class="field">
+                  <span>글꼴</span>
+                  <select id="in-font"></select>
+                </label>
+                <label class="field">
+                  <span>크기 <output id="out-size">10</output>pt</span>
+                  <div class="size-row">
+                    <button type="button" class="btn-step" data-size-step="-0.5" aria-label="작게">−</button>
+                    <input id="in-size" type="range" min="8" max="13" step="0.5" value="10">
+                    <button type="button" class="btn-step" data-size-step="0.5" aria-label="크게">+</button>
+                  </div>
+                </label>
+              </div>
+              <label class="field">
+                <span>제목 글꼴</span>
+                <select id="in-title-font"></select>
+              </label>
+              <p class="note">미리보기는 비슷한 웹 글꼴로 보여 드려요. 한글에서는 선택한 글꼴로 열립니다.</p>
+            </fieldset>
+
+            <fieldset class="group">
+              <legend>정답·해설 <span class="sub">PDF 뒤쪽의 정답과 해설을 넣는 방식</span></legend>
+              <div class="seg seg-2" role="radiogroup" aria-label="정답 넣는 방식">
+                <button type="button" role="radio" aria-checked="true" data-answer-mode="end">문서 끝에 모으기</button>
+                <button type="button" role="radio" aria-checked="false" data-answer-mode="endnote">문제와 미주로 연결</button>
+              </div>
+              <p class="note" id="answer-note">정답·해설을 문제 뒤에 [정답 및 해설] 쪽으로 이어 붙입니다.</p>
+            </fieldset>
+
+            <div class="actions" id="actions">
+              <button class="btn-primary" id="btn-convert" type="button">
+                <span class="btn-label">HWPX로 변환하기</span>
+                <span class="spinner" aria-hidden="true"></span>
+              </button>
+            </div>
+
+            <div class="result" id="result" hidden aria-live="polite">
+              <div class="result-head">
+                <span class="check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
+                <div>
+                  <b id="result-name">문서.hwpx</b>
+                  <span id="result-meta"></span>
+                </div>
+              </div>
+              <ul class="result-summary" id="result-summary"></ul>
+              <a class="btn-primary btn-download" id="btn-download" href="#" download>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 19h14"/></svg>
+                한글 파일 내려받기
+              </a>
+              <div class="timer" id="timer">
+                <div class="timer-bar"><i id="timer-fill"></i></div>
+                <span id="timer-text">다운로드 가능 시간 10:00</span>
+              </div>
+              <p class="note">시간이 지나거나 이 페이지를 떠나면 파일이 서버에서 삭제됩니다. 설정을 바꾸면 다시 변환할 수 있어요.</p>
+            </div>
+          </article>
+        </div>
+
+        <div class="col-right">
+          <article class="card preview-card">
+            <header class="card-head">
+              <h2>HWPX 미리보기</h2>
+              <span class="hint">첫 쪽 윗부분 · 실제 줄바꿈은 한글에서 달라질 수 있어요</span>
+            </header>
+            <div class="paper-wrap" id="paper-wrap">
+              <div class="paper" id="paper">
+                <div class="mp-frame" id="mp-frame"></div>
+                <div class="mp-head" id="mp-head">
+                  <button class="mp-academy" id="mp-academy" type="button" title="눌러서 학원 이름/로고 바꾸기"></button>
+                  <button class="mp-title" id="mp-title" type="button" title="눌러서 제목 바꾸기"></button>
+                </div>
+                <div class="body-cols" id="body-cols"></div>
+                <div class="paper-fade"></div>
+              </div>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 화면 전체 드래그 오버레이 -->
+  <div class="drop-overlay" id="drop-overlay" aria-hidden="true">
+    <div class="drop-card">
+      <div class="drop-icon">
+        <div class="drop-ring"></div>
+        <svg class="drop-doc" viewBox="0 0 64 64"><path class="doc" d="M18 6h20l14 14v34a4 4 0 0 1-4 4H18a4 4 0 0 1-4-4V10a4 4 0 0 1 4-4z"/><path class="fold" d="M38 6v14h14"/><text x="33" y="45" text-anchor="middle">PDF</text></svg>
+        <span class="drop-plus">+</span>
+      </div>
+      <p>놓으면 바로 올라가요</p>
+      <small>PDF 파일 한 개</small>
+    </div>
+  </div>
+
+  <div class="lightbox" id="lightbox" hidden><img alt="원본 PDF 첫 쪽 전체"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>
