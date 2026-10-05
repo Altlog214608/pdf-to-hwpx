@@ -89,3 +89,10 @@ def test_v051_review_fixes(result):
     p1 = _items(result, "passage")[0]
     texts = [p.get("text", "") for p in p1["paras"]]
     assert "[A]" in texts and "나는 오래 너를 기다렸다" in texts
+
+
+def test_choice_credit_lines(result):
+    q3 = {q["number"]: q for q in _items(result, "question")}[3]
+    assert q3["choices"][0] == "① 현저동"  # 출전이 선택지 본문에 붙지 않음
+    assert q3["choice_credits"]["①"] == ["- 작가1, <작품1>"]
+    assert q3["choice_credits"]["⑤"] == ["- 작가5, <작품5>"] and q3["after"] == []

@@ -41,3 +41,30 @@ def test_1_1_known_fixes(tmp_path):
     assert p1["guide"] == "※ 다음 글을 읽고, 물음에 답하시오."  # 안내문 원문
     assert sum(1 for p in p1["paras"] if p["kind"] == "blank") == 3  # 연 구분
     assert res["validation"]["checks"]["box_groups"] == 26
+
+
+def _doc(name, tmp_path):
+    pdf = next((p for p in PDFS if name in p.name), None)
+    if pdf is None:
+        pytest.skip(f"{name} 샘플 없음")
+    return convert(str(pdf), out_dir=str(tmp_path), overwrite=True)["document"]
+
+
+def test_2_3_box_across_columns(tmp_path):
+    doc = _doc("2-3.", tmp_path)
+    text = __import__("json").dumps(doc, ensure_ascii=False)
+    assert "농구부를 떠난다." in text  # 단 구분선을 박스 테두리로 오인하지 않음
+    q2 = next(x for x in doc["items"] if x.get("number") == 2)
+    assert "않은 것은" in q2["stem"]  # 줄 끝 굵은 밑줄 강조어 뒤 공백
+
+
+def test_2_5_media(tmp_path):
+    doc = _doc("2-5.", tmp_path)
+    qs = {x["number"]: x for x in doc["items"] if x["type"] == "question"}
+    assert qs[3]["choice_credits"]["①"] == ["- 정호승, <내가 사랑하는 사람>"]
+    assert qs[7]["blocks"][0]["paras"][0]["kind"] == "image"
+    assert qs[17]["blocks"][0]["diagram"] is True
+    assert [b["title"] for b in qs[19]["blocks"]] == ["<보기 1>", "<보기 2>"]
+    p2 = [x for x in doc["items"] if x["type"] == "passage"][1]
+    t = [p.get("text", p["kind"]) for p in p2["paras"]]
+    assert t[t.index("사람이 될 수 있대.") + 1] == "blank"  # 단을 넘는 연 구분

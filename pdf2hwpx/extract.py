@@ -355,7 +355,10 @@ def extract(pdf_path: str) -> Extraction:
             all_sizes.extend(gl.size for gl in ln.glyphs if not gl.is_space and not gl.icon)
 
         # ---- 박스 ----
-        box_rects = _detect_boxes(segs, top, bottom)
+        # 가운데 단 구분선은 박스의 왼쪽/오른쪽 변이 아니다
+        box_segs = [s for s in segs if not (s.vertical and best_len and abs(s.x0 - split_x) < 1.0
+                                             and s.y1 - s.y0 >= 0.25 * content_h)]
+        box_rects = _detect_boxes(box_segs, top, bottom)
         # 다른 박스 안에 들어 있는 사각형(도식의 칸 등)은 박스가 아니라 바깥 박스의 내부 도형으로 센다
         nested_in: dict[int, int] = {}
         for i, (x0, y0, x1, y1) in enumerate(box_rects):

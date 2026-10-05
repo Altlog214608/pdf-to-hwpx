@@ -157,6 +157,9 @@ class Builder:
                 if dy > 1.3 * pitch:
                     brk = True
                     blank = stanza and dy > 1.7 * pitch
+            elif stanza and self._cross_area_blank(prev, e, pitch):
+                brk = True
+                blank = True
             if not self._is_full(prev):
                 brk = True
             first = cur[0]
@@ -177,15 +180,31 @@ class Builder:
         flush()
         return paras
 
+    @staticmethod
+    def _emphasis_boundary(prev: Line, cur: Line) -> bool:
+        """발문의 굵은 밑줄 강조어(않은/아닌 …)가 줄 끝에서 끝나면 단어 경계다.
+        한글 PDF는 이때 줄 끝 공백을 텍스트 레이어에 남기지 않는다."""
+        a = next((g for g in reversed(prev.glyphs) if not g.is_space), None)
+        b = next((g for g in cur.glyphs if not g.is_space), None)
+        return bool(a and b and a.underline and a.bold and not b.underline)
+
     def _stanza_gap(self, a: Line, b: Line, pitch: float) -> bool:
         return (a.page, a.col) == (b.page, b.col) and b.y0 - a.y0 > 1.7 * pitch
+
+    def _cross_area_blank(self, a: Line, b: Line, pitch: float) -> bool:
+        """단/페이지가 바뀌는 곳의 연 구분: 박스 안에서 앞 단 마지막 줄 아래에
+        한 줄 이상 빈자리가 남았으면(빈 줄이 거기 있었던 것) 빈 문단으로 본다."""
+        if (a.page, a.col) == (b.page, b.col) or a.box is None or a.box not in self.box_by_id:
+            return False
+        part = self.box_by_id[a.box]
+        return part.y1 - a.y1 > 1.25 * pitch
 
     def _para_from_lines(self, lines: list[Line], bold: bool, base_left: float) -> Para:
         runs: list[Run] = []
         for i, ln in enumerate(lines):
             if i > 0:
                 prev = lines[i - 1]
-                if prev.trailing_space or not self.trailing_space_reliable:
+                if prev.trailing_space or not self.trailing_space_reliable or self._emphasis_boundary(prev, ln):
                     _append_runs(runs, [Run(" ", False, bold)])
             _append_runs(runs, _runs_from_glyphs(ln.glyphs, bold))
         p = Para(runs=_clean_runs(runs))
@@ -471,6 +490,7 @@ def _build_question(b: Builder, number: int, items: list, passage: Optional[Pass
     blocks: list = []
     after: list = []
     choice_lines: list[list[Line]] = []
+    credit_lines: dict[int, list[Line]] = {}  # 선택지 아래 오른쪽 정렬 출전 줄
     pending: list = []  # 박스/그림 사이의 일반 줄 (한꺼번에 문단으로 묶는다)
     state = "stem"
 
@@ -498,6 +518,8 @@ def _build_question(b: Builder, number: int, items: list, passage: Optional[Pass
                 flush()
                 choice_lines.append([ln])
                 state = "choices"
+            elif state == "choices" and choice_lines and _is_credit_line(b, ln):
+                credit_lines.setdefault(len(choice_lines) - 1, []).append(ln)
             elif state == "choices" and choice_lines:
                 prev = choice_lines[-1][-1]
                 far = (prev.page, prev.col) != (ln.page, ln.col) or ln.y0 - prev.y0 > 2.5 * ln.size
@@ -513,11 +535,21 @@ def _build_question(b: Builder, number: int, items: list, passage: Optional[Pass
     flush()
     stem = b.single_para(stem_lines, bold=True)
     choices = []
-    for cl in choice_lines:
+    for k, cl in enumerate(choice_lines):
         p = b.single_para(cl)
-        choices.append(Choice(p.text.lstrip()[:1], p))
+        extra = b.paragraphs(credit_lines[k]) if k in credit_lines else []
+        for x in extra:
+            x.align, x.role, x.indent_pt = "RIGHT", "credit", 0.0
+        choices.append(Choice(p.text.lstrip()[:1], p, extra))
     return Question(number=number, stem=stem, passage_id=passage.id if passage else None,
                     blocks=blocks, choices=choices, after=after, page=header.page)
+
+
+def _is_credit_line(b: Builder, ln: Line) -> bool:
+    """'- 작가, <작품>'처럼 오른쪽에 붙은 출전 줄."""
+    left, right = b.bounds(ln)
+    return bool(re.match(r"^\s*[-–—]\s", ln.text)) and ln.x1 >= right - max(1.2 * ln.size, 6.0) \
+        and ln.x0 > left + 0.3 * (right - left)
 
 
 def _build_answers(b: Builder, lines: list[Line]) -> list[AnswerEntry]:

@@ -7,4 +7,4 @@
   validate : 원문 대비 텍스트 충실도 + 구조 검증
 """
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"

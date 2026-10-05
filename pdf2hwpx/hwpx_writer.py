@@ -234,7 +234,13 @@ class HwpxWriter:
             out.extend(self._block(b, i == n_blocks - 1 and not q.choices and not q.after))
         for i, c in enumerate(q.choices):
             base = PP["choice_last"] if i == len(q.choices) - 1 else PP["choice"]
+            if c.extra:  # 출전 줄이 뒤따르면 선택지 문단은 다음 줄과 붙어 있게
+                base = PP["choice"]
             out.append(self._p(S.derive(base, left=1100, intent=-1430), self._runs_xml(c.para.runs)))
+            for k, x in enumerate(c.extra):
+                last_extra = i == len(q.choices) - 1 and k == len(c.extra) - 1
+                xb = PP["choice_last"] if last_extra else PP["choice"]
+                out.append(self._p(S.derive(xb, align="RIGHT", left=1100, intent=0), self._runs_xml(x.runs)))
         for i, b in enumerate(q.after):
             out.extend(self._block(b, i == len(q.after) - 1))
         return out

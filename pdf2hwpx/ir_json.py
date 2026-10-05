@@ -39,7 +39,8 @@ def document_to_json(doc: Document) -> dict:
             blocks = [_block(b) for b in it.blocks]
             items.append({"type": "question", "number": it.number, "qtype": it.qtype, "passage": it.passage_id,
                           "stem": it.stem.text, "blocks": blocks,
-                          "choices": [c.para.text for c in it.choices], "answer": it.answer,
+                          "choices": [c.para.text for c in it.choices],
+                          "choice_credits": {c.label: [x.text for x in c.extra] for c in it.choices if c.extra}, "answer": it.answer,
                           "explanation": [p.text for p in it.explanation if p.kind == "text"],
                           "after": [_block(b) for b in it.after]})
         elif isinstance(it, AuxBlock):

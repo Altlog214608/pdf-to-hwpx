@@ -143,6 +143,7 @@ class AuxBlock:
 class Choice:
     label: str
     para: Para
+    extra: list[Para] = field(default_factory=list)  # 선택지 아래 오른쪽 정렬 출전 등
 
 
 @dataclass

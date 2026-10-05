@@ -197,8 +197,8 @@ def build(path: str) -> dict:
 
     badge = _picture_png(74, 40, (0.85, 0.45, 0.3))
 
-    def question(n: int, stem: str, with_badge: bool = False):
-        if w.y > BOTTOM - 120:
+    def question(n: int, stem: str, with_badge: bool = False, need: float = 120):
+        if w.y > BOTTOM - need:
             w.next_col()
         if with_badge:  # 문제 위의 '빈출' 배지(장식 그림)
             w.page.insert_image(fitz.Rect(w.right - 37, w.y - 2, w.right, w.y + 18), stream=badge, keep_proportion=False)
@@ -207,8 +207,8 @@ def build(path: str) -> dict:
         w.text(w.left + (24 if n < 10 else 30), w.y + 13, stem)
         w.y += 24
 
-    def choices(items: list[str], two_per_line: bool = False):
-        if w.y > BOTTOM - 16 * len(items):
+    def choices(items: list[str], two_per_line: bool = False, credits: list[str] | None = None):
+        if w.y > BOTTOM - 16 * len(items) * (2 if credits else 1):
             w.next_col()
         if two_per_line:
             for a in range(0, len(items), 2):
@@ -222,6 +222,10 @@ def build(path: str) -> dict:
                 w.icon("①②③④⑤"[idx], w.left + 10, w.y + 9)
                 w.text(w.left + 23, w.y + 9, s)
                 w.y += 16
+                if credits:  # 선택지 아래 오른쪽 정렬 출전
+                    c = credits[idx]
+                    w.text(w.right - 2.3 - tl(c), w.y + 9, c)
+                    w.y += 16
         w.y += 20
 
     question(1, "(가)와 (나)에 대해 고른 것은?", with_badge=True)
@@ -253,7 +257,7 @@ def build(path: str) -> dict:
                 w.text(x + 52, y + 13, "→")
     rows = [((lambda y: w.text((w.left + w.right) / 2 - tl(title) / 2, y + 9, title)), 19.0), (draw_diagram, 26.0)]
     boxed_lines(w, rows)
-    choices(["현저동", "서울역", "부산", "인천", "평양"])
+    choices(["현저동", "서울역", "부산", "인천", "평양"], credits=[f"- 작가{k}, <작품{k}>" for k in range(1, 6)])
 
     # ---------- 4번: 서술형 + <조건> '-' 항목 ----------
     question(4, "마지막 장면을 <조건>에 맞게 쓰시오.")
@@ -280,7 +284,7 @@ def build(path: str) -> dict:
     boxed_lines(w, rows)
 
     # ---------- 5번: <보기 1> 산문+출전, <보기 2> 그림만 ----------
-    question(5, "<보기 1>을 <보기 2>로 바꾼 효과는?")
+    question(5, "<보기 1>을 <보기 2>로 바꾼 효과는?", need=330)
     t3, t4 = "<보기 1>", "<보기 2>"
     prose2 = "이른바 1·4 후퇴였다 거의 다 떠난 줄 알았는데 행여나 하고 관망하던 사람들이 한꺼번에 쏟아져 나와 국도를 질주하였다"
     rows = [((lambda y: w.text((w.left + w.right) / 2 - tl(t3) / 2, y + 9, t3)), 19.0)]
