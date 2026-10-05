@@ -1,4 +1,0 @@
-pymupdf>=1.24
-kiwipiepy>=0.20
-Pillow>=10.0
-pywin32>=306; platform_system == "Windows"
