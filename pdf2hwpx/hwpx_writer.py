@@ -18,7 +18,7 @@ from typing import Optional
 from xml.sax.saxutils import escape
 
 from .masterpage import MARGINS_WITH_MASTER, PAPER_W, Logo, MasterIds, build_masterpage
-from .model import AnswerEntry, AuxBlock, Document, ImageEl, Para, Passage, Question, Run
+from .model import AnswerEntry, AuxBlock, Document, ImageEl, Para, Passage, Question, Run, TableEl
 from .style import DocStyle
 
 PT_TO_HWP = 110  # PDF pt -> HWPUNIT (원본 9.1pt 글자 ≈ 출력 10pt 글자 비율)
@@ -107,10 +107,16 @@ class Styles:
         self.new_chars.append(x)
         return cid
 
-    def add_border_fill(self, width: str = "0.12 mm", fill: Optional[str] = None) -> int:
+    def add_border_fill(self, width: str = "0.12 mm", fill: Optional[str] = None,
+                        sides_on: tuple[str, ...] = ("left", "right", "top", "bottom")) -> int:
+        key = ("bf", width, fill, sides_on)
+        if key in self.cache:
+            return self.cache[key]
         bid = max(self.bf_ids) + 1
         self.bf_ids.append(bid)
-        sides = "".join(f'<hh:{s}Border type="SOLID" width="{width}" color="#000000"/>' for s in ("left", "right", "top", "bottom"))
+        self.cache[key] = bid
+        sides = "".join(f'<hh:{s}Border type="{"SOLID" if s in sides_on else "NONE"}" width="{width}" color="#000000"/>'
+                        for s in ("left", "right", "top", "bottom"))
         brush = (f'<hc:fillBrush><hc:winBrush faceColor="{fill}" hatchColor="#999999" alpha="0"/></hc:fillBrush>'
                  if fill else "")
         self.new_bfs.append(
@@ -189,6 +195,7 @@ class HwpxWriter:
                                     int(round(st.body_size * 100)))
         self.margins = dict(MARGINS_WITH_MASTER if st.uses_masterpage else DEFAULT_MARGINS)
         col_w = (PAPER_W - self.margins["left"] - self.margins["right"] - COL_GAP) // 2
+        self.col_w = col_w
         self.img_max_in_box = col_w - 3000
         self.img_max_free = col_w - 600
         self.master_ids: Optional[MasterIds] = None
@@ -291,6 +298,92 @@ class HwpxWriter:
             f'<hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:shapeComment>그림입니다.</hp:shapeComment>'
             f'</hp:pic><hp:t/></hp:run>')
 
+    # ---------------------------------------------------------- tables ----
+    def _tc(self, col: int, row: int, cs: int, rs: int, w: int, h: int, bf: int, paras: str,
+            margin: tuple[int, int, int, int] = (283, 283, 141, 141), valign: str = "CENTER") -> str:
+        l, r, t, b = margin
+        return (f'<hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="{bf}">'
+                f'<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="{valign}" linkListIDRef="0" '
+                f'linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">{paras}</hp:subList>'
+                f'<hp:cellAddr colAddr="{col}" rowAddr="{row}"/><hp:cellSpan colSpan="{cs}" rowSpan="{rs}"/>'
+                f'<hp:cellSz width="{w}" height="{h}"/><hp:cellMargin left="{l}" right="{r}" top="{t}" bottom="{b}"/></hp:tc>')
+
+    def _tbl(self, rows: list[list[str]], n_cols: int, width: int, height: int, bf: int,
+             page_break: str = "CELL") -> str:
+        tid = self._rng.randint(10 ** 9, 2 * 10 ** 9)
+        tr = "".join(f"<hp:tr>{''.join(r)}</hp:tr>" for r in rows)
+        return (f'<hp:run charPrIDRef="0"><hp:tbl id="{tid}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" '
+                f'textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="{page_break}" repeatHeader="0" '
+                f'rowCnt="{len(rows)}" colCnt="{n_cols}" cellSpacing="0" borderFillIDRef="{bf}" noAdjust="0">'
+                f'<hp:sz width="{width}" widthRelTo="ABSOLUTE" height="{height}" heightRelTo="ABSOLUTE" protect="0"/>'
+                f'<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" '
+                f'vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>'
+                f'<hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:inMargin left="283" right="283" top="141" bottom="141"/>'
+                f'{tr}</hp:tbl><hp:t/></hp:run>')
+
+    def _cell_paras(self, paras: list[Para], inner_w: int, base: int = 0, ov: Optional[dict] = None) -> str:
+        """표 칸/묶음 괄호 안의 문단들."""
+        S = self.styles
+        ov = dict(ov or {})
+        out = []
+        for p in paras:
+            if p.kind == "blank":
+                out.append(self._note_p(S.derive(base, **ov), '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>'))
+            elif p.kind == "image" and p.image is not None:
+                out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER"}), self._pic(p.image, inner_w)))
+            elif p.kind == "table" and p.table is not None:
+                out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER"}), self._table(p.table, inner_w)))
+            elif p.kind == "text":
+                o = dict(ov)
+                if p.align in ("RIGHT", "CENTER"):
+                    o["align"] = p.align
+                elif p.indent_pt:
+                    o["intent"] = _indent_hwp(p.indent_pt)
+                out.append(self._note_p(S.derive(base, **o), self._runs_xml(p.runs, base_bold=p.role == "heading")))
+        return "".join(out) or self._note_p(base, '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>')
+
+    def _table(self, t: TableEl, max_w: int) -> str:
+        """선으로 그려진 표 -> 한글 표(글자처럼 취급). 칸 크기는 원본 비율, 단 폭을 넘으면 줄인다."""
+        S = self.styles
+        self.stats["tables"] = self.stats.get("tables", 0) + 1
+        k = min(PT_TO_HWP, max_w / max(1.0, t.x1 - t.x0))
+        xs = [int(round((x - t.x0) * k)) for x in t.xs]
+        ys = [int(round((y - t.y0) * PT_TO_HWP)) for y in t.ys]
+        plain = S.add_border_fill()
+        rows: list[list[str]] = [[] for _ in range(len(t.ys) - 1)]
+        for cl in sorted(t.cells, key=lambda c: (c.row, c.col)):
+            w = xs[cl.col + cl.colspan] - xs[cl.col]
+            h = max(600, ys[cl.row + cl.rowspan] - ys[cl.row])
+            bf = S.add_border_fill(fill=cl.fill) if cl.fill else plain
+            # 칸 정렬은 IR에서 칸 단위로 정한 문단 정렬을 따른다
+            rows[cl.row].append(self._tc(cl.col, cl.row, cl.colspan, cl.rowspan, w, h, bf,
+                                         self._cell_paras(cl.paras, max(600, w - 700), 0, {})))
+        rows = [r for r in rows if r] or [[]]
+        return self._tbl(rows, len(t.xs) - 1, xs[-1], max(600, ys[-1]), plain)
+
+    def _bracket(self, p: Para, width: int, base: int, ov: dict) -> str:
+        """[A] 묶음 괄호: [표시 | 괄호 선( [ 모양 ) | 글] 3칸 표. 글 문단마다 한 줄이라 쪽/단이 바뀌면 나뉜다."""
+        S = self.styles
+        self.stats["brackets"] = self.stats.get("brackets", 0) + 1
+        none_bf = S.add_border_fill(sides_on=())
+        tick_bf = S.add_border_fill(sides_on=("left", "top", "bottom"))
+        label_w, tick_w = 1900, 500
+        text_w = max(4000, width - label_w - tick_w)
+        children = [c for c in p.children if c.kind != "blank" or c is not p.children[-1]] or [Para(kind="blank")]
+        n = len(children)
+        rows: list[list[str]] = []
+        for i, c in enumerate(children):
+            row = []
+            if i == 0:
+                lab = self._note_p(S.derive(0, align="CENTER"), self._runs_xml([Run(p.label)]))
+                row.append(self._tc(0, 0, 1, n, label_w, 1000 * n, none_bf, lab, (0, 0, 0, 0)))
+                row.append(self._tc(1, 0, 1, n, tick_w, 1000 * n, tick_bf,
+                                    self._note_p(0, '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>'), (0, 0, 0, 0)))
+            row.append(self._tc(2, i, 1, 1, text_w, 1000, none_bf, self._cell_paras([c], text_w - 300, base, ov),
+                                (200, 0, 0, 0), valign="TOP"))
+            rows.append(row)
+        return self._tbl(rows, 3, label_w + tick_w + text_w, 1000 * n, none_bf)
+
     # --------------------------------------------------------- blocks ----
     def _passage(self, ps: Passage) -> list[str]:
         S = self.styles
@@ -309,6 +402,13 @@ class HwpxWriter:
                 continue
             if p.kind == "image":
                 out.append(self._p(S.derive(base, align="CENTER", **ov), self._pic(p.image, self.img_max_in_box)))
+                continue
+            if p.kind == "table":
+                out.append(self._p(S.derive(base, align="CENTER", **ov), self._table(p.table, self.col_w - 300)))
+                continue
+            if p.kind == "bracket":
+                out.append(self._p(S.derive(base, **ov), self._bracket(p, self.col_w - 200, PP["passage"],
+                                                                       {"border": (2, 0, 0, 0, 0, 0)})))
                 continue
             if p.role == "label" and ps.boxed:
                 pp = PP["passage_label"]
@@ -342,6 +442,12 @@ class HwpxWriter:
                 ov.update(prev=280, offset_top=120)
             if p.kind == "image":
                 out.append(self._p(S.derive(base, align="CENTER", intent=0, **ov), self._pic(p.image, self.img_max_in_box)))
+                continue
+            if p.kind == "table":
+                out.append(self._p(S.derive(base, align="CENTER", intent=0, **ov), self._table(p.table, self.col_w - 1300)))
+                continue
+            if p.kind == "bracket":
+                out.append(self._p(S.derive(base, intent=0, **ov), self._bracket(p, self.col_w - 1200, 0, {})))
                 continue
             if p.kind == "blank":
                 out.append(self._empty(S.derive(base, **ov)))
@@ -411,6 +517,10 @@ class HwpxWriter:
             return self._aux(b, last)
         if b.kind == "image":
             return [self._p(S.derive(PP["choice"], align="CENTER", left=0, intent=0), self._pic(b.image, self.img_max_free))]
+        if b.kind == "table":
+            return [self._p(S.derive(PP["choice"], align="CENTER", left=0, intent=0), self._table(b.table, self.col_w - 300))]
+        if b.kind == "bracket":
+            return [self._p(S.derive(PP["choice"], left=0, intent=0), self._bracket(b, self.col_w - 200, 0, {}))]
         if b.kind == "text":
             ov = {"align": b.align} if b.align in ("RIGHT", "CENTER") else {"intent": _indent_hwp(b.indent_pt)}
             return [self._p(S.derive(PP["choice"], left=0, **ov), self._runs_xml(b.runs))]
@@ -453,6 +563,7 @@ class HwpxWriter:
         return open_tag + "".join(paras) + "</hs:sec>"
 
     def build_sections(self) -> list[str]:
+        S0 = self.styles
         body: list[str] = []
         prev_passage = False
         for it in self.doc.items:
@@ -468,6 +579,10 @@ class HwpxWriter:
             elif isinstance(it, Para):
                 if it.kind == "image":
                     body.append(self._p(PP["plain"], self._pic(it.image, self.img_max_free)))
+                elif it.kind == "table":
+                    body.append(self._p(S0.derive(PP["plain"], align="CENTER"), self._table(it.table, self.col_w - 300)))
+                elif it.kind == "bracket":
+                    body.append(self._p(PP["plain"], self._bracket(it, self.col_w - 200, 0, {})))
                 elif it.kind == "text":
                     body.append(self._p(PP["plain"], self._runs_xml(it.runs)))
         mp = self.master_ids is not None

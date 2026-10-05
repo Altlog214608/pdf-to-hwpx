@@ -17,7 +17,7 @@ from typing import Callable, Optional, Union
 
 from .extract import Extraction, TITLE_RE
 from .model import (CIRCLED_DIGITS, AnswerEntry, AuxBlock, Box, Choice, Document, Glyph, ImageEl, Line, Para,
-                    Passage, Question, Run)
+                    Passage, Question, Run, TableEl)
 
 GUIDE_RE = re.compile(r"^\s*(※|\[\s*\d+\s*[~∼～\-–]\s*\d+\s*\])")
 ANSWER_HEAD_RE = re.compile(r"^\s*(\d{1,2})\s*\)\s*\[?\s*정답\s*\]?")  # "1) [정답] ④" / "1) 정답 ④"
@@ -29,6 +29,11 @@ MARKER_RE = re.compile(
     r"|[-–—•·▪◦○●□■◇◆※]\s|[가-힣A-Za-z]{1,6}\s?:|S#|\[[^\]]{1,20}\])")
 
 BodyBounds = Callable[[Line], tuple[float, float]]
+
+
+class _BracketGroup:
+    def __init__(self, bid: int, label: str, lines: list):
+        self.id, self.label, self.lines = bid, label, lines
 
 
 # ------------------------------------------------------------- helpers ----
@@ -104,6 +109,8 @@ class Builder:
         return inf.col_left if ln.col == 0 else inf.col_right
 
     def bounds(self, ln: Line) -> tuple[float, float]:
+        if ln.cell is not None:
+            return ln.cell
         if ln.box is not None and ln.box in self.box_by_id:
             b = self.box_by_id[ln.box]
             return b.x0, b.x1
@@ -122,6 +129,7 @@ class Builder:
     def paragraphs(self, entries: list[Union[Line, ImageEl]], bold: bool = False,
                    stanza: bool = True) -> list[Para]:
         """줄 목록 -> 문단 목록. 산문은 잇고, 시 행/목록은 나누고, 연 구분은 빈 문단으로."""
+        entries = self._group_brackets(entries)
         lines = [e for e in entries if isinstance(e, Line)]
         diffs = []
         for a, b in zip(lines, lines[1:]):
@@ -145,6 +153,18 @@ class Builder:
             if isinstance(e, ImageEl):
                 flush()
                 paras.append(Para(kind="image", image=e, align="CENTER"))
+                continue
+            if isinstance(e, TableEl):
+                flush()
+                paras.append(Para(kind="table", table=self.table(e), align="CENTER"))
+                continue
+            if isinstance(e, _BracketGroup):
+                flush()
+                first = e.lines[0]
+                if paras and paras[-1].kind == "text" and stanza and prev_line is not None and self._stanza_gap(prev_line, first, pitch):
+                    paras.append(Para(kind="blank"))
+                paras.append(Para(kind="bracket", label=e.label, children=self.paragraphs(e.lines, bold, stanza)))
+                prev_line = e.lines[-1]
                 continue
             if not cur:
                 if paras and paras[-1].kind == "text" and stanza and prev_line is not None and self._stanza_gap(prev_line, e, pitch):
@@ -183,6 +203,42 @@ class Builder:
             prev_line = e
         flush()
         return paras
+
+    @staticmethod
+    def _group_brackets(entries: list) -> list:
+        """[A] 묶음 괄호 안의 줄들을 하나의 묶음으로 바꾸고, 괄호 옆 [A] 표시 줄은 묶음의 이름으로 쓴다."""
+        if not any(isinstance(e, Line) and e.bracket is not None for e in entries):
+            return entries
+        labels = {e.bracket: e.text.strip() for e in entries if isinstance(e, Line) and e.bracket_label}
+        out: list = []
+        for e in entries:
+            if isinstance(e, Line) and e.bracket_label:
+                continue
+            if isinstance(e, Line) and e.bracket is not None and e.bracket in labels:
+                if out and isinstance(out[-1], _BracketGroup) and out[-1].id == e.bracket:
+                    out[-1].lines.append(e)
+                else:
+                    out.append(_BracketGroup(e.bracket, labels[e.bracket], [e]))
+                continue
+            out.append(e)
+        return out
+
+    def table(self, t: TableEl) -> TableEl:
+        """표 칸마다 문단을 만든다(칸 안은 시 연 구분 없이)."""
+        for cl in t.cells:
+            cl.paras = self.paragraphs(cl.items, stanza=False) if cl.items else []
+            lines = [x for x in cl.items if isinstance(x, Line)]
+            w = cl.x1 - cl.x0
+            # 칸 안 모든 줄의 좌우 여백이 비슷하면 가운데 정렬 칸(표 칸은 대부분 이렇다)
+            if lines and all(abs((ln.x0 - cl.x0) - (cl.x1 - ln.x1)) <= max(4.0, 0.12 * w) for ln in lines):
+                for p in cl.paras:
+                    if p.kind == "text":
+                        p.align, p.indent_pt = "CENTER", 0.0
+            else:
+                for p in cl.paras:
+                    if p.kind == "text" and p.align == "CENTER":
+                        p.align = "LEFT"
+        return t
 
     @staticmethod
     def _emphasis_boundary(prev: Line, cur: Line) -> bool:
@@ -266,7 +322,12 @@ class Builder:
                 img = ImageEl(part.page, part.col, part.x0 + 1, y0, part.x1 - 1, part.y1 - 1, "diagram", 0)
                 img.png = self.ex.render(part.page, (img.x0, img.y0, img.x1, img.y1))
                 imgs.append(img)
-            self.image_only_lines.extend(x for x in box.all_items() if isinstance(x, Line) and x is not (box.items[0] if title else None))
+            title_line = box.items[0] if title else None
+            for x in box.all_items():
+                if isinstance(x, Line) and x is not title_line:
+                    self.image_only_lines.append(x)
+                elif isinstance(x, TableEl):
+                    self.image_only_lines.extend(ln for cl in x.cells for ln in cl.items if isinstance(ln, Line))
             blk.diagram = imgs[0]
             blk.paras = [Para(kind="image", image=im, align="CENTER") for im in imgs]
             return blk
@@ -507,14 +568,19 @@ def _build_question(b: Builder, number: int, items: list, passage: Optional[Pass
             pending.clear()
 
     for it in items[1:]:
-        if isinstance(it, (Box, ImageEl)):
+        if isinstance(it, (Box, ImageEl, TableEl)):
             if state == "choices" and len(choice_lines) >= 5:
                 state = "after"  # 선택지가 끝난 뒤의 박스/그림은 선택지 앞으로 끌어오지 않는다
             flush()
             if state in ("stem", "choices"):
                 state = "blocks" if state == "stem" else state
             dst = after if state == "after" else blocks
-            dst.append(b.aux_from_box(it) if isinstance(it, Box) else Para(kind="image", image=it, align="CENTER"))
+            if isinstance(it, Box):
+                dst.append(b.aux_from_box(it))
+            elif isinstance(it, TableEl):
+                dst.append(Para(kind="table", table=b.table(it), align="CENTER"))
+            else:
+                dst.append(Para(kind="image", image=it, align="CENTER"))
             continue
         for ln in _choice_split(it):
             t = ln.text.lstrip()
@@ -599,8 +665,15 @@ def _build_answers(b: Builder, lines: list[Line]) -> list[AnswerEntry]:
 def _iter_images(doc: Document):
     def from_paras(ps):
         for p in ps:
-            if isinstance(p, Para) and p.kind == "image" and p.image is not None:
+            if not isinstance(p, Para):
+                continue
+            if p.kind == "image" and p.image is not None:
                 yield p.image
+            elif p.kind == "table" and p.table is not None:
+                for cl in p.table.cells:
+                    yield from from_paras(cl.paras)
+            elif p.kind == "bracket":
+                yield from from_paras(p.children)
     for it in doc.items:
         if isinstance(it, Passage):
             yield from from_paras(it.paras)

@@ -77,3 +77,25 @@ def test_choesangwi_bold_and_answers(tmp_path):
     p2 = [x for x in doc["items"] if x["type"] == "passage"][1]
     bold = [b for p in p2["paras"] for b in p.get("bold", [])]
     assert "흰 바람벽" in bold  # 지문 속 굵은 강조 시어 보존
+
+
+@pytest.mark.skipif(not any("족보닷컴" in p.name for p in PDFS), reason="족보닷컴 샘플 없음")
+def test_jokbo_tables_and_brackets(tmp_path):
+    """족보닷컴 미리보는 중간고사: 선으로 그린 표 6개(칸 색, 칸 안 사진), [A]/[B] 묶음 괄호 3개."""
+    pdf = next(p for p in PDFS if "족보닷컴" in p.name)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    doc = res["document"]
+    qs = {x["number"]: x for x in doc["items"] if x["type"] == "question"}
+
+    def tables(paras):
+        return [p["table"] for p in paras if p.get("kind") == "table"]
+    q9 = qs[9]["blocks"][0]
+    assert not q9["diagram"] and tables(q9["paras"])[0]["rows"] == 7  # 표 때문에 <보기> 전체가 그림이 되지 않음
+    t13 = tables(qs[13]["blocks"])[0]
+    assert (t13["rows"], t13["cols"]) == (3, 3)
+    t20 = tables(qs[20]["blocks"][0]["paras"])[0]
+    assert [c["fill"] is not None for c in t20["cells"] if c["c"] == 0] == [True] * 5
+    assert " " in qs[17]["choices"][4] and qs[17]["choices"][4].endswith("정책을 결정한 후에")
+    brackets = [p for x in doc["items"] if x["type"] == "passage" for p in x["paras"] if p["kind"] == "bracket"]
+    assert [b["label"] for b in brackets] == ["[A]", "[B]", "[A]"]
+    assert res["validation"]["checks"]["tables"] >= 9  # 표 6 + 괄호 3

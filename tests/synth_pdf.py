@@ -329,6 +329,78 @@ def build(path: str, answer_style: str = "bracket") -> dict:
     return {"questions": 5, "objective": 4, "subjective": 1}
 
 
+def build_tables(path: str) -> dict:
+    """표·묶음 괄호 특징(족보닷컴 형식): [A] 괄호 지문, <보기> 안 표(병합 칸·칸 색·칸 안 그림), 표 모양 선택지."""
+    w = Writer()
+    w.text(w.left, w.y, "※ 다음 글을 읽고 물음에 답하시오.", 7.9)
+    w.y += 10
+    lines = ["산 너머 남촌에는 누가 살길래", "해마다 봄바람이 남으로 오네", "꽃 피는 사월이면 진달래 향기",
+             "밀 익는 오월이면 보리 내음새", "어느 것 한 가진들 실어 안 오리", "남촌서 남풍 불 제 나는 좋데나"]
+    top = w.y
+    y = top + 4
+    bx = w.left + 22  # 괄호 세로선 x
+    br0, br1 = y + 13.4 * 1 + 1, y + 13.4 * 5 - 1  # 2~5행을 묶는다
+    for k, ln in enumerate(lines):
+        w.text(w.left + 34, y + 9, ln)
+        y += 13.4
+    mid = (br0 + br1) / 2
+    w.text(w.left + 13, mid + 3, "[A]")
+    w.page.draw_line(fitz.Point(bx, br0), fitz.Point(bx, mid - 7), width=0.5)
+    w.page.draw_line(fitz.Point(bx, mid + 7), fitz.Point(bx, br1), width=0.5)
+    w.page.draw_line(fitz.Point(bx, br0), fitz.Point(bx + 8, br0), width=0.5)
+    w.page.draw_line(fitz.Point(bx, br1), fitz.Point(bx + 8, br1), width=0.5)
+    w.page.draw_line(fitz.Point(w.left, top), fitz.Point(w.right, top), width=0.48)
+    w.page.draw_line(fitz.Point(w.left, y + 2), fitz.Point(w.right, y + 2), width=0.48)
+    vseg(w.page, w.left, top, y + 2)
+    vseg(w.page, w.right, top, y + 2)
+    w.y = y + 14
+
+    w.text(w.left, w.y + 14, "1.", 13.7)
+    w.text(w.left + 24, w.y + 13, "<보기>의 ㉠에 들어갈 말로 알맞은 것은?")
+    w.y += 26
+    top = w.y
+    w.text((w.left + w.right) / 2 - tl("<보기>") / 2, top + 13, "<보기>")
+    w.text(w.left + 8, top + 30, "다음 표는 [A]를 정리한 것이다.")
+    # 표: 3열 x 3행, 1행 첫 칸은 2행까지 병합, 1행 머리 칸 색, 3행 가운데 칸에 그림
+    tx0, tx1 = w.left + 10, w.right - 10
+    xs = [tx0, tx0 + 60, tx0 + 135, tx1]
+    ys = [top + 40, top + 58, top + 76, top + 116]
+    w.page.draw_rect(fitz.Rect(xs[1], ys[0], xs[3], ys[1]), color=None, fill=(0.85, 0.93, 0.82))
+    for yy in ys:
+        w.page.draw_line(fitz.Point(xs[0] if yy in (ys[0], ys[2], ys[3]) else xs[1], yy), fitz.Point(xs[3], yy), width=0.5)
+    for xx in xs:
+        w.page.draw_line(fitz.Point(xx, ys[0]), fitz.Point(xx, ys[3]), width=0.5)
+    def ctext(c: int, y: float, t: str):  # 칸 가운데 정렬
+        w.text((xs[c] + xs[c + 1]) / 2 - tl(t) / 2, y, t)
+    ctext(0, ys[1] + 3, "구분")
+    ctext(1, ys[0] + 12, "계절")
+    ctext(2, ys[0] + 12, "소재")
+    ctext(1, ys[1] + 12, "사월")
+    ctext(2, ys[1] + 12, "진달래")
+    ctext(0, ys[2] + 24, "오월")
+    w.page.insert_image(fitz.Rect(xs[1] + 15, ys[2] + 6, xs[2] - 15, ys[3] - 6), stream=_picture_png(60, 40, (0.4, 0.6, 0.8)))
+    ctext(2, ys[2] + 24, "㉠")
+    bottom = ys[3] + 10
+    w.page.draw_line(fitz.Point(w.left, top), fitz.Point(w.right, top), width=0.48)
+    w.page.draw_line(fitz.Point(w.left, bottom), fitz.Point(w.right, bottom), width=0.48)
+    vseg(w.page, w.left, top, bottom)
+    vseg(w.page, w.right, top, bottom)
+    w.y = bottom + 8
+    w.text(w.left + 30, w.y + 9, "㉠")
+    w.text(w.left + 110, w.y + 9, "㉡")
+    w.y += 16
+    for idx, (a1, a2) in enumerate([("보리", "남풍"), ("밀", "북풍"), ("쌀", "동풍"), ("콩", "서풍"), ("팥", "남풍")]):
+        w.icon("①②③④⑤"[idx], w.left + 10, w.y + 9)
+        w.text(w.left + 30, w.y + 9, a1)
+        w.text(w.left + 110, w.y + 9, a2)
+        w.y += 16
+    w.new_page()
+    w.text(w.left + 10, w.y + 9, "1) [정답] ")
+    w.icon("①", w.left + 10 + tl("1) [정답] "), w.y + 9)
+    w.doc.save(path)
+    return {"questions": 1}
+
+
 if __name__ == "__main__":
     import sys
     print(build(sys.argv[1] if len(sys.argv) > 1 else "synth.pdf"))

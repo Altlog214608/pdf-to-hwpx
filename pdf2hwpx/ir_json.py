@@ -18,6 +18,14 @@ def _para(p: Para) -> dict:
             d["indent_pt"] = p.indent_pt
         if p.role:
             d["role"] = p.role
+    elif p.kind == "table" and p.table is not None:
+        t = p.table
+        d["table"] = {"rows": len(t.ys) - 1, "cols": len(t.xs) - 1,
+                      "cells": [{"r": c.row, "c": c.col, "rs": c.rowspan, "cs": c.colspan, "fill": c.fill,
+                                 "paras": [_para(x) for x in c.paras]} for c in t.cells]}
+    elif p.kind == "bracket":
+        d["label"] = p.label
+        d["paras"] = [_para(x) for x in p.children]
     elif p.kind == "image" and p.image is not None:
         im = p.image
         d["image"] = {"page": im.page, "bbox": [round(im.x0, 1), round(im.y0, 1), round(im.x1, 1), round(im.y1, 1)]}

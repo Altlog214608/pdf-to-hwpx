@@ -178,3 +178,44 @@ def test_answers_as_endnotes_and_title_color(tmp_path):
     qs[-1].number = 9
     w = HwpxWriter(doc, style=DocStyle(answers_as_endnotes=True))
     assert w.endnotes is None and any("미주" in x for x in doc.warnings)
+
+
+def test_tables_and_brackets(tmp_path):
+    """족보닷컴 형식: [A] 묶음 괄호 지문, <보기> 안 선으로 그린 표(병합 칸·칸 색·칸 안 그림), 표 모양 선택지."""
+    import re
+    import zipfile
+    from tests.synth_pdf import build_tables
+
+    pdf = tmp_path / "t.pdf"
+    build_tables(str(pdf))
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    v = res["validation"]
+    assert v["status"] in ("PASS", "WARN") and not v["root_causes"], v
+    items = res["document"]["items"]
+    ps = [x for x in items if x["type"] == "passage"][0]
+    br = [p for p in ps["paras"] if p["kind"] == "bracket"]
+    assert len(br) == 1 and br[0]["label"] == "[A]"
+    assert [p["text"] for p in br[0]["paras"]][0].startswith("해마다") and len(br[0]["paras"]) == 4
+    assert not any(p.get("text") == "[A]" for p in ps["paras"])  # 표시는 괄호 이름으로만
+
+    q = [x for x in items if x["type"] == "question"][0]
+    box = q["blocks"][0]
+    assert box["title"] == "<보기>" and not box["diagram"]  # 표가 있다고 박스 전체를 그림으로 바꾸지 않는다
+    t = [p for p in box["paras"] if p["kind"] == "table"][0]["table"]
+    assert (t["rows"], t["cols"]) == (3, 3)
+    cells = {(c["r"], c["c"]): c for c in t["cells"]}
+    assert cells[(0, 0)]["rs"] == 2 and cells[(0, 0)]["paras"][0]["text"] == "구분"
+    assert cells[(0, 1)]["fill"] and not cells[(1, 1)]["fill"]
+    assert cells[(2, 1)]["paras"][0]["kind"] == "image"
+    assert all(p.get("align") == "CENTER" for c in t["cells"] for p in c["paras"] if p["kind"] == "text")
+    # 표 모양 선택지: 칸 사이 간격을 전각 공백으로 살리고 한 선택지로 유지
+    assert len(q["choices"]) == 5 and " " in q["choices"][0] and q["choices"][0].endswith("남풍")
+
+    with zipfile.ZipFile(res["hwpx"]) as z:
+        sec = z.read("Contents/section0.xml").decode("utf-8")
+        header = z.read("Contents/header.xml").decode("utf-8")
+    assert sec.count("<hp:tbl ") == 2 and v["checks"]["tables"] == 2
+    assert 'rowSpan="2"' in sec and 'treatAsChar="1"' in sec
+    # 괄호 칸: 왼쪽/위/아래 선만 있는 테두리( [ 모양 )
+    assert re.search(r'<hh:leftBorder type="SOLID"[^>]*/><hh:rightBorder type="NONE"[^>]*/><hh:topBorder type="SOLID"'
+                     r'[^>]*/><hh:bottomBorder type="SOLID"', header)
