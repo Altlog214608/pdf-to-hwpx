@@ -1,6 +1,7 @@
 """출력 HWPX의 문서 스타일 옵션 (웹 화면/CLI에서 지정)."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -17,6 +18,8 @@ class DocStyle:
     logo: Optional[bytes] = None     # 학원 로고 그림(PNG/JPG). 있으면 이름 대신 사용
     title: str = ""                  # 바탕쪽 제목, 예: "[중간 대비] 2. 품격을 높이는 언어생활 ①"
     title_size: float = 14.0
+    title_color: str = "#000000"     # 제목 글자 색(#RRGGBB)
+    answers_as_endnotes: bool = False  # 정답·해설을 각 문제에 연결된 미주로 넣기(문서 끝에 모임)
     frame: bool = False              # 페이지 바깥 네모 테두리
     extra: dict = field(default_factory=dict)
 
@@ -33,6 +36,8 @@ class DocStyle:
         self.title_size = max(9.0, min(24.0, float(self.title_size)))
         self.academy_name = self.academy_name.strip()[:30]
         self.title = self.title.strip()[:80]
+        c = str(self.title_color or "").strip()
+        self.title_color = c.upper() if re.fullmatch(r"#[0-9A-Fa-f]{6}", c) else "#000000"
         for name in ("body_font", "title_font"):
             v = str(getattr(self, name) or "").strip()[:40]
             setattr(self, name, v or DocStyle.__dataclass_fields__[name].default)
@@ -49,10 +54,13 @@ class DocStyle:
             title=str(d.get("title") or ""),
             title_size=float(d.get("title_size") or cls.title_size),
             frame=bool(d.get("frame")),
+            title_color=str(d.get("title_color") or "#000000"),
+            answers_as_endnotes=bool(d.get("answers_as_endnotes")),
         )
         return s.validate()
 
     def summary(self) -> dict:
         return {"body_font": self.body_font, "title_font": self.title_font, "body_size": self.body_size,
                 "academy_name": self.academy_name, "logo": bool(self.logo), "title": self.title,
-                "title_size": self.title_size, "frame": self.frame}
+                "title_size": self.title_size, "frame": self.frame, "title_color": self.title_color,
+                "answers_as_endnotes": self.answers_as_endnotes}

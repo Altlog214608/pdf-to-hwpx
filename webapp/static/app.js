@@ -26,6 +26,8 @@
     logoURL: null,      // 로고 미리보기 URL
     logoSize: null,
     academyMode: "text",
+    titleColor: "#000000",
+    answerMode: "end",   // "end" | "endnote"
     converted: false,
     downloaded: false,
     timer: null,
@@ -73,10 +75,25 @@
       localStorage.setItem(PREF_KEY, JSON.stringify({
         academy: $("#in-academy").value, academyMode: state.academyMode === "logo" ? "text" : state.academyMode,
         font: $("#in-font").value, titleFont: $("#in-title-font").value, size: $("#in-size").value,
-        frame: $("#in-frame").checked,
+        frame: $("#in-frame").checked, titleColor: state.titleColor, answerMode: state.answerMode,
       }));
     } catch (_) { /* 저장 안 되는 환경 */ }
   }
+
+  // ---------------------------------------------------------------- theme --
+  const darkMQ = window.matchMedia("(prefers-color-scheme: dark)");
+  const isDark = () => (document.documentElement.dataset.theme || (darkMQ.matches ? "dark" : "light")) === "dark";
+  function syncThemeLabel() {
+    $("#btn-theme").setAttribute("aria-label", isDark() ? "밝은 화면으로 바꾸기" : "어두운 화면으로 바꾸기");
+  }
+  $("#btn-theme").addEventListener("click", () => {
+    const next = isDark() ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem("pdf2hwpx:theme", next); } catch (_) { /* 저장 안 되는 환경 */ }
+    syncThemeLabel();
+  });
+  darkMQ.addEventListener("change", syncThemeLabel);
+  syncThemeLabel();
 
   // ---------------------------------------------------------- drag & drop --
   let dragDepth = 0;
@@ -240,6 +257,8 @@
     if (p.size) $("#in-size").value = p.size;
     if (typeof p.frame === "boolean") $("#in-frame").checked = p.frame;
     if (p.academy) $("#in-academy").value = p.academy;
+    setTitleColor(/^#[0-9a-fA-F]{6}$/.test(p.titleColor || "") ? p.titleColor : "#000000", false);
+    setAnswerMode(p.answerMode === "endnote" ? "endnote" : "end", false);
     setAcademyMode(p.academyMode || "text", false);
     $("#out-size").textContent = (+$("#in-size").value).toFixed(1).replace(/\.0$/, "");
   }
@@ -251,6 +270,35 @@
     if (render) onSettingsChange();
   }
   $$("[data-academy-mode]").forEach((b) => b.addEventListener("click", () => setAcademyMode(b.dataset.academyMode)));
+
+  // 제목 글자 색
+  function setTitleColor(color, render = true) {
+    state.titleColor = color.toUpperCase();
+    let preset = false;
+    $$("#title-colors [data-color]").forEach((b) => {
+      const on = b.dataset.color.toUpperCase() === state.titleColor;
+      preset = preset || on;
+      b.setAttribute("aria-checked", String(on));
+    });
+    $("#in-title-color").value = state.titleColor.toLowerCase();
+    $(".swatch-custom").classList.toggle("is-on", !preset);
+    if (render) onSettingsChange();
+  }
+  $$("#title-colors [data-color]").forEach((b) => b.addEventListener("click", () => setTitleColor(b.dataset.color)));
+  $("#in-title-color").addEventListener("input", (e) => setTitleColor(e.target.value));
+
+  // 정답·해설 넣는 방식
+  const ANSWER_NOTE = {
+    end: "정답·해설을 문제 뒤에 [정답 및 해설] 쪽으로 이어 붙입니다.",
+    endnote: "각 문제에 미주로 연결해 문서 끝에 모읍니다(한글 ‘미주’). 문제 쪽에는 미주 번호가 보이지 않게 숨겨요.",
+  };
+  function setAnswerMode(mode, render = true) {
+    state.answerMode = mode;
+    $$("[data-answer-mode]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.answerMode === mode)));
+    $("#answer-note").textContent = ANSWER_NOTE[mode];
+    if (render) onSettingsChange();
+  }
+  $$("[data-answer-mode]").forEach((b) => b.addEventListener("click", () => setAnswerMode(b.dataset.answerMode)));
 
   ["#in-academy", "#in-title", "#in-font", "#in-title-font", "#in-size", "#in-frame"].forEach((sel) => {
     $(sel).addEventListener("input", onSettingsChange);
@@ -307,6 +355,8 @@
       use_logo: mode === "logo" && !!state.logoURL,
       title: $("#in-title").value.trim(),
       frame: $("#in-frame").checked,
+      title_color: state.titleColor || "#000000",
+      answers_as_endnotes: state.answerMode === "endnote",
     };
   }
 
@@ -371,6 +421,7 @@
     ti.textContent = o.title || "시험 제목 입력";
     ti.classList.toggle("is-empty", !o.title);
     ti.style.fontSize = `${titlePx}px`;
+    ti.style.color = o.title ? o.title_color : "";
     ti.style.fontFamily = FONT_STACK[o.title_font] || "inherit";
     ti.style.borderLeftWidth = state.academyMode === "none" ? "0" : "";
 
@@ -449,7 +500,7 @@
     $("#result-summary").innerHTML = [
       ["문제", sm.questions != null ? `${sm.questions}개` : null],
       ["객관식/서술형", sm.objective != null ? `${sm.objective}/${sm.subjective}` : null],
-      ["박스", sm.boxes], ["그림", sm.pictures], ["정답", sm.answers],
+      ["박스", sm.boxes], ["그림", sm.pictures], ["정답", sm.answers], ["미주", sm.endnotes || null],
       ["원문 반영", sm.coverage != null ? `${Math.round(sm.coverage * 100)}%` : null],
     ].filter(([, v]) => v != null).map(([k, v]) => `<li>${k}<b>${v}</b></li>`).join("");
     const a = $("#btn-download");

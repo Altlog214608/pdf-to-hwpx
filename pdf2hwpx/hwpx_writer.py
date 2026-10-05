@@ -18,7 +18,7 @@ from typing import Optional
 from xml.sax.saxutils import escape
 
 from .masterpage import MARGINS_WITH_MASTER, PAPER_W, Logo, MasterIds, build_masterpage
-from .model import AuxBlock, Document, ImageEl, Para, Passage, Question, Run
+from .model import AnswerEntry, AuxBlock, Document, ImageEl, Para, Passage, Question, Run
 from .style import DocStyle
 
 PT_TO_HWP = 110  # PDF pt -> HWPUNIT (원본 9.1pt 글자 ≈ 출력 10pt 글자 비율)
@@ -35,6 +35,23 @@ PP = {
 }
 # 템플릿 글자 모양 id
 CP = {"body": 0, "body_ul": 8, "guide": 7, "bold": 9, "bold_ul": 10}
+
+
+ANSWER_NUM_RE = re.compile(r"^\s*\d{1,2}\s*\)\s*")
+
+
+def _strip_prefix(runs: list[Run], pat: re.Pattern) -> list[Run]:
+    """글자 모양을 유지한 채 runs 앞부분에서 pat에 맞는 글자를 지운다(정답 줄의 `1)` 등)."""
+    m = pat.match("".join(r.text for r in runs))
+    cut = m.end() if m else 0
+    out = []
+    for r in runs:
+        if cut >= len(r.text):
+            cut -= len(r.text)
+            continue
+        out.append(Run(r.text[cut:], bold=r.bold, underline=r.underline) if cut else r)
+        cut = 0
+    return out
 
 
 def _tpl(name: str) -> str:
@@ -180,12 +197,34 @@ class HwpxWriter:
             S = self.styles
             self.master_ids = MasterIds(
                 frame_bf=S.add_border_fill(), black_bf=S.add_border_fill(fill="#000000"),
-                title_cp=S.add_char(CP["bold"], int(st.title_size * 100), font_id=0),
+                title_cp=S.add_char(CP["bold"], int(st.title_size * 100), color=st.title_color, font_id=0),
                 academy_cp=S.add_char(CP["bold"], int(st.title_size * 100), color="#FFFFFF", font_id=0),
                 center_pp=S.derive(0, align="CENTER"), plain_pp=0, plain_cp=0)
             if st.logo:
                 self.logo = self._add_logo(st.logo)
+        self.endnotes = self._plan_endnotes()
+        self.hidden_cp = (self.styles.add_char(CP["body"], 100, color="#FFFFFF", bold=False, font_id=1)
+                          if self.endnotes else None)
 
+    def _plan_endnotes(self) -> Optional[dict[int, AnswerEntry]]:
+        """미주 번호는 한글이 1, 2, 3…으로 자동으로 매기므로 문제 번호가 연속이고 모든 문제에 정답이 있을 때만 쓴다."""
+        if not self.style.answers_as_endnotes or not self.doc.answers:
+            return None
+        nums = [it.number for it in self.doc.items if isinstance(it, Question)]
+        ans = {a.number: a for a in self.doc.answers}
+        reason = None
+        if not nums:
+            reason = "문제를 찾지 못함"
+        elif nums != list(range(nums[0], nums[0] + len(nums))):
+            reason = "문제 번호가 연속이 아님"
+        elif len(ans) != len(self.doc.answers) or set(ans) != set(nums):
+            reason = "정답 번호와 문제 번호가 일치하지 않음"
+        if reason:
+            self.doc.warnings.append(f"정답을 미주로 넣지 못하고 문서 끝에 모았습니다({reason}).")
+            self.stats["endnotes"] = 0
+            return None
+        self.stats["endnotes"] = len(nums)
+        return ans
     def _add_logo(self, data: bytes) -> Optional[Logo]:
         try:
             import pymupdf as fitz
@@ -317,12 +356,38 @@ class HwpxWriter:
         self.stats["spacers"] += 1
         return out
 
+    def _note_p(self, pp: int, inner: str) -> str:
+        return (f'<hp:p id="2147483648" paraPrIDRef="{pp}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+                f'{inner}</hp:p>')
+
+    def _endnote(self, a: AnswerEntry) -> str:
+        """문제 첫 줄 앞에 숨긴(1pt 흰 글자) 미주 표시를 넣고, 정답·해설은 미주 본문으로 문서 끝에 모은다.
+        수작업 시험지와 같은 방식: 미주 번호 `1)`이 원래 정답 줄의 번호를 대신한다."""
+        S = self.styles
+        num = a.number
+        auto = (f'<hp:run charPrIDRef="{CP["body"]}"><hp:ctrl><hp:autoNum num="{num}" numType="ENDNOTE">'
+                '<hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/>'
+                '</hp:autoNum></hp:ctrl><hp:t> </hp:t></hp:run>')
+        head_runs = _strip_prefix(a.head.runs, ANSWER_NUM_RE)
+        paras = [self._note_p(PP["ans_head"], auto + (self._runs_xml(head_runs) if head_runs else ""))]
+        for p in a.paras:
+            if p.kind != "text":
+                continue
+            paras.append(self._note_p(S.derive(PP["ans_expl"], left=0, intent=_indent_hwp(p.indent_pt)),
+                                      self._runs_xml(p.runs, base_bold=p.role == "heading")))
+        inst = self._rng.randint(10 ** 9, 2 * 10 ** 9)
+        return (f'<hp:run charPrIDRef="{self.hidden_cp}"><hp:ctrl><hp:endNote number="{num}" suffixChar="41" instId="{inst}">'
+                '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" '
+                'linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">'
+                f'{"".join(paras)}</hp:subList></hp:endNote></hp:ctrl></hp:run>')
+
     def _question(self, q: Question, first_after_passage: bool) -> list[str]:
         S = self.styles
         digits = len(str(q.number))
         hang = self._hang(1400 if digits == 1 else 1950)
         stem_pp = S.derive(PP["stem_first"] if first_after_passage else PP["stem"], intent=-hang)
-        out = [self._p(stem_pp, self._runs_xml(q.stem.runs, True))]
+        note = self._endnote(self.endnotes[q.number]) if self.endnotes else ""
+        out = [self._p(stem_pp, note + self._runs_xml(q.stem.runs, True))]
         n_blocks = len(q.blocks)
         for i, b in enumerate(q.blocks):
             out.extend(self._block(b, i == n_blocks - 1 and not q.choices and not q.after))
@@ -371,6 +436,10 @@ class HwpxWriter:
         secpr = re.sub(r'<hp:margin header="\d+" footer="\d+" gutter="0" left="\d+" right="\d+" top="\d+" bottom="\d+"/>',
                        f'<hp:margin header="{m["header"]}" footer="{m["footer"]}" gutter="0" left="{m["left"]}" '
                        f'right="{m["right"]}" top="{m["top"]}" bottom="{m["bottom"]}"/>', secpr, count=1)
+        if self.endnotes:  # 미주 번호를 첫 문제 번호부터
+            first_no = min(self.endnotes)
+            secpr = re.sub(r'(<hp:endNotePr>.*?<hp:numbering type="CONTINUOUS" newNum=")\d+"',
+                           lambda mm: f'{mm.group(1)}{first_no}"', secpr, count=1, flags=re.S)
         if master_id:
             secpr = secpr.replace('masterPageCnt="0"', 'masterPageCnt="1"')
             secpr = secpr.replace("</hp:secPr>", f'<hp:masterPage idRef="{master_id}"/></hp:secPr>')
@@ -403,7 +472,7 @@ class HwpxWriter:
                     body.append(self._p(PP["plain"], self._runs_xml(it.runs)))
         mp = self.master_ids is not None
         sections = [self.section_xml(body, "masterpage0" if mp else None)]
-        if self.doc.answers:
+        if self.doc.answers and not self.endnotes:
             sections.append(self.section_xml(self._answers(), "masterpage1" if mp else None))
         return sections
 

@@ -211,6 +211,7 @@ async def convert_job(job_id: str, request: Request) -> dict:
         "summary": {"questions": c.get("question_count"), "objective": c.get("objective"),
                     "subjective": c.get("subjective"), "boxes": c.get("box_groups"),
                     "pictures": c.get("pictures"), "answers": c.get("answer_count"),
+                    "endnotes": c.get("endnotes"),
                     "coverage": c.get("text_coverage")},
     }
 

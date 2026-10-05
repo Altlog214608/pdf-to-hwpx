@@ -36,6 +36,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--academy", default="", help="바탕쪽 학원 이름(검은 칸 흰 글씨)")
     ap.add_argument("--logo", help="학원 로고 그림 파일(PNG/JPG). 지정하면 학원 이름 대신 사용")
     ap.add_argument("--frame", action="store_true", help="페이지 바깥 네모 테두리")
+    ap.add_argument("--title-color", default="#000000", help="제목 글자 색, 예: #555555")
+    ap.add_argument("--endnotes", action="store_true", help="정답·해설을 각 문제에 연결된 미주로 넣기")
     args = ap.parse_args(argv)
     try:  # Windows 콘솔(cp949)에서 특수 문자 때문에 멈추지 않게
         sys.stdout.reconfigure(errors="replace")  # type: ignore[attr-defined]
@@ -44,7 +46,8 @@ def main(argv: list[str] | None = None) -> int:
 
     logo = Path(args.logo).read_bytes() if args.logo else None
     style = DocStyle(body_font=args.font, body_size=args.size, title=args.title, academy_name=args.academy,
-                     logo=logo, frame=args.frame).validate()
+                     logo=logo, frame=args.frame, title_color=args.title_color,
+                     answers_as_endnotes=args.endnotes).validate()
     pdfs = _expand(args.inputs)
     if not pdfs:
         print("입력 PDF가 없습니다.", file=sys.stderr)

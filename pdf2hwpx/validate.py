@@ -91,8 +91,21 @@ def read_hwpx(path: str) -> dict:
                 for r in p.iter(f"{{{NS['hp']}}}run"):
                     if r.get("charPrIDRef") not in char_ids:
                         out["errors"].append(f"{sec}: 없는 charPr {r.get('charPrIDRef')}")
-                text = "".join(t.text or "" for t in p.iter(f"{{{NS['hp']}}}t"))
+                # 미주(정답·해설) 본문은 문제 문단의 글자가 아니라 따로 센다
+                notes = list(p.iter(f"{{{NS['hp']}}}endNote"))
+                in_note = {id(t) for n in notes for t in n.iter(f"{{{NS['hp']}}}t")}
+                text = "".join(t.text or "" for t in p.iter(f"{{{NS['hp']}}}t") if id(t) not in in_note)
                 pics = len(list(p.iter(f"{{{NS['hp']}}}pic")))
+                for n in notes:
+                    out["endnotes"] = out.get("endnotes", 0) + 1
+                    for np_ in n.iter(f"{{{NS['hp']}}}p"):
+                        if np_.get("paraPrIDRef") not in para_props:
+                            out["errors"].append(f"{sec}: 미주 안 없는 paraPr {np_.get('paraPrIDRef')}")
+                        # 미주 번호(autoNum)는 한글이 그리는 글자이므로 원문 대조용으로 `1)`을 붙인다
+                        auto = "".join(f"{a.get('num')})" for a in np_.iter(f"{{{NS['hp']}}}autoNum"))
+                        out["paragraphs"].append({"section": sec, "pp": np_.get("paraPrIDRef"), "note": True,
+                                                  "text": auto + "".join(t.text or "" for t in np_.iter(f"{{{NS['hp']}}}t")),
+                                                  "pics": 0, "boxed": False, "bf": None, "align": None})
                 out["pictures"] += pics
                 prop = para_props.get(pid, {})
                 boxed = bool(bf_solid.get(prop.get("bf"))) and prop.get("connect") == "1"
@@ -173,7 +186,7 @@ def validate(ex: Extraction, doc: Document, hwpx_path: str) -> dict:
     checks["objective"] = sum(1 for q in qs if q.qtype == "objective")
     checks["subjective"] = len(qs) - checks["objective"]
     seq_ok = [q.number for q in qs] == list(range(1, len(qs) + 1))
-    sec0 = [p for p in paras if p["section"].endswith("section0.xml")]
+    sec0 = [p for p in paras if p["section"].endswith("section0.xml") and not p.get("note")]
     k = 0
     for p in sec0:
         if k < len(qs) and re.match(rf"^\s*{qs[k].number}\s*\.", p["text"]):
@@ -194,6 +207,9 @@ def validate(ex: Extraction, doc: Document, hwpx_path: str) -> dict:
     if src_heads and len(doc.answers) < src_heads:
         causes.append(f"정답·해설 인식 실패: 원문 정답 머리줄 {src_heads}개 중 {len(doc.answers)}개만 인식")
     checks["answer_count"] = len(doc.answers)
+    checks["endnotes"] = hx.get("endnotes", 0)
+    if checks["endnotes"] and checks["endnotes"] != len(doc.answers):
+        causes.append(f"미주 수({checks['endnotes']}) != 정답 수({len(doc.answers)})")
     checks["loose_items"] = doc.loose_notes[:20]  # 문제/지문 밖 내용(단원 제목 박스 등) — 경고 아님
 
     # ---- 박스 ----

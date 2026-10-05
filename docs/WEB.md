@@ -27,6 +27,8 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
    - 미리보기의 학원 칸·제목 칸을 누르면 해당 입력칸으로 이동.
    - 제목 후보는 PDF 머리글에서 찾아 칩으로 보여 줌(`[중간 대비]` 같은 앞머리는 유지).
    - 본문 글꼴 7종, 크기 8~13pt(0.5 단위). 마지막 설정은 브라우저에 기억.
+   - 제목 글자 색(견본 5색 + 직접 고르기), 정답·해설 방식(문서 끝에 모으기 / 문제와 미주로 연결).
+   - 오른쪽 위 버튼으로 밝은/어두운 화면 전환.
 3. **다운로드**: 구조 검사 결과(문제 수·박스·정답·원문 반영률)와 남은 다운로드 시간 표시.
    설정을 바꾸면 "다시 변환" 상태가 됨.
 
@@ -46,7 +48,7 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 | POST | `/api/jobs` (multipart `file`) | 업로드 + 분석: `text_layer`, `title_candidates`, `sample`, `stats` |
 | GET | `/api/jobs/{id}/page1.png` | 원본 1쪽 그림 |
 | POST/DELETE | `/api/jobs/{id}/logo` | 로고 그림(PNG/JPG, 2MB) |
-| POST | `/api/jobs/{id}/convert` (JSON) | `body_font, title_font, body_size, academy_name, use_logo, title, frame` |
+| POST | `/api/jobs/{id}/convert` (JSON) | `body_font, title_font, body_size, academy_name, use_logo, title, title_color, frame, answers_as_endnotes` |
 | GET | `/api/jobs/{id}/download/{token}` | HWPX (만료 시 410) |
 | DELETE · POST `.../delete` | `/api/jobs/{id}` | 작업 삭제 |
 | GET | `/healthz` | 상태 확인(로드밸런서용) |
@@ -91,6 +93,5 @@ docker build -t pdf2hwpx-web .; docker run --rm -p 8000:8000 pdf2hwpx-web
 
 ## 7. 아직 없는 것
 
-- 정답·해설을 미주(각주)로 넣는 옵션 — 수작업 파일은 정답을 미주로 넣었음. 원하면 추가.
 - 제목 글꼴에 학원 전용 글꼴(예: 디자인 글꼴) 지정 — 글꼴 이름을 알려 주면 목록에 추가. 단 열어 보는 PC에 설치돼 있어야 함.
 - 표가 들어간 PDF 대응(표 샘플 PDF 필요).

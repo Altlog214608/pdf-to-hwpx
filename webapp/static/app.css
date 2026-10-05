@@ -16,6 +16,13 @@
   --ui: "Pretendard Variable", Pretendard, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
   color-scheme: light;
 }
+/* 다크 모드: 시스템 설정을 따르되, 오른쪽 위 버튼으로 고른 값(data-theme)이 우선 */
+:root[data-theme="dark"] {
+    --bg: #0f1115; --surface: #171a20; --surface-2: #1e222a; --line: #2a2f39;
+    --text: #eceef2; --muted: #9aa1ad; --accent: #7088ff; --accent-soft: #232b4d;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+    color-scheme: dark;
+}
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #0f1115; --surface: #171a20; --surface-2: #1e222a; --line: #2a2f39;
@@ -256,3 +263,28 @@ svg text { font: 800 13px var(--ui); fill: var(--accent); letter-spacing: .04em;
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ---------- theme toggle ---------- */
+.theme-btn { display: grid; place-items: center; width: 36px; height: 36px; margin-left: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); color: var(--text); cursor: pointer; transition: border-color .15s, transform .15s; }
+.theme-btn:hover { border-color: var(--accent); transform: translateY(-1px); }
+.theme-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.theme-btn .i-sun { display: none; }
+:root[data-theme="dark"] .theme-btn .i-sun { display: block; }
+:root[data-theme="dark"] .theme-btn .i-moon { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .theme-btn .i-sun { display: block; }
+  :root:not([data-theme="light"]) .theme-btn .i-moon { display: none; }
+}
+@media (max-width: 980px) { .topbar .privacy { margin-left: auto; } }
+
+/* ---------- title color swatches ---------- */
+.swatches { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.swatches button { width: 28px; height: 28px; border-radius: 50%; border: 2px solid var(--surface); background: var(--c); cursor: pointer; box-shadow: 0 0 0 1px var(--line); transition: transform .12s, box-shadow .12s; }
+.swatches button:hover { transform: scale(1.08); }
+.swatches button[aria-checked="true"] { box-shadow: 0 0 0 2px var(--accent); }
+.swatch-custom { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 4px; border: 1px solid var(--line); border-radius: 999px; font-size: 12.5px; color: var(--muted); cursor: pointer; }
+.swatch-custom.is-on { border-color: var(--accent); color: var(--accent); }
+.swatch-custom input { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer; }
+.swatch-custom input::-webkit-color-swatch-wrapper { padding: 0; }
+.swatch-custom input::-webkit-color-swatch { border: 1px solid var(--line); border-radius: 50%; }
+.seg.seg-2 { grid-template-columns: repeat(2, 1fr); }
