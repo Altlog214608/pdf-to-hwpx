@@ -167,7 +167,8 @@ DIALOG = "“그날 밤에 무슨 일이 있었습니까?” 하고 물었다."
 POEM = ["바람이 불어오는 언덕에서", "나는 오래 너를 기다렸다", None, "해가 지고 별이 뜨면", "그리움도 잠이 든다"]
 
 
-def build(path: str) -> dict:
+def build(path: str, answer_style: str = "bracket") -> dict:
+    """answer_style: 'bracket' = '1) [정답] ③ / [해설] …', 'plain' = '1) 정답 ③ / 오답 point / …'(최다오답·최상위 공략형)"""
     w = Writer()
     # ---------- 지문 1: (가) 산문 + (나) 시, 단을 넘어가는 박스 ----------
     w.text(w.left, w.y, "※ 다음 글을 읽고 물음에 답하시오.", 7.9)
@@ -309,15 +310,20 @@ def build(path: str) -> dict:
     # ---------- 정답 및 해설 ----------
     w.new_page()
     for n, ans in enumerate(["③", "⑤", "①", "주제는 그리움이다.", "①"], start=1):
-        w.text(w.left + 10, w.y + 9, f"{n}) [정답] ")
+        head = f"{n}) [정답] " if answer_style == "bracket" else f"{n}) 정답 "
+        w.text(w.left + 10, w.y + 9, head)
         if ans in ICONS:
-            w.icon(ans, w.left + 10 + tl(f"{n}) [정답] "), w.y + 9)
+            w.icon(ans, w.left + 10 + tl(head), w.y + 9)
         else:
-            w.text(w.left + 10 + tl(f"{n}) [정답] "), w.y + 9, ans)
+            w.text(w.left + 10 + tl(head), w.y + 9, ans)
         w.y += 13
-        w.text(w.left + 10, w.y + 9, "[해설] 해설 첫 줄입니다. ")
-        w.icon("②", w.left + 10 + tl("[해설] 해설 첫 줄입니다. "), w.y + 9)
-        w.text(w.left + 22 + tl("[해설] 해설 첫 줄입니다. "), w.y + 9, "는 오답이다.")
+        if answer_style == "plain":
+            w.text(w.left + 10, w.y + 9, "오답 point")
+            w.y += 13
+        lead = "[해설] 해설 첫 줄입니다. " if answer_style == "bracket" else "해설 첫 줄입니다. "
+        w.text(w.left + 10, w.y + 9, lead)
+        w.icon("②", w.left + 10 + tl(lead), w.y + 9)
+        w.text(w.left + 22 + tl(lead), w.y + 9, "는 오답이다.")
         w.y += 22
     w.doc.save(path)
     return {"questions": 5, "objective": 4, "subjective": 1}

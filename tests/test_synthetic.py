@@ -96,3 +96,15 @@ def test_choice_credit_lines(result):
     assert q3["choices"][0] == "① 현저동"  # 출전이 선택지 본문에 붙지 않음
     assert q3["choice_credits"]["①"] == ["- 작가1, <작품1>"]
     assert q3["choice_credits"]["⑤"] == ["- 작가5, <작품5>"] and q3["after"] == []
+
+
+def test_plain_answer_format(tmp_path):
+    """'1) 정답 ③' + '오답 point' 소제목 형식(최다오답·최상위 공략)도 정답부로 인식한다."""
+    pdf = tmp_path / "plain.pdf"
+    build(str(pdf), answer_style="plain")
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    assert res["validation"]["root_causes"] == []
+    qs = {q["number"]: q for q in _items(res, "question")}
+    assert [qs[n]["answer"] for n in (1, 2, 3, 5)] == ["③", "⑤", "①", "①"]
+    assert qs[5]["after"] == [] or all(a.get("text", "") != "1) 정답" for a in qs[5]["after"])
+    assert qs[1]["explanation"][0] == "오답 point"
