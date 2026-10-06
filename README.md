@@ -14,6 +14,10 @@ pip install -r requirements.txt; python .\v0_5_pdf_to_hwpx.py ".\[꼭 나오는 
 
 ## 웹사이트 (v0.6)
 
+**Windows에서 더블클릭**: 압축을 푼 폴더의 `실행하기.bat` → (Python이 없으면 자동 설치) → 브라우저가 열립니다.
+검은 창을 닫으면 꺼집니다. 처음에 "Windows의 PC 보호" 창이 뜨면 **추가 정보 → 실행**.
+
+명령어로 실행:
 ```powershell
 pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\server.py
 ```

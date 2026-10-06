@@ -3,7 +3,18 @@
 PDF를 끌어다 놓으면 머리 부분(학원 이름·로고, 시험 제목, 바깥 테두리)과 본문 글꼴·크기를 미리 보며 정하고
 HWPX로 내려받는 사이트입니다. 변환기(`pdf2hwpx/`)를 그대로 쓰고, 웹 부분은 `webapp/`에만 있습니다.
 
-## 1. 로컬 실행 (Windows PowerShell)
+## 1. 로컬 실행
+
+### 더블클릭 실행 (Python 설치 몰라도 됨)
+압축을 푼 폴더에서 `실행하기.bat`을 더블클릭합니다. `tools/start_web.ps1`이 다음을 합니다.
+1. Python(3.10 이상) 확인 → 없으면 `winget`으로 사용자 설치(관리자 권한 불필요). winget이 없으면 python.org 안내.
+2. 폴더 안 `.venv`에 부품 설치(처음 한 번, `requirements*.txt`가 바뀌면 다시).
+3. 서버 실행(8000번이 쓰이고 있으면 8001…) 후 브라우저 열기. 검은 창을 닫으면 서버도 꺼짐.
+
+처음 받은 ZIP의 `.bat`을 실행하면 "Windows의 PC 보호" 창이 뜰 수 있습니다 → **추가 정보 → 실행**.
+ZIP은 반드시 **압축을 푼 뒤** 실행합니다.
+
+### 명령어로 실행 (Windows PowerShell)
 
 ```powershell
 pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\server.py
@@ -74,16 +85,20 @@ CLI에서도 같은 옵션을 쓸 수 있습니다:
 
 변환은 CPU만 쓰고 1개 PDF당 1~3초, 메모리 300MB 안팎입니다.
 
-**권장: 컨테이너 1개 (App Runner 또는 ECS Fargate)**
+**권장: Lightsail 컨테이너 서비스 Micro(1GB, 서울 리전)** — 월 고정 요금, 기본 주소에 HTTPS 자동.
+(App Runner는 2026-04-30부터 신규 고객을 받지 않고, 서울 리전도 없음)
 
 ```powershell
 docker build -t pdf2hwpx-web .; docker run --rm -p 8000:8000 pdf2hwpx-web
 ```
 
-1. ECR에 이미지 푸시 → App Runner 서비스 생성(포트 8000, 헬스체크 `/healthz`, 1 vCPU / 2GB).
-2. **인스턴스는 1개로 고정**합니다. 작업 상태를 메모리와 로컬 디스크에 두므로, 여러 대로 늘리면
+1. `aws lightsail push-container-image`로 이미지 업로드 → 컨테이너 서비스 생성(포트 8000, 헬스체크 `/healthz`).
+2. **노드는 1개로 고정**합니다. 작업 상태를 메모리와 로컬 디스크에 두므로, 여러 대로 늘리면
    업로드와 변환 요청이 다른 서버로 가서 404가 납니다.
-3. 도메인·HTTPS는 App Runner 기본 제공. 업로드 크기 제한(40MB) 이상을 받는 프록시가 없도록 확인.
+3. 소수만 쓰는 경우 접속 제한(초대 링크)을 켠 뒤 공개합니다(예정).
+
+**배포 전 임시 공유**: PC에서 서버를 켜고 `cloudflared tunnel --url http://localhost:8000`
+(계정 없이 임시 `https://….trycloudflare.com` 주소, PC가 켜져 있는 동안만).
 
 **사용자가 늘면 (수평 확장)**: 작업 상태를 공유 저장소로 옮깁니다.
 - 원본·결과 → S3 버킷(수명 주기 규칙 1일 삭제), 다운로드는 10분짜리 presigned URL.
