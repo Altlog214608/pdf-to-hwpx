@@ -59,7 +59,11 @@ def read_hwpx(path: str) -> dict:
                     sections.append(href)
         head = xml_parts.get("Contents/header.xml")
         para_props, char_ids, bf_solid = {}, set(), {}
+        num_start: dict[str, int] = {}  # 문단 번호 모양 id -> 1수준 시작 번호
         if head is not None:
+            for nb in head.iter(f"{{{NS['hh']}}}numbering"):
+                ph = next((x for x in nb.findall("hh:paraHead", NS) if x.get("level") == "1"), None)
+                num_start[nb.get("id")] = int(ph.get("start", "1")) if ph is not None else 1
             for bf in head.iter(f"{{{NS['hh']}}}borderFill"):
                 lb = bf.find("hh:leftBorder", NS)
                 bf_solid[bf.get("id")] = lb is not None and lb.get("type") not in (None, "NONE")
@@ -69,7 +73,9 @@ def read_hwpx(path: str) -> dict:
                 ls = pp.find(".//hh:lineSpacing", NS)
                 if ls is not None and not re.fullmatch(r"[A-Z_]+", ls.get("type") or ""):
                     out["errors"].append(f"paraPr {pp.get('id')} lineSpacing type 값 손상: {ls.get('type')!r}")
+                hd = pp.find("hh:heading", NS)
                 para_props[pp.get("id")] = {
+                    "num": hd.get("idRef") if hd is not None and hd.get("type") == "NUMBER" else None,
                     "bf": b.get("borderFillIDRef") if b is not None else None,
                     "connect": b.get("connect") if b is not None else "0",
                     "align": al.get("horizontal") if al is not None else None,
@@ -80,6 +86,8 @@ def read_hwpx(path: str) -> dict:
                 el = head.find(f".//hh:{tag}", NS)
                 if el is not None and int(el.get("itemCnt", "-1")) != len(ids):
                     out["errors"].append(f"{tag} itemCnt 불일치 ({el.get('itemCnt')} != {len(ids)})")
+        num_next: dict[str, int] = {}
+        out["auto_numbers"] = 0
         for sec in sorted(sections):
             root = xml_parts.get(sec)
             if root is None:
@@ -88,13 +96,22 @@ def read_hwpx(path: str) -> dict:
                 pid = p.get("paraPrIDRef")
                 if pid not in para_props:
                     out["errors"].append(f"{sec}: 없는 paraPr {pid}")
+                nid = para_props.get(pid, {}).get("num")
+                auto_no = ""
+                if nid is not None:  # 한글이 그리는 문단 번호: 원문 대조용으로 `12.`을 붙인다
+                    if nid not in num_start:
+                        out["errors"].append(f"{sec}: 없는 문단 번호 모양 {nid}")
+                    n = num_next.get(nid, num_start.get(nid, 1))
+                    num_next[nid] = n + 1
+                    auto_no = f"{n}."
+                    out["auto_numbers"] += 1
                 for r in p.iter(f"{{{NS['hp']}}}run"):
                     if r.get("charPrIDRef") not in char_ids:
                         out["errors"].append(f"{sec}: 없는 charPr {r.get('charPrIDRef')}")
                 # 미주(정답·해설) 본문은 문제 문단의 글자가 아니라 따로 센다
                 notes = list(p.iter(f"{{{NS['hp']}}}endNote"))
                 in_note = {id(t) for n in notes for t in n.iter(f"{{{NS['hp']}}}t")}
-                text = "".join(t.text or "" for t in p.iter(f"{{{NS['hp']}}}t") if id(t) not in in_note)
+                text = auto_no + "".join(t.text or "" for t in p.iter(f"{{{NS['hp']}}}t") if id(t) not in in_note)
                 pics = len(list(p.iter(f"{{{NS['hp']}}}pic")))
                 for n in notes:
                     out["endnotes"] = out.get("endnotes", 0) + 1
@@ -152,7 +169,10 @@ def read_hwpx(path: str) -> dict:
     return out
 
 
-def _source_lines(ex: Extraction) -> list[Line]:
+def _source_lines(ex) -> list[Line]:
+    """ex: Extraction 하나 또는 통합본이면 Extraction 목록."""
+    if isinstance(ex, (list, tuple)):
+        return [ln for e in ex for ln in _source_lines(e)]
     lines: list[Line] = []
     def add(items) -> None:
         for x in items:
@@ -169,7 +189,7 @@ def _source_lines(ex: Extraction) -> list[Line]:
     return lines
 
 
-def validate(ex: Extraction, doc: Document, hwpx_path: str) -> dict:
+def validate(ex: "Extraction | list[Extraction]", doc: Document, hwpx_path: str) -> dict:
     hx = read_hwpx(hwpx_path)
     causes: list[str] = []
     warns: list[str] = list(doc.warnings)

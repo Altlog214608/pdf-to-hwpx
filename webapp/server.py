@@ -7,6 +7,12 @@
   4. GET  /api/jobs/{id}/download/{token}
   5. DELETE /api/jobs/{id}         페이지를 떠나면 브라우저가 호출(sendBeacon은 POST .../delete)
 
+여러 파일: 파일마다 1번으로 작업을 만든 뒤
+  - POST /api/bundles/merge  {jobs, options}  한 파일로 잇기(문제·정답 번호를 이어서) -> 통합본 작업
+  - POST /api/bundles/zip    {jobs}           따로 변환한 결과들을 ZIP 하나로 -> 묶음 작업
+  묶음 작업도 일반 작업과 같은 다운로드/삭제/만료 규칙을 따른다.
+변환은 서버 전체에서 한 번에 하나씩(CONVERT_LOCK) 처리한다: 작은 서버에서도 메모리가 넘치지 않게.
+
 보관 정책(저작권 보호): 업로드 파일과 결과물은 서버 디스크의 작업 폴더에만 있고,
 작업 보관 시간(JOB_TTL_MIN)이 지나거나 사용자가 페이지를 떠나면 폴더째 삭제된다.
 다운로드 링크는 변환 후 DOWNLOAD_TTL_MIN 동안만 유효하다.
@@ -21,6 +27,7 @@ import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -34,7 +41,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from pdf2hwpx import VERSION  # noqa: E402
-from pdf2hwpx.convert import convert  # noqa: E402
+from pdf2hwpx.convert import convert, convert_many  # noqa: E402
 from pdf2hwpx.preview import analyze  # noqa: E402
 from pdf2hwpx.style import FONTS, DocStyle  # noqa: E402
 
@@ -43,7 +50,10 @@ JOB_TTL_MIN = float(os.environ.get("JOB_TTL_MIN", "30"))         # 업로드 후
 DOWNLOAD_TTL_MIN = float(os.environ.get("DOWNLOAD_TTL_MIN", "10"))  # 변환 후 다운로드 가능 시간
 MAX_MB = float(os.environ.get("MAX_MB", "40"))
 MAX_PAGES = int(os.environ.get("MAX_PAGES", "80"))
+MAX_FILES = int(os.environ.get("MAX_FILES", "10"))                # 한 번에 올릴 수 있는 PDF 수
+MAX_TOTAL_PAGES = int(os.environ.get("MAX_TOTAL_PAGES", "200"))  # 통합본 전체 쪽수
 MAX_LOGO_KB = 2048
+CONVERT_LOCK = threading.Lock()  # 변환 대기열: 동시에 여러 요청이 와도 하나씩
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -58,6 +68,8 @@ class Job:
     download_until: float = 0.0
     hwpx: Optional[Path] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
+    pages: int = 0
+    members: list = field(default_factory=list)  # 묶음(통합본/ZIP) 작업이면 원본 작업 id들
 
     @property
     def pdf(self) -> Path:
@@ -113,7 +125,8 @@ def healthz() -> dict:
 @app.get("/api/config")
 def config() -> dict:
     return {"version": VERSION, "fonts": FONTS, "max_mb": MAX_MB, "max_pages": MAX_PAGES,
-            "job_ttl_min": JOB_TTL_MIN, "download_ttl_min": DOWNLOAD_TTL_MIN}
+            "job_ttl_min": JOB_TTL_MIN, "download_ttl_min": DOWNLOAD_TTL_MIN,
+            "max_files": MAX_FILES, "max_total_pages": MAX_TOTAL_PAGES}
 
 
 @app.post("/api/jobs")
@@ -138,6 +151,7 @@ def create_job(file: UploadFile = File(...)) -> JSONResponse:
         shutil.rmtree(jdir, ignore_errors=True)
         raise HTTPException(413, f"페이지가 너무 많습니다 (최대 {MAX_PAGES}쪽).")
     (jdir / "page1.png").write_bytes(info.pop("page1_png"))
+    job.pages = int(tl["pages"])
     with JOBS_LOCK:
         JOBS[jid] = job
     return JSONResponse({
@@ -174,46 +188,155 @@ def delete_logo(job_id: str) -> dict:
     return {"ok": True}
 
 
-@app.post("/api/jobs/{job_id}/convert")
-async def convert_job(job_id: str, request: Request) -> dict:
-    job = _get(job_id)
-    try:
-        opts = await request.json()
-    except Exception:
-        opts = {}
-    style = DocStyle.from_dict(opts or {}, logo=job.logo if opts.get("use_logo", True) else None)
-    from starlette.concurrency import run_in_threadpool
+def _style(opts: dict, job: Job) -> DocStyle:
+    logo = job.logo
+    if logo is None and opts.get("logo_job") in JOBS:  # 여러 파일: 로고는 첫 파일에만 올린다
+        logo = JOBS[opts["logo_job"]].logo
+    return DocStyle.from_dict(opts or {}, logo=logo if opts.get("use_logo", True) else None)
 
-    def work() -> dict:
-        with job.lock:
-            out = job.dir / "out"
-            shutil.rmtree(out, ignore_errors=True)
-            out.mkdir()
-            name = Path(job.filename).stem + ".hwpx"
-            res = convert(str(job.pdf), hwpx_path=str(out / name), write_json=False, style=style)
-            job.hwpx = out / name
-            job.token = secrets.token_urlsafe(16)
-            job.download_until = min(time.time() + DOWNLOAD_TTL_MIN * 60, job.expires)
-            return res
 
-    try:
-        res = await run_in_threadpool(work)
-    except Exception as e:
-        raise HTTPException(500, f"변환 중 오류가 발생했습니다: {type(e).__name__}")
-    v = res["validation"]
-    c = v["checks"]
-    return {
-        "download_url": f"/api/jobs/{job_id}/download/{job.token}",
+def _finish(job: Job, path: Path) -> None:
+    job.hwpx = path
+    job.token = secrets.token_urlsafe(16)
+    job.download_until = min(time.time() + DOWNLOAD_TTL_MIN * 60, job.expires)
+
+
+def _result(job: Job, res: Optional[dict] = None) -> dict:
+    out = {
+        "id": job.id,
+        "download_url": f"/api/jobs/{job.id}/download/{job.token}",
         "download_until": job.download_until,
         "seconds_left": max(0, int(job.download_until - time.time())),
         "filename": job.hwpx.name, "size": job.hwpx.stat().st_size,
+    }
+    if res is None:
+        return out
+    v = res["validation"]
+    c = v["checks"]
+    out.update({
         "status": v["status"], "root_causes": v["root_causes"], "warnings": v["warnings"][:5],
         "summary": {"questions": c.get("question_count"), "objective": c.get("objective"),
                     "subjective": c.get("subjective"), "boxes": c.get("box_groups"),
                     "pictures": c.get("pictures"), "answers": c.get("answer_count"),
                     "endnotes": c.get("endnotes"),
                     "coverage": c.get("text_coverage")},
-    }
+    })
+    return out
+
+
+async def _json(request: Request) -> dict:
+    try:
+        d = await request.json()
+    except Exception:
+        d = {}
+    return d if isinstance(d, dict) else {}
+
+
+@app.post("/api/jobs/{job_id}/convert")
+async def convert_job(job_id: str, request: Request) -> dict:
+    job = _get(job_id)
+    opts = await _json(request)
+    style = _style(opts, job)
+    from starlette.concurrency import run_in_threadpool
+
+    def work() -> dict:
+        with CONVERT_LOCK, job.lock:
+            out = job.dir / "out"
+            shutil.rmtree(out, ignore_errors=True)
+            out.mkdir()
+            name = Path(job.filename).stem + ".hwpx"
+            res = convert(str(job.pdf), hwpx_path=str(out / name), write_json=False, style=style)
+            _finish(job, out / name)
+            return res
+
+    try:
+        res = await run_in_threadpool(work)
+    except Exception as e:
+        raise HTTPException(500, f"변환 중 오류가 발생했습니다: {type(e).__name__}")
+    return _result(job, res)
+
+
+def _members(d: dict) -> list[Job]:
+    ids = d.get("jobs")
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(400, "파일 목록이 비어 있습니다.")
+    if len(ids) > MAX_FILES:
+        raise HTTPException(413, f"한 번에 {MAX_FILES}개까지 묶을 수 있습니다.")
+    jobs = [_get(str(i)) for i in ids]
+    if len({j.id for j in jobs}) != len(jobs) or any(j.members for j in jobs):
+        raise HTTPException(400, "파일 목록이 올바르지 않습니다.")
+    return jobs
+
+
+def _new_bundle(filename: str, members: list[Job]) -> Job:
+    bid = uuid.uuid4().hex
+    bdir = DATA_DIR / bid
+    bdir.mkdir(parents=True)
+    return Job(bid, bdir, filename, members=[j.id for j in members])
+
+
+def _unique_names(jobs: list[Job]) -> list[str]:
+    seen: dict[str, int] = {}
+    out = []
+    for j in jobs:
+        stem = Path(j.filename).stem
+        n = seen.get(stem, 0) + 1
+        seen[stem] = n
+        out.append(f"{stem}.hwpx" if n == 1 else f"{stem} ({n}).hwpx")
+    return out
+
+
+@app.post("/api/bundles/merge")
+async def merge_jobs(request: Request) -> dict:
+    """여러 PDF를 순서대로 이어 한 HWPX로(문제·정답 번호를 이어서 매긴다)."""
+    d = await _json(request)
+    jobs = _members(d)
+    if len(jobs) < 2:
+        raise HTTPException(400, "통합본은 PDF가 2개 이상일 때 만들 수 있습니다.")
+    if sum(j.pages for j in jobs) > MAX_TOTAL_PAGES:
+        raise HTTPException(413, f"통합본은 모두 합쳐 {MAX_TOTAL_PAGES}쪽까지 만들 수 있습니다.")
+    opts = d.get("options") if isinstance(d.get("options"), dict) else {}
+    opts.setdefault("logo_job", jobs[0].id)
+    style = _style(opts, jobs[0])
+    stem = Path(jobs[0].filename).stem
+    bundle = _new_bundle(f"{stem} 외 {len(jobs) - 1}개 통합.hwpx", jobs)
+    from starlette.concurrency import run_in_threadpool
+
+    def work() -> dict:
+        with CONVERT_LOCK:
+            path = bundle.dir / bundle.filename
+            res = convert_many([str(j.pdf) for j in jobs], str(path), style=style,
+                               names=[j.filename for j in jobs])
+            _finish(bundle, path)
+            return res
+
+    try:
+        res = await run_in_threadpool(work)
+    except Exception as e:
+        shutil.rmtree(bundle.dir, ignore_errors=True)
+        raise HTTPException(500, f"통합 중 오류가 발생했습니다: {type(e).__name__}")
+    with JOBS_LOCK:
+        JOBS[bundle.id] = bundle
+    return dict(_result(bundle, res), files=len(jobs))
+
+
+@app.post("/api/bundles/zip")
+async def zip_jobs(request: Request) -> dict:
+    """따로 변환한 HWPX들을 ZIP 하나로 묶는다(변환은 파일마다 /convert로 먼저)."""
+    jobs = _members(await _json(request))
+    now = time.time()
+    if any(j.hwpx is None or not j.hwpx.exists() or now > j.download_until for j in jobs):
+        raise HTTPException(409, "아직 변환되지 않았거나 다운로드 시간이 지난 파일이 있습니다. 다시 변환해 주세요.")
+    bundle = _new_bundle(f"한글 변환 {len(jobs)}개.zip", jobs)
+    path = bundle.dir / bundle.filename
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as z:  # HWPX는 이미 압축돼 있다
+        for j, name in zip(jobs, _unique_names(jobs)):
+            z.write(j.hwpx, name)
+    _finish(bundle, path)
+    bundle.download_until = min(bundle.download_until, min(j.download_until for j in jobs))
+    with JOBS_LOCK:
+        JOBS[bundle.id] = bundle
+    return dict(_result(bundle), files=len(jobs))
 
 
 @app.get("/api/jobs/{job_id}/download/{token}")
@@ -223,8 +346,11 @@ def download(job_id: str, token: str) -> FileResponse:
         raise HTTPException(404, "다운로드 링크가 올바르지 않습니다.")
     if time.time() > job.download_until:
         raise HTTPException(410, "다운로드 가능 시간이 지났습니다. 다시 변환해 주세요.")
-    disp = f"attachment; filename=\"document.hwpx\"; filename*=UTF-8''{quote(job.hwpx.name)}"
-    return FileResponse(job.hwpx, media_type="application/hwp+zip", headers={"Content-Disposition": disp})
+    is_zip = job.hwpx.suffix.lower() == ".zip"
+    ascii_name = "documents.zip" if is_zip else "document.hwpx"
+    disp = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(job.hwpx.name)}"
+    return FileResponse(job.hwpx, media_type="application/zip" if is_zip else "application/hwp+zip",
+                        headers={"Content-Disposition": disp})
 
 
 @app.delete("/api/jobs/{job_id}")

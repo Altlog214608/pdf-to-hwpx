@@ -21,6 +21,7 @@ class DocStyle:
     title_color: str = "#000000"     # 제목 글자 색(#RRGGBB)
     answers_as_endnotes: bool = False  # 정답·해설을 각 문제에 연결된 미주로 넣기(문서 끝에 모임)
     frame: bool = False              # 페이지 바깥 네모 테두리
+    auto_number: bool = True         # 문제 번호를 한글 문단 번호로(문제를 더 넣거나 이어 붙이면 번호가 자동으로 이어짐)
     extra: dict = field(default_factory=dict)
 
     @property
@@ -56,6 +57,7 @@ class DocStyle:
             frame=bool(d.get("frame")),
             title_color=str(d.get("title_color") or "#000000"),
             answers_as_endnotes=bool(d.get("answers_as_endnotes")),
+            auto_number=bool(d.get("auto_number", True)),
         )
         return s.validate()
 
@@ -63,4 +65,4 @@ class DocStyle:
         return {"body_font": self.body_font, "title_font": self.title_font, "body_size": self.body_size,
                 "academy_name": self.academy_name, "logo": bool(self.logo), "title": self.title,
                 "title_size": self.title_size, "frame": self.frame, "title_color": self.title_color,
-                "answers_as_endnotes": self.answers_as_endnotes}
+                "answers_as_endnotes": self.answers_as_endnotes, "auto_number": self.auto_number}

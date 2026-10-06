@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from . import VERSION
-from .convert import convert
+from .convert import convert, convert_many
 from .style import DocStyle
 
 
@@ -38,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--frame", action="store_true", help="페이지 바깥 네모 테두리")
     ap.add_argument("--title-color", default="#000000", help="제목 글자 색, 예: #555555")
     ap.add_argument("--endnotes", action="store_true", help="정답·해설을 각 문제에 연결된 미주로 넣기")
+    ap.add_argument("--no-auto-number", action="store_true", help="문제 번호를 한글 문단 번호 대신 글자로 넣기")
+    ap.add_argument("--merge", metavar="통합본.hwpx", help="입력 PDF를 순서대로 이어 한 파일로(문제·정답 번호를 이어서 매김)")
     args = ap.parse_args(argv)
     try:  # Windows 콘솔(cp949)에서 특수 문자 때문에 멈추지 않게
         sys.stdout.reconfigure(errors="replace")  # type: ignore[attr-defined]
@@ -47,11 +49,18 @@ def main(argv: list[str] | None = None) -> int:
     logo = Path(args.logo).read_bytes() if args.logo else None
     style = DocStyle(body_font=args.font, body_size=args.size, title=args.title, academy_name=args.academy,
                      logo=logo, frame=args.frame, title_color=args.title_color,
-                     answers_as_endnotes=args.endnotes).validate()
+                     answers_as_endnotes=args.endnotes, auto_number=not args.no_auto_number).validate()
     pdfs = _expand(args.inputs)
     if not pdfs:
         print("입력 PDF가 없습니다.", file=sys.stderr)
         return 2
+    if args.merge:
+        res = convert_many([str(p) for p in pdfs], args.merge, style=style)
+        v = res["validation"]
+        print(json.dumps({"files": res["source_files"], "status": v["status"], "hwpx": res["hwpx"],
+                          "questions": v["checks"].get("question_count"), "answers": v["checks"].get("answer_count"),
+                          "root_causes": v["root_causes"][:3], "warnings": v["warnings"][:5]}, ensure_ascii=False, indent=2))
+        return {"PASS": 0, "WARN": 0}.get(v["status"], 1)
     rows = []
     worst = 0
     for pdf in pdfs:

@@ -40,6 +40,7 @@ CP = {"body": 0, "body_ul": 8, "guide": 7, "bold": 9, "bold_ul": 10}
 
 
 ANSWER_NUM_RE = re.compile(r"^\s*\d{1,2}\s*\)\s*")
+STEM_NUM_RE = re.compile(r"^\s*\d{1,3}\s*\.\s*")  # 발문 앞 `12.` (한글 문단 번호로 바꿀 때 지움)
 
 
 def _strip_prefix(runs: list[Run], pat: re.Pattern) -> list[Run]:
@@ -74,6 +75,8 @@ class Styles:
         self.new_chars: list[str] = []
         self.bf_ids = [int(x) for x in re.findall(r'<hh:borderFill id="(\d+)"', header_xml)]
         self.new_bfs: list[str] = []
+        self.num_ids = [int(x) for x in re.findall(r'<hh:numbering id="(\d+)"', header_xml)]
+        self.new_nums: list[str] = []
 
     # ---- 글꼴/글자 크기 (템플릿: 글꼴 0 = 제목용 돋움, 1 = 본문용 바탕) ----
     def set_fonts(self, body_font: str, title_font: str) -> None:
@@ -127,6 +130,17 @@ class Styles:
             f'{sides}<hh:diagonal type="SOLID" width="0.1 mm" color="#000000"/>{brush}</hh:borderFill>')
         return bid
 
+    def add_numbering(self, char_id: int, start: int) -> int:
+        """문제 번호용 문단 번호 모양: 템플릿 번호(1수준 `^1.`)를 복제해 1수준 시작 번호와 글자 모양만 바꾼다."""
+        x = re.search(r'<hh:numbering id="1".*?</hh:numbering>', self.header, re.S).group(0)
+        nid = max(self.num_ids) + 1
+        self.num_ids.append(nid)
+        x = x.replace('<hh:numbering id="1"', f'<hh:numbering id="{nid}"', 1)
+        x = re.sub(r'<hh:paraHead start="\d+" level="1"([^>]*?)charPrIDRef="\d+"',
+                   lambda m: f'<hh:paraHead start="{int(start)}" level="1"{m.group(1)}charPrIDRef="{char_id}"', x, count=1)
+        self.new_nums.append(x)
+        return nid
+
     def derive(self, base: int, **ov) -> int:
         """템플릿 문단 모양 base를 복제하고 일부 속성만 바꾼 새 id를 돌려준다."""
         if not ov:
@@ -143,6 +157,8 @@ class Styles:
         for k in ("intent", "left", "right", "prev", "next"):
             if k in ov:
                 x = re.sub(rf'<hc:{k} value="-?\d+"', f'<hc:{k} value="{int(ov[k])}"', x)
+        if "number" in ov:  # 문단 번호(번호 모양 id, 1수준)
+            x = re.sub(r'<hh:heading [^>]*/>', f'<hh:heading type="NUMBER" idRef="{int(ov["number"])}" level="0"/>', x, count=1)
         if "keep_next" in ov:
             x = re.sub(r'keepWithNext="\d"', f'keepWithNext="{int(ov["keep_next"])}"', x, count=1)
         if "border" in ov:
@@ -167,6 +183,9 @@ class Styles:
             h = h.replace("</hh:charProperties>", "".join(self.new_chars) + "</hh:charProperties>")
         if self.new_bfs:
             h = h.replace("</hh:borderFills>", "".join(self.new_bfs) + "</hh:borderFills>")
+        if self.new_nums:
+            h = h.replace("</hh:numberings>", "".join(self.new_nums) + "</hh:numberings>")
+            h = re.sub(r'<hh:numberings itemCnt="\d+"', f'<hh:numberings itemCnt="{len(self.num_ids)}"', h)
         n = len(self.para_xml)
         h = re.sub(r'<hh:paraProperties itemCnt="\d+"', f'<hh:paraProperties itemCnt="{n}"', h)
         h = re.sub(r'<hh:charProperties itemCnt="\d+"', f'<hh:charProperties itemCnt="{len(self.char_xml)}"', h)
@@ -212,6 +231,7 @@ class HwpxWriter:
             if st.logo:
                 self.logo = self._add_logo(st.logo)
         self.endnotes = self._plan_endnotes()
+        self.num_id = self._plan_numbering()
         self.hidden_cp = (self.styles.add_char(CP["body"], 100, color="#FFFFFF", bold=False, font_id=1)
                           if self.endnotes else None)
 
@@ -234,6 +254,21 @@ class HwpxWriter:
             return None
         self.stats["endnotes"] = len(nums)
         return ans
+
+    def _plan_numbering(self) -> Optional[int]:
+        """문제 번호를 한글 문단 번호로: 문제를 더 넣거나 파일을 이어 붙여도 한글이 번호를 다시 매긴다.
+        한글은 번호를 빠짐없이 1씩 올리므로 문제 번호가 연속일 때만 쓴다(아니면 글자 그대로 둔다)."""
+        if not self.style.auto_number:
+            return None
+        nums = [it.number for it in self.doc.items if isinstance(it, Question)]
+        if not nums:
+            return None
+        if nums != list(range(nums[0], nums[0] + len(nums))):
+            self.doc.warnings.append("문제 번호가 연속이 아니라 번호를 한글 자동 번호 대신 글자로 넣었습니다.")
+            return None
+        self.stats["auto_numbers"] = len(nums)
+        return self.styles.add_numbering(CP["bold"], nums[0])
+
     def _add_logo(self, data: bytes) -> Optional[Logo]:
         try:
             import pymupdf as fitz
@@ -516,11 +551,16 @@ class HwpxWriter:
 
     def _question(self, q: Question, first_after_passage: bool) -> list[str]:
         S = self.styles
-        digits = len(str(q.number))
-        hang = self._hang(1400 if digits == 1 else 1950)
-        stem_pp = S.derive(PP["stem_first"] if first_after_passage else PP["stem"], intent=-hang)
+        base = PP["stem_first"] if first_after_passage else PP["stem"]
+        stem_runs = q.stem.runs
+        if self.num_id is not None:  # 번호는 한글이 그린다(자동 내어쓰기)
+            stem_pp = S.derive(base, intent=0, number=self.num_id)
+            stem_runs = _strip_prefix(stem_runs, STEM_NUM_RE)
+        else:
+            digits = len(str(q.number))
+            stem_pp = S.derive(base, intent=-self._hang(1400 if digits == 1 else 1950))
         note = self._endnote(self.endnotes[q.number]) if self.endnotes else ""
-        out = [self._p(stem_pp, note + self._runs_xml(q.stem.runs, True))]
+        out = [self._p(stem_pp, note + self._runs_xml(stem_runs, True))]
         n_blocks = len(q.blocks)
         for i, b in enumerate(q.blocks):
             out.extend(self._block(b, i == n_blocks - 1 and not q.choices and not q.after))

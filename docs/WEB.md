@@ -1,4 +1,4 @@
-# 웹 서비스 (v0.6)
+# 웹 서비스 (v0.8)
 
 PDF를 끌어다 놓으면 머리 부분(학원 이름·로고, 시험 제목, 바깥 테두리)과 본문 글꼴·크기를 미리 보며 정하고
 HWPX로 내려받는 사이트입니다. 변환기(`pdf2hwpx/`)를 그대로 쓰고, 웹 부분은 `webapp/`에만 있습니다.
@@ -26,19 +26,25 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 |---|---|---|
 | `JOB_TTL_MIN` | 30 | 업로드 후 작업(원본 PDF·결과)을 서버에 두는 최대 시간(분) |
 | `DOWNLOAD_TTL_MIN` | 10 | 변환 후 다운로드 링크가 유효한 시간(분) |
-| `MAX_MB` / `MAX_PAGES` | 40 / 80 | 업로드 제한 |
+| `MAX_MB` / `MAX_PAGES` | 40 / 80 | 업로드 제한(파일 하나당) |
+| `MAX_FILES` | 10 | 한 번에 올리는 PDF 수 |
+| `MAX_TOTAL_PAGES` | 200 | 통합본 전체 쪽수 |
 | `DATA_DIR` | 시스템 임시 폴더`/pdf2hwpx_jobs` | 작업 폴더 |
 | `HOST` / `PORT` | 127.0.0.1 / 8000 | 컨테이너에서는 `0.0.0.0` |
 
 ## 2. 화면 흐름
 
 1. **올리기**: 화면 어디에 끌어 놓아도 됨(배경 흐림 + 가운데 PDF+ 아이콘). 글자 레이어를 검사해
-   스캔본(글자 없음)·글자 깨짐 PDF는 변환 전에 알려 줌.
+   스캔본(글자 없음)·글자 깨짐 PDF는 변환 전에 알려 줌. 여러 개를 한 번에 놓거나 작업 화면의 `+ 추가`로 더할 수 있음.
+   - 여러 파일이면 원본 카드 아래에 목록(누르면 미리보기 전환, ↑로 순서, ×로 빼기)과 "여러 파일" 설정이 나옴.
+   - **파일마다 따로**: 하나씩 차례로 변환(목록에 대기/변환 중/완료) → ZIP 한 번에 또는 파일별로 받기. 제목은 파일마다.
+   - **하나로 합치기**: 목록 순서대로 이어 한 HWPX. 문제·정답 번호가 끝까지 이어짐(20문제 3개 → 1~60번).
 2. **디자인 설정**: 왼쪽 원본 첫 쪽, 오른쪽 HWPX 첫 쪽 윗부분 미리보기.
    - 미리보기의 학원 칸·제목 칸을 누르면 해당 입력칸으로 이동.
    - 제목 후보는 PDF 머리글에서 찾아 칩으로 보여 줌(`[중간 대비]` 같은 앞머리는 유지).
    - 본문 글꼴 7종, 크기 8~13pt(0.5 단위). 마지막 설정은 브라우저에 기억.
    - 제목 글자 색(견본 5색 + 직접 고르기), 정답·해설 방식(문서 끝에 모으기 / 문제와 미주로 연결).
+   - 문제 번호를 한글 자동 번호(문단 번호)로 넣기(기본 켬): 한글에서 문제를 더 쓰거나 다른 파일을 붙여 넣으면 번호가 이어짐.
    - 오른쪽 위 버튼으로 밝은/어두운 화면 전환.
 3. **다운로드**: 구조 검사 결과(문제 수·박스·정답·원문 반영률)와 남은 다운로드 시간 표시.
    설정을 바꾸면 "다시 변환" 상태가 됨.
@@ -59,7 +65,9 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 | POST | `/api/jobs` (multipart `file`) | 업로드 + 분석: `text_layer`, `title_candidates`, `sample`, `stats` |
 | GET | `/api/jobs/{id}/page1.png` | 원본 1쪽 그림 |
 | POST/DELETE | `/api/jobs/{id}/logo` | 로고 그림(PNG/JPG, 2MB) |
-| POST | `/api/jobs/{id}/convert` (JSON) | `body_font, title_font, body_size, academy_name, use_logo, title, title_color, frame, answers_as_endnotes` |
+| POST | `/api/jobs/{id}/convert` (JSON) | `body_font, title_font, body_size, academy_name, use_logo, title, title_color, frame, answers_as_endnotes, auto_number, logo_job`(다른 작업의 로고 빌려 쓰기) |
+| POST | `/api/bundles/merge` (JSON `jobs, options`) | 여러 작업을 이어 통합본 하나(번호 이어서). 응답은 convert와 같은 모양 + `id`(묶음 작업) |
+| POST | `/api/bundles/zip` (JSON `jobs`) | 변환을 마친 작업들의 HWPX를 ZIP 하나로 |
 | GET | `/api/jobs/{id}/download/{token}` | HWPX (만료 시 410) |
 | DELETE · POST `.../delete` | `/api/jobs/{id}` | 작업 삭제 |
 | GET | `/healthz` | 상태 확인(로드밸런서용) |
@@ -83,7 +91,7 @@ CLI에서도 같은 옵션을 쓸 수 있습니다:
 
 ## 6. AWS 배포
 
-변환은 CPU만 쓰고 1개 PDF당 1~3초, 메모리 300MB 안팎입니다.
+변환은 CPU만 쓰고 1개 PDF당 1~3초, 메모리 300MB 안팎입니다. 변환은 서버 전체에서 한 번에 하나씩 처리하므로(대기열) 여러 파일을 올려도 메모리가 늘지 않습니다.
 
 **권장: Lightsail 컨테이너 서비스 Micro(1GB, 서울 리전)** — 월 고정 요금, 기본 주소에 HTTPS 자동.
 (App Runner는 2026-04-30부터 신규 고객을 받지 않고, 서울 리전도 없음)
@@ -109,4 +117,3 @@ docker build -t pdf2hwpx-web .; docker run --rm -p 8000:8000 pdf2hwpx-web
 ## 7. 아직 없는 것
 
 - 제목 글꼴에 학원 전용 글꼴(예: 디자인 글꼴) 지정 — 글꼴 이름을 알려 주면 목록에 추가. 단 열어 보는 PC에 설치돼 있어야 함.
-- 표가 들어간 PDF 대응(표 샘플 PDF 필요).
