@@ -89,46 +89,50 @@ CLI에서도 같은 옵션을 쓸 수 있습니다:
 바탕쪽은 모든 쪽에 반복되고 본문을 고쳐도 움직이지 않습니다. 한글에서 고치려면 `쪽 → 바탕쪽`으로 들어갑니다.
 머리 부분을 켜면 본문 여백도 수작업 파일 수치(바탕쪽 표 안쪽에 본문이 들어가도록)로 바뀝니다.
 
-## 6. AWS 배포 (Lightsail 컨테이너 서비스)
+## 6. AWS 배포 (Lightsail 인스턴스)
 
-변환은 CPU만 쓰고 1개 PDF당 1~3초(micro는 그보다 느림), 메모리 300MB 안팎입니다. 변환은 서버 전체에서
+변환은 CPU만 쓰고 1개 PDF당 1~3초, 메모리 300MB 안팎입니다. 변환은 서버 전체에서
 한 번에 하나씩 처리하므로(대기열) 여러 파일을 올려도 메모리가 늘지 않습니다.
 
-**구성: Lightsail 컨테이너 서비스 Micro(1GB, 서울 리전) 1대** — 월 고정 요금(약 10달러), 기본 주소에 HTTPS 자동.
-(App Runner는 2026-04-30부터 신규 고객을 받지 않고, 서울 리전도 없음)
+**구성: Lightsail 인스턴스(Ubuntu, 1GB, 서울) 1대 + 고정 IP** — 월 약 7달러.
+- 서버 안: 앱(`127.0.0.1:8000`, systemd 서비스 `pdf2hwpx`) + **Caddy**가 `https://<IP>.sslip.io` 인증서(Let's Encrypt)를
+  자동으로 받아 앱으로 넘김. 도메인을 살 필요 없음. 방화벽은 22(ssh)·80·443만.
+- 스왑 1GB, 보안 업데이트 자동(unattended-upgrades). 설치는 `tools/server/setup.sh`(여러 번 실행해도 됨).
+- 새 계정은 Lightsail **컨테이너 서비스** 한도가 0인 경우가 많아 인스턴스 방식을 기본으로 함.
+  한도가 있으면 `tools/deploy_lightsail_container.ps1`(컨테이너 서비스 micro, 월 약 10달러)도 쓸 수 있음.
 
 ### 접속 제한: 사람마다 초대 링크
 환경 변수 `ACCESS_KEYS="이름:키,이름:키"`를 주면 `https://주소/join/키`를 한 번 연 브라우저만 쿠키로 계속 씁니다
 (180일, `ACCESS_DAYS`). 초대 링크 없이 들어오면 안내 화면만 보입니다. 한 사람을 끊으려면 그 줄을 지우고 다시 배포합니다.
-`/healthz`만 열려 있습니다(로드밸런서 헬스체크). 접속 기록(access log)은 키가 남지 않게 기본으로 끕니다.
+`/healthz`만 열려 있습니다. 접속 기록(access log)은 키가 남지 않게 기본으로 끕니다.
 `ACCESS_KEYS`가 없으면(내 PC 실행) 제한이 없습니다.
 
 ### 처음 한 번 준비 (Windows PowerShell)
 ```powershell
-winget install -e --id Amazon.AWSCLI; winget install -e --id Docker.DockerDesktop
+winget install -e --id Git.Git; winget install -e --id Amazon.AWSCLI
 ```
-1. 재부팅 후 Docker Desktop을 한 번 켭니다(고래 아이콘이 멈출 때까지).
-2. PowerShell을 새로 열고 AWS에 로그인합니다: `aws login --region ap-northeast-2` (브라우저로 콘솔 로그인).
-   안 되면 IAM 사용자 액세스 키로 `aws configure`(권한: `lightsail:*`).
-3. **요금 알림**: AWS 콘솔 → Billing and Cost Management → Budgets → 월 예산(예: 5달러) 만들기.
+1. AWS 콘솔 IAM에서 사용자(콘솔 접근 없음) + 인라인 정책 `{"Effect":"Allow","Action":"lightsail:*","Resource":"*"}` +
+   액세스 키(CLI) → `aws configure --profile pdf`(리전 `ap-northeast-2`). 창마다 `$env:AWS_PROFILE = "pdf"`.
+2. **요금 알림**: AWS 콘솔 → Billing and Cost Management → Budgets → 월 예산(예: 10달러).
+3. ssh/scp는 Windows 10/11에 기본으로 들어 있음(없으면 설정 → 선택적 기능 → OpenSSH 클라이언트). Docker는 필요 없음.
 
 ### 올리기 / 고친 뒤 다시 올리기 (같은 명령)
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\deploy_lightsail.ps1
+$env:AWS_PROFILE = "pdf"; powershell -ExecutionPolicy Bypass -File .\tools\deploy_lightsail.ps1
 ```
 `tools/deploy_lightsail.ps1`이 하는 일:
-1. 준비물 확인, `lightsailctl`(이미지 업로드 도구)이 없으면 `tools\bin`에 받음.
-2. 초대 키가 없으면 `deploy\access_keys.txt`에 만듦(`me`, `guest`. 이름은 파일에서 바꿔도 됨). git과 도커 이미지에 들어가지 않음.
-3. 컨테이너 서비스 `pdf2hwpx`가 없으면 만듦(서울, micro, 1대).
-4. `docker build` → `aws lightsail push-container-image` → 배포(포트 8000, 헬스체크 `/healthz`). 끝나면 사이트 주소와 사람별 초대 링크 출력.
+1. 초대 키가 없으면 `deploy\access_keys.txt`에 만듦(`me`, `guest`). 서버 접속 키는 `deploy\lightsail_key.pem`(Lightsail 기본 키).
+   `deploy\`는 git과 도커 이미지에 들어가지 않음.
+2. 서버 `pdf2hwpx`가 없으면 만듦(Ubuntu 24.04, 1GB 요금제 중 가장 싼 IPv4 요금제) → 고정 IP `pdf2hwpx-ip` 붙이기 → 방화벽.
+3. 현재 커밋을 `git archive`로 묶어 scp로 올리고 서버에서 `setup.sh` 실행 → `https://<IP>.sslip.io/healthz` 확인 → 초대 링크 출력.
+   (커밋하지 않은 변경은 올라가지 않음)
 
 - 초대 링크만 다시 보기: `... deploy_lightsail.ps1 -Links`
-- 사이트 끄기(요금 중지): `... deploy_lightsail.ps1 -Delete` (서비스 이름을 한 번 더 입력해야 지워짐)
-- 실패하면 기록 보기: `aws lightsail get-container-log --region ap-northeast-2 --service-name pdf2hwpx --container-name web`
+- 서버에 접속해 확인: `... deploy_lightsail.ps1 -Ssh` → `sudo journalctl -u pdf2hwpx -n 50`(앱), `sudo journalctl -u caddy -n 50`(HTTPS)
+- 사이트 끄기(요금 중지): `... deploy_lightsail.ps1 -Delete` (서버와 고정 IP를 함께 지움. 다시 만들면 IP와 초대 링크 주소가 바뀜)
 
-**노드는 1개로 고정**합니다. 작업 상태를 메모리와 로컬 디스크에 두므로, 여러 대로 늘리면
-업로드와 변환 요청이 다른 서버로 가서 404가 납니다. 내 PC에서 이미지 확인만 하려면:
-`docker build -t pdf2hwpx-web .; docker run --rm -p 8000:8000 pdf2hwpx-web`
+**서버는 1대로 둡니다.** 작업 상태를 메모리와 로컬 디스크에 두므로 여러 대로 나누면 404가 납니다.
+내 PC에서 컨테이너로 확인만 하려면: `docker build -t pdf2hwpx-web .; docker run --rm -p 8000:8000 pdf2hwpx-web`
 
 **배포 전 임시 공유**: PC에서 서버를 켜고 `cloudflared tunnel --url http://localhost:8000`
 (계정 없이 임시 `https://….trycloudflare.com` 주소, PC가 켜져 있는 동안만).

@@ -22,20 +22,45 @@ def test_ps1_is_utf8_bom_crlf():
     assert "??" not in text and " && " not in text
 
 
-def test_deploy_script_encoding_and_safety():
-    """Lightsail 배포 스크립트: 5.1 호환 인코딩, 초대 키 파일은 git/도커 이미지에 들어가지 않음."""
-    data = (ROOT / "tools" / "deploy_lightsail.ps1").read_bytes()
-    assert data.startswith(b"\xef\xbb\xbf") and b"\n" not in data.replace(b"\r\n", b"")
+def _ps1(name: str) -> str:
+    data = (ROOT / "tools" / name).read_bytes()
+    assert data.startswith(b"\xef\xbb\xbf") and b"\n" not in data.replace(b"\r\n", b"")  # 5.1: BOM + CRLF
     text = data.decode("utf-8-sig")
     assert "??" not in text and " && " not in text
-    for must in ("ap-northeast-2", "create-container-service", "push-container-image", "/healthz",
-                 "ACCESS_KEYS", "/join/", "--scale 1", "-Delete"):
-        assert must in text, must
-    # PowerShell 은 대소문자를 가리지 않으므로 함수 이름이 aws 면 aws.exe 를 가려 무한 재귀가 된다
+    # PowerShell 은 대소문자를 가리지 않으므로 함수 이름이 aws/ssh 면 진짜 명령을 가려 무한 재귀가 된다
     import re
-    assert not re.search(r"(?im)^function\s+aws\b", text)
+    assert not re.search(r"(?im)^function\s+(aws|ssh|scp|git)\b", text)
+    return text
+
+
+def test_deploy_scripts_encoding_and_safety():
+    """배포 스크립트: 5.1 호환 인코딩, 초대 키·접속 키 파일은 git/도커 이미지에 들어가지 않음."""
+    vm = _ps1("deploy_lightsail.ps1")  # 기본: Lightsail 인스턴스(가상 서버)
+    for must in ("ap-northeast-2", "create-instances", "allocate-static-ip", "release-static-ip", "sslip.io",
+                 "protocol=tcp", "download-default-key-pair", "icacls", "git archive", "tools/server/setup.sh",
+                 "ACCESS_KEYS", "/join/", "-Delete", "-Ssh"):
+        assert must in vm, must
+    assert "fromPort=8000" not in vm  # 앱 포트는 밖에 열지 않는다(Caddy 를 거쳐서만)
+    ct = _ps1("deploy_lightsail_container.ps1")
+    for must in ("create-container-service", "push-container-image", "/healthz", "--scale 1"):
+        assert must in ct, must
     assert "deploy/" in (ROOT / ".gitignore").read_text(encoding="utf-8")
     assert "deploy" in (ROOT / ".dockerignore").read_text(encoding="utf-8").split()
+
+
+def test_server_setup_script():
+    """서버 설치 스크립트: LF 줄바꿈(리눅스), 앱은 127.0.0.1 에만, Caddy 가 HTTPS 로 넘김, 키 파일은 root 만."""
+    data = (ROOT / "tools" / "server" / "setup.sh").read_bytes()
+    assert b"\r\n" not in data and data.startswith(b"#!/usr/bin/env bash")
+    text = data.decode("utf-8")
+    for must in ("set -euo pipefail", "HOST=127.0.0.1 PORT=8000", "reverse_proxy 127.0.0.1:8000",
+                 "install -m 600", "EnvironmentFile=/etc/pdf2hwpx.env", "User=pdf2hwpx", "/healthz", "swapfile"):
+        assert must in text, must
+    assert "*.sh text eol=lf" in (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    import shutil
+    import subprocess
+    if shutil.which("bash"):
+        assert subprocess.run(["bash", "-n", str(ROOT / "tools" / "server" / "setup.sh")]).returncode == 0
 
 
 def test_dockerfile_installs_both_requirements():
