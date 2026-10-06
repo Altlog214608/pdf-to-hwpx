@@ -20,3 +20,26 @@ def test_ps1_is_utf8_bom_crlf():
         assert must in text
     # 5.1 에 없는 문법(삼항, ??, &&) 금지
     assert "??" not in text and " && " not in text
+
+
+def test_deploy_script_encoding_and_safety():
+    """Lightsail 배포 스크립트: 5.1 호환 인코딩, 초대 키 파일은 git/도커 이미지에 들어가지 않음."""
+    data = (ROOT / "tools" / "deploy_lightsail.ps1").read_bytes()
+    assert data.startswith(b"\xef\xbb\xbf") and b"\n" not in data.replace(b"\r\n", b"")
+    text = data.decode("utf-8-sig")
+    assert "??" not in text and " && " not in text
+    for must in ("ap-northeast-2", "create-container-service", "push-container-image", "/healthz",
+                 "ACCESS_KEYS", "/join/", "--scale 1", "-Delete"):
+        assert must in text, must
+    # PowerShell 은 대소문자를 가리지 않으므로 함수 이름이 aws 면 aws.exe 를 가려 무한 재귀가 된다
+    import re
+    assert not re.search(r"(?im)^function\s+aws\b", text)
+    assert "deploy/" in (ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert "deploy" in (ROOT / ".dockerignore").read_text(encoding="utf-8").split()
+
+
+def test_dockerfile_installs_both_requirements():
+    text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    # 같은 이름(requirements.txt) 두 개를 한 폴더로 복사하면 하나가 덮여 빌드가 깨진다
+    assert "COPY requirements.txt webapp/requirements.txt" not in text
+    assert "req/core.txt" in text and "req/web.txt" in text

@@ -149,3 +149,30 @@ def test_zip_bundle_and_limits(env):
     finally:
         server.MAX_FILES = old
     assert client.get("/api/config").json()["max_files"] == server.MAX_FILES
+
+
+def test_access_gate(env, monkeypatch):
+    """ACCESS_KEYS가 있으면 초대 링크(/join/키)로 쿠키를 받은 브라우저만 쓸 수 있다."""
+    client, server, pdf = env
+    monkeypatch.setattr(server, "ACCESS_KEYS", server._parse_keys("나:key-for-me-123, 친구:key-for-friend-456, short:abc"))
+    assert set(server.ACCESS_KEYS.values()) == {"나", "친구"}  # 짧은 키는 무시
+    from fastapi.testclient import TestClient
+    c = TestClient(server.app)
+    assert c.get("/healthz").status_code == 200           # 로드밸런서 헬스체크는 열어 둔다
+    r = c.get("/")
+    assert r.status_code == 401 and "초대 링크" in r.text
+    assert c.get("/api/config").status_code == 401
+    assert c.post("/api/jobs", files={"file": ("a.pdf", pdf, "application/pdf")}).status_code == 401
+    assert c.get("/join/wrong-key-000", follow_redirects=False).status_code == 403
+    r = c.get("/join/key-for-friend-456", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    sc = r.headers["set-cookie"]
+    assert "HttpOnly" in sc and "Max-Age=15552000" in sc and "Secure" not in sc
+    assert c.get("/").status_code == 200 and c.get("/api/config").status_code == 200
+    assert c.get("/").headers["x-robots-tag"].startswith("noindex")
+    # https(로드밸런서 뒤)이면 Secure 쿠키
+    r = TestClient(server.app).get("/join/key-for-me-123", headers={"x-forwarded-proto": "https"}, follow_redirects=False)
+    assert "Secure" in r.headers["set-cookie"]
+    # 키를 지우면(다시 배포) 그 사람은 끊긴다
+    monkeypatch.setattr(server, "ACCESS_KEYS", server._parse_keys("나:key-for-me-123"))
+    assert c.get("/api/config").status_code == 401

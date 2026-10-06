@@ -89,21 +89,46 @@ CLI에서도 같은 옵션을 쓸 수 있습니다:
 바탕쪽은 모든 쪽에 반복되고 본문을 고쳐도 움직이지 않습니다. 한글에서 고치려면 `쪽 → 바탕쪽`으로 들어갑니다.
 머리 부분을 켜면 본문 여백도 수작업 파일 수치(바탕쪽 표 안쪽에 본문이 들어가도록)로 바뀝니다.
 
-## 6. AWS 배포
+## 6. AWS 배포 (Lightsail 컨테이너 서비스)
 
-변환은 CPU만 쓰고 1개 PDF당 1~3초, 메모리 300MB 안팎입니다. 변환은 서버 전체에서 한 번에 하나씩 처리하므로(대기열) 여러 파일을 올려도 메모리가 늘지 않습니다.
+변환은 CPU만 쓰고 1개 PDF당 1~3초(micro는 그보다 느림), 메모리 300MB 안팎입니다. 변환은 서버 전체에서
+한 번에 하나씩 처리하므로(대기열) 여러 파일을 올려도 메모리가 늘지 않습니다.
 
-**권장: Lightsail 컨테이너 서비스 Micro(1GB, 서울 리전)** — 월 고정 요금, 기본 주소에 HTTPS 자동.
+**구성: Lightsail 컨테이너 서비스 Micro(1GB, 서울 리전) 1대** — 월 고정 요금(약 10달러), 기본 주소에 HTTPS 자동.
 (App Runner는 2026-04-30부터 신규 고객을 받지 않고, 서울 리전도 없음)
 
-```powershell
-docker build -t pdf2hwpx-web .; docker run --rm -p 8000:8000 pdf2hwpx-web
-```
+### 접속 제한: 사람마다 초대 링크
+환경 변수 `ACCESS_KEYS="이름:키,이름:키"`를 주면 `https://주소/join/키`를 한 번 연 브라우저만 쿠키로 계속 씁니다
+(180일, `ACCESS_DAYS`). 초대 링크 없이 들어오면 안내 화면만 보입니다. 한 사람을 끊으려면 그 줄을 지우고 다시 배포합니다.
+`/healthz`만 열려 있습니다(로드밸런서 헬스체크). 접속 기록(access log)은 키가 남지 않게 기본으로 끕니다.
+`ACCESS_KEYS`가 없으면(내 PC 실행) 제한이 없습니다.
 
-1. `aws lightsail push-container-image`로 이미지 업로드 → 컨테이너 서비스 생성(포트 8000, 헬스체크 `/healthz`).
-2. **노드는 1개로 고정**합니다. 작업 상태를 메모리와 로컬 디스크에 두므로, 여러 대로 늘리면
-   업로드와 변환 요청이 다른 서버로 가서 404가 납니다.
-3. 소수만 쓰는 경우 접속 제한(초대 링크)을 켠 뒤 공개합니다(예정).
+### 처음 한 번 준비 (Windows PowerShell)
+```powershell
+winget install -e --id Amazon.AWSCLI; winget install -e --id Docker.DockerDesktop
+```
+1. 재부팅 후 Docker Desktop을 한 번 켭니다(고래 아이콘이 멈출 때까지).
+2. PowerShell을 새로 열고 AWS에 로그인합니다: `aws login --region ap-northeast-2` (브라우저로 콘솔 로그인).
+   안 되면 IAM 사용자 액세스 키로 `aws configure`(권한: `lightsail:*`).
+3. **요금 알림**: AWS 콘솔 → Billing and Cost Management → Budgets → 월 예산(예: 5달러) 만들기.
+
+### 올리기 / 고친 뒤 다시 올리기 (같은 명령)
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\deploy_lightsail.ps1
+```
+`tools/deploy_lightsail.ps1`이 하는 일:
+1. 준비물 확인, `lightsailctl`(이미지 업로드 도구)이 없으면 `tools\bin`에 받음.
+2. 초대 키가 없으면 `deploy\access_keys.txt`에 만듦(`me`, `guest`. 이름은 파일에서 바꿔도 됨). git과 도커 이미지에 들어가지 않음.
+3. 컨테이너 서비스 `pdf2hwpx`가 없으면 만듦(서울, micro, 1대).
+4. `docker build` → `aws lightsail push-container-image` → 배포(포트 8000, 헬스체크 `/healthz`). 끝나면 사이트 주소와 사람별 초대 링크 출력.
+
+- 초대 링크만 다시 보기: `... deploy_lightsail.ps1 -Links`
+- 사이트 끄기(요금 중지): `... deploy_lightsail.ps1 -Delete` (서비스 이름을 한 번 더 입력해야 지워짐)
+- 실패하면 기록 보기: `aws lightsail get-container-log --region ap-northeast-2 --service-name pdf2hwpx --container-name web`
+
+**노드는 1개로 고정**합니다. 작업 상태를 메모리와 로컬 디스크에 두므로, 여러 대로 늘리면
+업로드와 변환 요청이 다른 서버로 가서 404가 납니다. 내 PC에서 이미지 확인만 하려면:
+`docker build -t pdf2hwpx-web .; docker run --rm -p 8000:8000 pdf2hwpx-web`
 
 **배포 전 임시 공유**: PC에서 서버를 켜고 `cloudflared tunnel --url http://localhost:8000`
 (계정 없이 임시 `https://….trycloudflare.com` 주소, PC가 켜져 있는 동안만).

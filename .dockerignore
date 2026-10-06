@@ -7,3 +7,7 @@ docs
 *_result*.json
 .venv
 venv
+deploy
+tools
+실행하기.bat
+.pytest_cache

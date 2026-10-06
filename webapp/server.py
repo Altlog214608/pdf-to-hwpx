@@ -13,6 +13,10 @@
   묶음 작업도 일반 작업과 같은 다운로드/삭제/만료 규칙을 따른다.
 변환은 서버 전체에서 한 번에 하나씩(CONVERT_LOCK) 처리한다: 작은 서버에서도 메모리가 넘치지 않게.
 
+접속 제한(ACCESS_KEYS="이름:키,이름:키"): 설정하면 초대 링크 /join/{키}로 한 번 들어온 브라우저만
+쿠키로 계속 쓸 수 있다. 사람마다 키가 따로라 한 사람만 끊을 수도 있다(키를 지우고 다시 배포).
+설정하지 않으면(내 PC 실행) 제한 없음.
+
 보관 정책(저작권 보호): 업로드 파일과 결과물은 서버 디스크의 작업 폴더에만 있고,
 작업 보관 시간(JOB_TTL_MIN)이 지나거나 사용자가 페이지를 떠나면 폴더째 삭제된다.
 다운로드 링크는 변환 후 DOWNLOAD_TTL_MIN 동안만 유효하다.
@@ -34,7 +38,7 @@ from typing import Optional
 from urllib.parse import quote
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +59,24 @@ MAX_TOTAL_PAGES = int(os.environ.get("MAX_TOTAL_PAGES", "200"))  # 통합본 전
 MAX_LOGO_KB = 2048
 CONVERT_LOCK = threading.Lock()  # 변환 대기열: 동시에 여러 요청이 와도 하나씩
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _parse_keys(raw: str) -> dict[str, str]:
+    """"나:abc,친구:def" -> {키: 이름}. 이름을 빼고 키만 써도 된다."""
+    out: dict[str, str] = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, _, key = part.rpartition(":")
+        if len(key) >= 8:  # 너무 짧은 키는 추측될 수 있어 무시
+            out[key] = name or "user"
+    return out
+
+
+ACCESS_KEYS = _parse_keys(os.environ.get("ACCESS_KEYS", ""))
+ACCESS_COOKIE = "pdf2hwpx_access"
+ACCESS_DAYS = int(os.environ.get("ACCESS_DAYS", "180"))
 
 
 @dataclass
@@ -107,6 +129,49 @@ def _sweeper() -> None:
 threading.Thread(target=_sweeper, daemon=True).start()
 
 app = FastAPI(title="PDF → HWPX", version=VERSION, docs_url=None, redoc_url=None)
+
+GATE_HTML = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex">
+<title>초대 링크 필요</title><style>
+:root{color-scheme:light dark;--bg:#f6f7f9;--card:#fff;--text:#1d2129;--muted:#6b7280}
+@media (prefers-color-scheme:dark){:root{--bg:#111318;--card:#1a1d24;--text:#eceef2;--muted:#9aa1ad}}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--text);
+font-family:Pretendard,"Malgun Gothic",sans-serif;padding:16px}
+div{max-width:420px;background:var(--card);border-radius:16px;padding:28px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+h1{font-size:19px;margin:0 0 10px}p{margin:0;color:var(--muted);line-height:1.6;font-size:14.5px}
+</style></head><body><div><h1>초대 링크로 들어와 주세요</h1>
+<p>이 사이트는 초대받은 사람만 쓸 수 있어요. 받은 초대 링크를 한 번 열면 이 브라우저에서는 계속 쓸 수 있어요.</p>
+</div></body></html>"""
+
+
+def _access_name(key: str) -> Optional[str]:
+    found = None
+    for k, name in ACCESS_KEYS.items():  # 모든 키와 비교(시간 차로 키를 추측하지 못하게)
+        if secrets.compare_digest(key.encode(), k.encode()):
+            found = name
+    return found
+
+
+@app.middleware("http")
+async def access_gate(request: Request, call_next):
+    path = request.url.path
+    if ACCESS_KEYS and path != "/healthz":
+        if path.startswith("/join/"):
+            key = path[len("/join/"):].strip("/")
+            if _access_name(key) is None:
+                return HTMLResponse(GATE_HTML, status_code=403)
+            resp = RedirectResponse("/", status_code=303)
+            secure = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+            resp.set_cookie(ACCESS_COOKIE, key, max_age=ACCESS_DAYS * 86400, httponly=True,
+                            secure=secure, samesite="lax")
+            return resp
+        if _access_name(request.cookies.get(ACCESS_COOKIE, "")) is None:
+            if path.startswith("/api/"):
+                return JSONResponse({"detail": "초대 링크로 다시 들어와 주세요."}, status_code=401)
+            return HTMLResponse(GATE_HTML, status_code=401)
+    resp = await call_next(request)
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"  # 검색 엔진에 나오지 않게
+    return resp
 
 
 def _get(job_id: str) -> Job:
@@ -371,4 +436,6 @@ app.mount("/", StaticFiles(directory=str(Path(__file__).parent / "static"), html
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "8000")))
+    # 접속 기록은 기본으로 끈다(초대 링크의 키가 로그에 남지 않게). 로드밸런서 뒤에서는 https 여부를 헤더로 받는다.
+    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "8000")),
+                access_log=os.environ.get("ACCESS_LOG") == "1", proxy_headers=True, forwarded_allow_ips="*")
