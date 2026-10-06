@@ -33,3 +33,6 @@ Thumbs.db
 
 # Test PDFs / source documents
 *.pdf
+# 배포: 초대 키/배포 설정(비밀), 자동으로 받은 도구
+deploy/
+tools/bin/

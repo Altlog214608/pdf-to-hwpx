@@ -12,6 +12,7 @@ from .extract import extract
 from .hwpx_writer import HwpxWriter
 from .ir import build_document
 from .ir_json import document_to_json
+from .merge import merge_documents
 from .style import DocStyle
 from .validate import validate
 
@@ -72,3 +73,32 @@ def convert(pdf_path: str, out_dir: Optional[str] = None, overwrite: bool = Fals
         result["json"] = str(jp.resolve())
     ex.doc.close()
     return result
+
+
+def convert_many(pdf_paths: list[str], hwpx_path: str, style: Optional[DocStyle] = None,
+                 names: Optional[list[str]] = None) -> dict:
+    """여러 PDF를 순서대로 이어 한 HWPX(통합본)로. 문제 번호·정답 번호는 이어서 다시 매긴다."""
+    if not pdf_paths:
+        raise ValueError("PDF가 없습니다")
+    exs = []
+    try:
+        docs = []
+        for p in pdf_paths:
+            ex = extract(str(p))
+            exs.append(ex)
+            docs.append(build_document(ex))
+        doc = merge_documents(docs, names or [Path(p).name for p in pdf_paths])
+        writer = HwpxWriter(doc, preview_png=_preview_png(exs[0]), style=style)
+        write_stats = writer.write(str(hwpx_path))
+        report = validate(exs, doc, str(hwpx_path))
+        return {
+            "version": VERSION,
+            "source_files": names or [Path(p).name for p in pdf_paths],
+            "hwpx": str(Path(hwpx_path).resolve()),
+            "ir_stats": doc.stats,
+            "writer": write_stats,
+            "validation": report,
+        }
+    finally:
+        for ex in exs:
+            ex.doc.close()

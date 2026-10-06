@@ -12,7 +12,7 @@ pip install -r requirements.txt; python .\v0_5_pdf_to_hwpx.py ".\[꼭 나오는 
 - 폴더 일괄 변환: `python .\v0_5_pdf_to_hwpx.py .\pdfs --out-dir .\out`
 - 테스트: `python -m pytest tests -q` (실제 PDF 회귀: `$env:PDF2HWPX_SAMPLES=".\pdfs"; python -m pytest tests -q`)
 
-## 웹사이트 (v0.6)
+## 웹사이트 (v0.8)
 
 **Windows에서 더블클릭**: 압축을 푼 폴더의 `실행하기.bat` → (Python이 없으면 자동 설치) → 브라우저가 열립니다.
 검은 창을 닫으면 꺼집니다. 처음에 "Windows의 PC 보호" 창이 뜨면 **추가 정보 → 실행**.
@@ -23,7 +23,10 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 ```
 
 http://127.0.0.1:8000 에서 PDF를 끌어다 놓고, 학원 이름·로고·시험 제목·바깥 테두리·본문 글꼴과 크기를 미리 보며 정한 뒤
-내려받습니다. 파일은 페이지를 떠나거나 일정 시간이 지나면 서버에서 삭제됩니다. 실행 설정과 AWS 배포는 [docs/WEB.md](docs/WEB.md).
+내려받습니다. 여러 PDF를 한 번에 올려 따로(ZIP) 받거나 번호를 이어 통합본으로 만들 수 있습니다.
+파일은 페이지를 떠나거나 일정 시간이 지나면 서버에서 삭제됩니다. 실행 설정과 AWS 배포는 [docs/WEB.md](docs/WEB.md).
+
+**AWS에 올리기**(초대 링크로 둘만 접속): `powershell -ExecutionPolicy Bypass -File .\tools\deploy_lightsail.ps1`
 
 ```
 pdf2hwpx/            변환기 패키지 (extract → ir → hwpx_writer → validate)

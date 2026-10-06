@@ -253,3 +253,86 @@ def test_short_intro_kept_with_figure():
     header = w.styles.render_header(1)
     keep = lambda pid: re.search(rf'<hh:paraPr id="{pid}"[^>]*>.*?keepWithNext="(\d)"', header, re.S).group(1)
     assert keep(pps[0]) == "1" and keep(pps[1]) == "1"
+
+
+def test_auto_number_paragraphs(result, tmp_path):
+    """문제 번호는 한글 문단 번호(heading NUMBER)로: 발문 글자에는 `1.`이 없고, 번호 모양은 첫 문제 번호부터."""
+    import zipfile
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.hwpx_writer import HwpxWriter
+    from pdf2hwpx.ir import build_document
+    from pdf2hwpx.model import Question
+    from pdf2hwpx.style import DocStyle
+
+    with zipfile.ZipFile(result["hwpx"]) as z:
+        header = z.read("Contents/header.xml").decode("utf-8")
+        sec0 = z.read("Contents/section0.xml").decode("utf-8")
+    nid = re.search(r'<hh:numbering id="(\d+)" start="0"><hh:paraHead start="1" level="1"[^>]*charPrIDRef="9"', header).group(1)
+    assert re.search(r'<hh:numberings itemCnt="2"', header)
+    pps = re.findall(rf'<hh:paraPr id="(\d+)"[^>]*>(?:(?!</hh:paraPr>).)*?<hh:heading type="NUMBER" idRef="{nid}" level="0"/>', header, re.S)
+    stems = [m for m in re.finditer(r'<hp:p [^>]*paraPrIDRef="(\d+)"[^>]*>(.*?)</hp:p>', sec0, re.S) if m.group(1) in pps]
+    assert len(stems) == 5
+    for m in stems:
+        text = "".join(re.findall(r"<hp:t>([^<]*)</hp:t>", m.group(2)))
+        assert not re.match(r"\s*\d+\s*\.", text), text
+    assert result["validation"]["checks"]["question_order_status"] == "PASS"
+    assert result["writer"]["auto_numbers"] == 5
+
+    # 끄면 예전처럼 글자, 번호가 연속이 아니면 글자로 되돌리고 알린다
+    pdf = tmp_path / "s.pdf"
+    build(str(pdf))
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=DocStyle(auto_number=False))
+    assert res["validation"]["status"] == "PASS" and "auto_numbers" not in res["writer"]
+    doc = build_document(extract(str(pdf)))
+    [it for it in doc.items if isinstance(it, Question)][-1].number = 9
+    w = HwpxWriter(doc, style=DocStyle())
+    assert w.num_id is None and any("자동 번호" in x for x in doc.warnings)
+
+
+@pytest.mark.parametrize("endnotes", [False, True])
+def test_merge_documents_renumbers(tmp_path, endnotes):
+    """통합본: 파일 3개(문제 5개씩)를 이으면 1~15번, 정답도 1)~15), 미주도 15개."""
+    from pdf2hwpx.convert import convert_many
+    from pdf2hwpx.style import DocStyle
+
+    pdfs = []
+    for k in range(3):
+        p = tmp_path / f"s{k}.pdf"
+        build(str(p))
+        pdfs.append(str(p))
+    out = tmp_path / "merged.hwpx"
+    res = convert_many(pdfs, str(out), style=DocStyle(answers_as_endnotes=endnotes))
+    v = res["validation"]
+    assert v["status"] == "PASS", v
+    c = v["checks"]
+    assert c["question_count"] == c["answer_count"] == 15
+    assert c["endnotes"] == (15 if endnotes else 0)
+    paras = [p["text"] for p in read_hwpx(str(out))["paragraphs"]]
+    stems = [int(m.group(1)) for t in paras if (m := re.match(r"(\d+)\.(?!\s)", t))]
+    assert stems == list(range(1, 16))
+    if not endnotes:
+        heads = [int(m.group(1)) for t in paras if (m := re.match(r"\s*(\d+)\)\s*\[정답\]", t))]
+        assert heads == list(range(1, 16))
+
+
+def test_merge_rewrites_literal_numbers():
+    """번호가 글자로 든 곳(지문 안내 [1~3], 정답 1), 발문 1.)을 조각난 글자 모양을 지키며 고친다."""
+    from pdf2hwpx.merge import merge_documents
+    from pdf2hwpx.model import AnswerEntry, Document, Para, Passage, Question, Run
+
+    def doc(n):
+        d = Document(source="x.pdf")
+        d.items.append(Passage(1, Para(runs=[Run("[", bold=True), Run("1~"), Run(f"{n}] 다음 글을 읽고")]), [],
+                               question_numbers=list(range(1, n + 1))))
+        for i in range(1, n + 1):
+            d.items.append(Question(i, Para(runs=[Run(f"{i}. 물음", bold=True)]), 1))
+            d.answers.append(AnswerEntry(i, Para(runs=[Run(f"{i}) [정답] ③")])))
+        return d
+    m = merge_documents([doc(3), doc(2)], ["a.pdf", "b.pdf"])
+    qs = [it for it in m.items if isinstance(it, Question)]
+    ps = [it for it in m.items if isinstance(it, Passage)]
+    assert [q.number for q in qs] == [1, 2, 3, 4, 5]
+    assert qs[3].stem.text == "4. 물음" and qs[3].passage_id == 2
+    assert ps[1].guide.text == "[4~5] 다음 글을 읽고" and ps[1].guide.runs[0].bold
+    assert ps[1].question_numbers == [4, 5] and ps[1].id == 2
+    assert [a.head.text for a in m.answers][3:] == ["4) [정답] ③", "5) [정답] ③"]

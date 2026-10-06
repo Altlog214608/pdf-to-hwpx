@@ -51,9 +51,9 @@
           <svg viewBox="0 0 64 64"><path class="doc" d="M18 6h20l14 14v34a4 4 0 0 1-4 4H18a4 4 0 0 1-4-4V10a4 4 0 0 1 4-4z"/><path class="fold" d="M38 6v14h14"/><text x="33" y="45" text-anchor="middle">PDF</text></svg>
         </span>
         <span class="dz-title">PDF를 여기로 끌어다 놓거나 <u>클릭해서 선택</u></span>
-        <span id="drop-hint" class="dz-hint">최대 <b data-cfg="max_mb">40</b>MB · <b data-cfg="max_pages">80</b>쪽 · 글자를 긁을 수 있는 PDF</span>
+        <span id="drop-hint" class="dz-hint">한 번에 <b data-cfg="max_files">10</b>개까지 · 파일당 <b data-cfg="max_mb">40</b>MB · <b data-cfg="max_pages">80</b>쪽 · 글자를 긁을 수 있는 PDF</span>
       </button>
-      <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
+      <input id="file-input" type="file" accept="application/pdf,.pdf" multiple hidden>
       <ul class="features" aria-label="특징">
         <li><b>구조 보존</b>지문 박스, &lt;보기&gt;, 시의 연 구분, 밑줄까지</li>
         <li><b>바로 편집</b>박스 안에서 Enter를 눌러도 테두리가 늘어나요</li>
@@ -73,7 +73,8 @@
             <header class="card-head">
               <h2>원본 PDF</h2>
               <span class="file-chip" id="file-chip"></span>
-              <button class="btn-ghost" id="btn-new" type="button" title="다른 PDF 올리기">새 PDF</button>
+              <button class="btn-ghost" id="btn-add" type="button" title="PDF를 더 올려 여러 개를 한 번에 변환">+ 추가</button>
+              <button class="btn-ghost" id="btn-new" type="button" title="모두 지우고 다른 PDF 올리기">새 PDF</button>
             </header>
             <div class="source-view" id="source-view">
               <img id="source-img" alt="원본 PDF 첫 쪽" draggable="false">
@@ -81,10 +82,23 @@
               <button class="btn-chip" id="btn-source-expand" type="button">전체 보기</button>
             </div>
             <dl class="stats" id="source-stats"></dl>
+            <div class="file-list-wrap" id="file-list-wrap" hidden>
+              <p class="note">파일을 누르면 미리보기가 바뀌어요. 통합본은 이 순서대로 이어 붙여요.</p>
+              <ol class="file-list" id="file-list"></ol>
+            </div>
           </article>
 
           <article class="card settings-card" aria-labelledby="settings-title">
             <header class="card-head"><h2 id="settings-title">디자인 설정</h2><span class="hint">오른쪽 미리보기를 눌러도 바로 고칠 수 있어요</span></header>
+
+            <fieldset class="group" id="multi-group" hidden>
+              <legend>여러 파일 <span class="sub" id="multi-count"></span></legend>
+              <div class="seg seg-2" role="radiogroup" aria-label="여러 파일 변환 방식">
+                <button type="button" role="radio" aria-checked="true" data-multi-mode="each">파일마다 따로</button>
+                <button type="button" role="radio" aria-checked="false" data-multi-mode="merge">하나로 합치기</button>
+              </div>
+              <p class="note" id="multi-note"></p>
+            </fieldset>
 
             <fieldset class="group">
               <legend>머리 부분 <span class="sub">모든 페이지 맨 위에 반복돼요 (한글 ‘바탕쪽’)</span></legend>
@@ -161,6 +175,16 @@
               <p class="note" id="answer-note">정답·해설을 문제 뒤에 [정답 및 해설] 쪽으로 이어 붙입니다.</p>
             </fieldset>
 
+            <fieldset class="group">
+              <legend>문제 번호</legend>
+              <label class="switch">
+                <input id="in-autonum" type="checkbox" checked>
+                <span class="track" aria-hidden="true"><i></i></span>
+                <span>한글 자동 번호로 넣기</span>
+              </label>
+              <p class="note">문제를 새로 쓰거나 다른 파일을 붙여 넣으면 번호가 자동으로 이어져요(한글 ‘문단 번호’). 끄면 지금처럼 글자로 들어가요.</p>
+            </fieldset>
+
             <div class="actions" id="actions">
               <button class="btn-primary" id="btn-convert" type="button">
                 <span class="btn-label">HWPX로 변환하기</span>
@@ -177,9 +201,10 @@
                 </div>
               </div>
               <ul class="result-summary" id="result-summary"></ul>
+              <ul class="result-files" id="result-files" hidden></ul>
               <a class="btn-primary btn-download" id="btn-download" href="#" download>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 19h14"/></svg>
-                한글 파일 내려받기
+                <span id="btn-download-label">한글 파일 내려받기</span>
               </a>
               <div class="timer" id="timer">
                 <div class="timer-bar"><i id="timer-fill"></i></div>
@@ -222,7 +247,7 @@
         <span class="drop-plus">+</span>
       </div>
       <p>놓으면 바로 올라가요</p>
-      <small>PDF 파일 한 개</small>
+      <small>여러 개를 한 번에 놓아도 돼요</small>
     </div>
   </div>
 

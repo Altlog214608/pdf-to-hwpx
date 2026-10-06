@@ -90,3 +90,89 @@ def test_job_ttl_expiry(env):
     server.JOBS[jid].created -= server.JOB_TTL_MIN * 60 + 1
     assert client.post(f"/api/jobs/{jid}/convert", json={}).status_code == 404
     assert jid not in server.JOBS
+
+
+def _upload(client, pdf, name):
+    r = client.post("/api/jobs", files={"file": (name, pdf, "application/pdf")})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def test_merge_bundle(env):
+    client, server, pdf = env
+    ids = [_upload(client, pdf, f"단원{k}.pdf") for k in range(3)]
+    lr = client.post(f"/api/jobs/{ids[0]}/logo", files={"file": ("logo.png", _png(), "image/png")})
+    assert lr.status_code == 200
+    assert client.post("/api/bundles/merge", json={"jobs": ids[:1]}).status_code == 400
+    r = client.post("/api/bundles/merge", json={"jobs": ids, "options": {"title": "통합", "use_logo": True}})
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["files"] == 3 and b["summary"]["questions"] == 15 and b["status"] == "PASS", b
+    assert b["filename"] == "단원0 외 2개 통합.hwpx"
+    d = client.get(b["download_url"])
+    assert d.status_code == 200 and d.headers["content-type"] == "application/hwp+zip"
+    z = zipfile.ZipFile(io.BytesIO(d.content))
+    assert "binaryItemIDRef" in z.read("Contents/masterpage0.xml").decode()  # 첫 파일 로고
+    # 쪽수 제한
+    old = server.MAX_TOTAL_PAGES
+    server.MAX_TOTAL_PAGES = 1
+    try:
+        assert client.post("/api/bundles/merge", json={"jobs": ids}).status_code == 413
+    finally:
+        server.MAX_TOTAL_PAGES = old
+    # 묶음 작업도 페이지 이탈 시 삭제
+    bdir = server.JOBS[b["id"]].dir
+    assert client.post(f"/api/jobs/{b['id']}/delete").status_code == 204 and not bdir.exists()
+
+
+def test_zip_bundle_and_limits(env):
+    client, server, pdf = env
+    ids = [_upload(client, pdf, n) for n in ("같은이름.pdf", "같은이름.pdf", "다른.pdf")]
+    assert client.post("/api/bundles/zip", json={"jobs": ids}).status_code == 409  # 아직 변환 전
+    for jid in ids:
+        c = client.post(f"/api/jobs/{jid}/convert", json={"logo_job": ids[0]})
+        assert c.status_code == 200 and c.json()["status"] == "PASS"
+    r = client.post("/api/bundles/zip", json={"jobs": ids})
+    assert r.status_code == 200, r.text
+    zr = r.json()
+    d = client.get(zr["download_url"])
+    assert d.status_code == 200 and d.headers["content-type"] == "application/zip"
+    z = zipfile.ZipFile(io.BytesIO(d.content))
+    assert z.namelist() == ["같은이름.hwpx", "같은이름 (2).hwpx", "다른.hwpx"]
+    assert zipfile.ZipFile(io.BytesIO(z.read("다른.hwpx"))).read("mimetype") == b"application/hwp+zip"
+    # 묶음을 다시 묶을 수 없고, 개수 제한이 있다
+    assert client.post("/api/bundles/zip", json={"jobs": [zr["id"]]}).status_code == 400
+    old = server.MAX_FILES
+    server.MAX_FILES = 2
+    try:
+        assert client.post("/api/bundles/zip", json={"jobs": ids}).status_code == 413
+    finally:
+        server.MAX_FILES = old
+    assert client.get("/api/config").json()["max_files"] == server.MAX_FILES
+
+
+def test_access_gate(env, monkeypatch):
+    """ACCESS_KEYS가 있으면 초대 링크(/join/키)로 쿠키를 받은 브라우저만 쓸 수 있다."""
+    client, server, pdf = env
+    monkeypatch.setattr(server, "ACCESS_KEYS", server._parse_keys("나:key-for-me-123, 친구:key-for-friend-456, short:abc"))
+    assert set(server.ACCESS_KEYS.values()) == {"나", "친구"}  # 짧은 키는 무시
+    from fastapi.testclient import TestClient
+    c = TestClient(server.app)
+    assert c.get("/healthz").status_code == 200           # 로드밸런서 헬스체크는 열어 둔다
+    r = c.get("/")
+    assert r.status_code == 401 and "초대 링크" in r.text
+    assert c.get("/api/config").status_code == 401
+    assert c.post("/api/jobs", files={"file": ("a.pdf", pdf, "application/pdf")}).status_code == 401
+    assert c.get("/join/wrong-key-000", follow_redirects=False).status_code == 403
+    r = c.get("/join/key-for-friend-456", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    sc = r.headers["set-cookie"]
+    assert "HttpOnly" in sc and "Max-Age=15552000" in sc and "Secure" not in sc
+    assert c.get("/").status_code == 200 and c.get("/api/config").status_code == 200
+    assert c.get("/").headers["x-robots-tag"].startswith("noindex")
+    # https(로드밸런서 뒤)이면 Secure 쿠키
+    r = TestClient(server.app).get("/join/key-for-me-123", headers={"x-forwarded-proto": "https"}, follow_redirects=False)
+    assert "Secure" in r.headers["set-cookie"]
+    # 키를 지우면(다시 배포) 그 사람은 끊긴다
+    monkeypatch.setattr(server, "ACCESS_KEYS", server._parse_keys("나:key-for-me-123"))
+    assert c.get("/api/config").status_code == 401
