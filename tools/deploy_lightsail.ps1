@@ -34,7 +34,9 @@ function Write-Utf8([string]$path, [string]$text) {
 function Invoke-Aws {
     $old = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $out = & aws @args --region $Region 2>&1 | ForEach-Object { "$_" }
+    # stderr 줄은 5.1 에서 빈 RemoteException 으로 감싸져 나오므로 그 줄은 버린다
+    $out = & aws @args --region $Region 2>&1 | ForEach-Object { "$_" } |
+        Where-Object { $_ -ne 'System.Management.Automation.RemoteException' }
     $code = $LASTEXITCODE
     $ErrorActionPreference = $old
     return @{ ok = ($code -eq 0); text = ($out -join "`n") }
@@ -148,7 +150,17 @@ $svc = Get-ServiceInfo
 if (-not $svc) {
     Say "컨테이너 서비스 '$Service' 를 만듭니다 (서울, $Power, 1대). 몇 분 걸립니다." 'Cyan'
     $r = Invoke-Aws lightsail create-container-service --service-name $Service --power $Power --scale 1 --output json
-    if (-not $r.ok) { Fail ("서비스를 만들지 못했습니다.`n" + $r.text) }
+    if (-not $r.ok) {
+        if ($r.text -match 'maximum limit of Lightsail Container Services') {
+            $all = Invoke-Aws lightsail get-container-services --query 'containerServices[].containerServiceName' --output text
+            Fail ("이 계정의 Lightsail 컨테이너 서비스 한도에 걸렸습니다.`n" +
+                  "  지금 서울 리전에 있는 서비스: " + $(if ($all.text.Trim()) { $all.text.Trim() } else { '(없음)' }) + "`n" +
+                  "  - 다른 서비스가 있으면: -Service 그이름 으로 실행하거나, 안 쓰는 서비스를 지우세요.`n" +
+                  "  - 없으면 새 계정의 한도가 0인 경우입니다. AWS Support Center 에서 한도 증가를 요청하세요`n" +
+                  "    (Service limit increase > Lightsail > Container services, 리전 서울, 새 한도 1).`n" + $r.text)
+        }
+        Fail ("서비스를 만들지 못했습니다.`n" + $r.text)
+    }
     $svc = Wait-Service { param($s) if ($s -and $s.state -in @('READY', 'RUNNING')) { 'ok' } } '서비스 준비 중'
 }
 
