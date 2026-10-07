@@ -29,6 +29,9 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 | `MAX_MB` / `MAX_PAGES` | 40 / 80 | 업로드 제한(파일 하나당) |
 | `MAX_FILES` | 10 | 한 번에 올리는 PDF 수 |
 | `MAX_TOTAL_PAGES` | 200 | 통합본 전체 쪽수 |
+| `USAGE_DB` | `DATA_DIR` 옆 `pdf2hwpx_usage.sqlite3` | 이용 기록 파일(SQLite) |
+| `USAGE_KEEP_DAYS` | 365 | 이용 기록 보관 기간(일) |
+| `ADMIN_USERS` | `ACCESS_KEYS`의 첫 사람 | 이용 기록을 볼 수 있는 초대 이름(쉼표로 여러 명) |
 | `DATA_DIR` | 시스템 임시 폴더`/pdf2hwpx_jobs` | 작업 폴더 |
 | `HOST` / `PORT` | 127.0.0.1 / 8000 | 컨테이너에서는 `0.0.0.0` |
 
@@ -49,15 +52,26 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 3. **다운로드**: 구조 검사 결과(문제 수·박스·정답·원문 반영률)와 남은 다운로드 시간 표시.
    설정을 바꾸면 "다시 변환" 상태가 됨.
 
-## 3. 파일 보관 정책 (저작권 보호)
+## 3. 이용 기록 (관리자)
+
+- 관리자(기본: 초대 키의 첫 사람 `me`)에게만 화면 오른쪽 위에 **이용 기록** 링크가 보이고, `/admin`에서 봅니다.
+  다른 사람이 `/admin`·`/api/admin/*`에 들어오면 403.
+- 남기는 것: 시각, 초대 이름, 동작(초대 링크 접속·PDF 올리기·변환·통합본·ZIP·내려받기·오류), 파일 수, 쪽수, 문제 수,
+  결과(통과/확인 필요/문제 있음), 걸린 시간, 설정 일부(정답 미주 여부, 자동 번호, 글꼴), 접속 기기 종류(Windows/Mac/iPhone…).
+- **남기지 않는 것**: 파일 내용, 파일 이름, 시험 제목, 학원 이름, IP 주소.
+- 화면: 기간(7일/30일/90일/1년)·사람별 요약, 날짜별 변환 횟수 그래프, 사람별 표, 최근 기록, CSV 내려받기(엑셀용).
+- `USAGE_KEEP_DAYS`(기본 365일)가 지난 기록은 자동으로 지웁니다. 서버(Lightsail)에서는 `/var/lib/pdf2hwpx/`에 있어
+  다시 배포해도 유지되고, `-Delete`로 서버를 지우면 함께 사라집니다.
+
+## 4. 파일 보관 정책 (저작권 보호)
 
 - 업로드 파일·결과물은 서버 디스크의 작업 폴더에만 있고 DB·외부 저장소에 남기지 않습니다.
 - 페이지를 떠나면 브라우저가 `sendBeacon`으로 삭제 요청 → 즉시 폴더 삭제.
 - 그렇지 않아도 `JOB_TTL_MIN`이 지나면 30초 간격 청소 스레드가 삭제. 다운로드 링크는 추측 불가능한
   토큰을 포함하고 `DOWNLOAD_TTL_MIN` 뒤 410(만료)을 돌려줍니다.
-- 서버 로그에 파일 내용은 남기지 않습니다(파일 이름도 응답 외에는 기록하지 않음).
+- 서버 로그와 이용 기록에 파일 내용·파일 이름은 남기지 않습니다.
 
-## 4. API
+## 5. API
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
@@ -71,11 +85,12 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 | GET | `/api/jobs/{id}/download/{token}` | HWPX (만료 시 410) |
 | DELETE · POST `.../delete` | `/api/jobs/{id}` | 작업 삭제 |
 | GET | `/healthz` | 상태 확인(로드밸런서용) |
+| GET | `/admin` · `/api/admin/usage?days=&limit=&user=` · `/api/admin/usage.csv` | 이용 기록(관리자만) |
 
 CLI에서도 같은 옵션을 쓸 수 있습니다:
 `python .\v0_5_pdf_to_hwpx.py 파일.pdf --font 나눔명조 --size 11 --title "[중간 대비] 2-2" --academy "한빛 국어학원" --logo .\logo.png`
 
-## 5. 머리 부분은 한글에서 어떻게 만들어지나
+## 6. 머리 부분은 한글에서 어떻게 만들어지나
 
 수작업 시험지와 같은 **바탕쪽(masterpage)** 방식입니다. 바탕쪽에 '글 뒤로' 배치한 표 하나가 페이지를 덮습니다.
 
@@ -89,7 +104,7 @@ CLI에서도 같은 옵션을 쓸 수 있습니다:
 바탕쪽은 모든 쪽에 반복되고 본문을 고쳐도 움직이지 않습니다. 한글에서 고치려면 `쪽 → 바탕쪽`으로 들어갑니다.
 머리 부분을 켜면 본문 여백도 수작업 파일 수치(바탕쪽 표 안쪽에 본문이 들어가도록)로 바뀝니다.
 
-## 6. AWS 배포 (Lightsail 인스턴스)
+## 7. AWS 배포 (Lightsail 인스턴스)
 
 변환은 CPU만 쓰고 1개 PDF당 1~3초, 메모리 300MB 안팎입니다. 변환은 서버 전체에서
 한 번에 하나씩 처리하므로(대기열) 여러 파일을 올려도 메모리가 늘지 않습니다.
@@ -143,6 +158,6 @@ $env:AWS_PROFILE = "pdf"; powershell -ExecutionPolicy Bypass -File .\tools\deplo
 - 변환은 SQS + 워커(또는 Lambda 컨테이너 이미지, 메모리 1.5GB 이상)로 분리.
 `webapp/server.py`의 `Job`/`JOBS`/`_delete`만 바꾸면 되도록 나눠 두었습니다.
 
-## 7. 아직 없는 것
+## 8. 아직 없는 것
 
 - 제목 글꼴에 학원 전용 글꼴(예: 디자인 글꼴) 지정 — 글꼴 이름을 알려 주면 목록에 추가. 단 열어 보는 PC에 설치돼 있어야 함.

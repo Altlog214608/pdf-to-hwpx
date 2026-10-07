@@ -17,6 +17,9 @@
 쿠키로 계속 쓸 수 있다. 사람마다 키가 따로라 한 사람만 끊을 수도 있다(키를 지우고 다시 배포).
 설정하지 않으면(내 PC 실행) 제한 없음.
 
+이용 기록(usage.py): 누가·언제·무엇을·몇 쪽/몇 문제만 SQLite(USAGE_DB)에 남긴다(파일 내용·이름은 남기지 않음).
+관리자(ADMIN_USERS, 기본: ACCESS_KEYS의 첫 사람)만 /admin 에서 본다.
+
 보관 정책(저작권 보호): 업로드 파일과 결과물은 서버 디스크의 작업 폴더에만 있고,
 작업 보관 시간(JOB_TTL_MIN)이 지나거나 사용자가 페이지를 떠나면 폴더째 삭제된다.
 다운로드 링크는 변환 후 DOWNLOAD_TTL_MIN 동안만 유효하다.
@@ -38,7 +41,7 @@ from typing import Optional
 from urllib.parse import quote
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +51,7 @@ from pdf2hwpx import VERSION  # noqa: E402
 from pdf2hwpx.convert import convert, convert_many  # noqa: E402
 from pdf2hwpx.preview import analyze  # noqa: E402
 from pdf2hwpx.style import FONTS, DocStyle  # noqa: E402
+from webapp.usage import EVENTS, UsageLog, device_of  # noqa: E402
 
 DATA_DIR = Path(os.environ.get("DATA_DIR") or Path(tempfile.gettempdir()) / "pdf2hwpx_jobs")
 JOB_TTL_MIN = float(os.environ.get("JOB_TTL_MIN", "30"))         # 업로드 후 작업 보관 시간
@@ -75,6 +79,11 @@ def _parse_keys(raw: str) -> dict[str, str]:
 
 
 ACCESS_KEYS = _parse_keys(os.environ.get("ACCESS_KEYS", ""))
+# 이용 기록을 볼 수 있는 사람(초대 이름). 따로 정하지 않으면 ACCESS_KEYS 의 첫 사람(배포 스크립트의 'me').
+ADMIN_USERS = {x.strip() for x in os.environ.get("ADMIN_USERS", "").split(",") if x.strip()} or \
+    set(list(ACCESS_KEYS.values())[:1])
+USAGE = UsageLog(Path(os.environ.get("USAGE_DB") or DATA_DIR.parent / "pdf2hwpx_usage.sqlite3"),
+                 keep_days=float(os.environ.get("USAGE_KEEP_DAYS", "365")))
 ACCESS_COOKIE = "pdf2hwpx_access"
 ACCESS_DAYS = int(os.environ.get("ACCESS_DAYS", "180"))
 
@@ -92,6 +101,8 @@ class Job:
     lock: threading.Lock = field(default_factory=threading.Lock)
     pages: int = 0
     members: list = field(default_factory=list)  # 묶음(통합본/ZIP) 작업이면 원본 작업 id들
+    user: str = ""        # 올린 사람(초대 이름). 이용 기록용
+    questions: int = 0    # 분석에서 찾은 문제 수. 이용 기록용
 
     @property
     def pdf(self) -> Path:
@@ -152,23 +163,38 @@ def _access_name(key: str) -> Optional[str]:
     return found
 
 
+def _is_admin(user: str) -> bool:
+    return not ACCESS_KEYS or user in ADMIN_USERS  # 내 PC 실행(제한 없음)이면 누구나
+
+
+def _user(request: Request) -> str:
+    return getattr(request.state, "user", "") or "local"
+
+
 @app.middleware("http")
 async def access_gate(request: Request, call_next):
     path = request.url.path
+    request.state.user = "local"
     if ACCESS_KEYS and path != "/healthz":
         if path.startswith("/join/"):
             key = path[len("/join/"):].strip("/")
-            if _access_name(key) is None:
+            name = _access_name(key)
+            if name is None:
                 return HTMLResponse(GATE_HTML, status_code=403)
+            USAGE.add("join", name, device=device_of(request.headers.get("user-agent", "")))
             resp = RedirectResponse("/", status_code=303)
             secure = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
             resp.set_cookie(ACCESS_COOKIE, key, max_age=ACCESS_DAYS * 86400, httponly=True,
                             secure=secure, samesite="lax")
             return resp
-        if _access_name(request.cookies.get(ACCESS_COOKIE, "")) is None:
+        name = _access_name(request.cookies.get(ACCESS_COOKIE, ""))
+        if name is None:
             if path.startswith("/api/"):
                 return JSONResponse({"detail": "초대 링크로 다시 들어와 주세요."}, status_code=401)
             return HTMLResponse(GATE_HTML, status_code=401)
+        request.state.user = name
+    if (path.startswith("/admin") or path.startswith("/api/admin/")) and not _is_admin(request.state.user):
+        return JSONResponse({"detail": "관리자만 볼 수 있습니다."}, status_code=403)
     resp = await call_next(request)
     resp.headers["X-Robots-Tag"] = "noindex, nofollow"  # 검색 엔진에 나오지 않게
     return resp
@@ -188,14 +214,15 @@ def healthz() -> dict:
 
 
 @app.get("/api/config")
-def config() -> dict:
+def config(request: Request) -> dict:
     return {"version": VERSION, "fonts": FONTS, "max_mb": MAX_MB, "max_pages": MAX_PAGES,
             "job_ttl_min": JOB_TTL_MIN, "download_ttl_min": DOWNLOAD_TTL_MIN,
-            "max_files": MAX_FILES, "max_total_pages": MAX_TOTAL_PAGES}
+            "max_files": MAX_FILES, "max_total_pages": MAX_TOTAL_PAGES,
+            "admin": _is_admin(_user(request))}
 
 
 @app.post("/api/jobs")
-def create_job(file: UploadFile = File(...)) -> JSONResponse:
+def create_job(request: Request, file: UploadFile = File(...)) -> JSONResponse:
     data = file.file.read(int(MAX_MB * 1024 * 1024) + 1)
     if len(data) > MAX_MB * 1024 * 1024:
         raise HTTPException(413, f"파일이 너무 큽니다 (최대 {MAX_MB:g}MB).")
@@ -204,12 +231,13 @@ def create_job(file: UploadFile = File(...)) -> JSONResponse:
     jid = uuid.uuid4().hex
     jdir = DATA_DIR / jid
     jdir.mkdir(parents=True)
-    job = Job(jid, jdir, Path(file.filename or "document.pdf").name)
+    job = Job(jid, jdir, Path(file.filename or "document.pdf").name, user=_user(request))
     job.pdf.write_bytes(data)
     try:
         info = analyze(str(job.pdf))
     except Exception as e:
         shutil.rmtree(jdir, ignore_errors=True)
+        USAGE.add("error", job.user, status="unreadable", where="upload", error=type(e).__name__)
         raise HTTPException(422, f"PDF를 읽을 수 없습니다: {type(e).__name__}")
     tl = info["text_layer"]
     if tl["pages"] > MAX_PAGES:
@@ -217,6 +245,8 @@ def create_job(file: UploadFile = File(...)) -> JSONResponse:
         raise HTTPException(413, f"페이지가 너무 많습니다 (최대 {MAX_PAGES}쪽).")
     (jdir / "page1.png").write_bytes(info.pop("page1_png"))
     job.pages = int(tl["pages"])
+    job.questions = int((info.get("stats") or {}).get("questions") or 0)
+    USAGE.add("upload", job.user, files=1, pages=job.pages, questions=job.questions, status=tl.get("status", ""))
     with JOBS_LOCK:
         JOBS[jid] = job
     return JSONResponse({
@@ -304,6 +334,9 @@ async def convert_job(job_id: str, request: Request) -> dict:
     style = _style(opts, job)
     from starlette.concurrency import run_in_threadpool
 
+    user = _user(request)
+    t0 = time.time()
+
     def work() -> dict:
         with CONVERT_LOCK, job.lock:
             out = job.dir / "out"
@@ -317,8 +350,18 @@ async def convert_job(job_id: str, request: Request) -> dict:
     try:
         res = await run_in_threadpool(work)
     except Exception as e:
+        USAGE.add("error", user, files=1, pages=job.pages, where="convert", error=type(e).__name__)
         raise HTTPException(500, f"변환 중 오류가 발생했습니다: {type(e).__name__}")
-    return _result(job, res)
+    out = _result(job, res)
+    USAGE.add("convert", user, files=1, pages=job.pages, questions=out["summary"].get("questions"),
+              status=out["status"], seconds=time.time() - t0, **_style_detail(style))
+    return out
+
+
+def _style_detail(style: DocStyle) -> dict:
+    """이용 기록에 남길 설정(학원 이름·제목 같은 글자는 남기지 않는다)."""
+    return {"endnotes": style.answers_as_endnotes, "auto_number": style.auto_number,
+            "font": style.body_font, "size": style.body_size}
 
 
 def _members(d: dict) -> list[Job]:
@@ -365,6 +408,8 @@ async def merge_jobs(request: Request) -> dict:
     style = _style(opts, jobs[0])
     stem = Path(jobs[0].filename).stem
     bundle = _new_bundle(f"{stem} 외 {len(jobs) - 1}개 통합.hwpx", jobs)
+    user = _user(request)
+    t0 = time.time()
     from starlette.concurrency import run_in_threadpool
 
     def work() -> dict:
@@ -379,20 +424,27 @@ async def merge_jobs(request: Request) -> dict:
         res = await run_in_threadpool(work)
     except Exception as e:
         shutil.rmtree(bundle.dir, ignore_errors=True)
+        USAGE.add("error", user, files=len(jobs), pages=sum(j.pages for j in jobs), where="merge",
+                  error=type(e).__name__)
         raise HTTPException(500, f"통합 중 오류가 발생했습니다: {type(e).__name__}")
     with JOBS_LOCK:
         JOBS[bundle.id] = bundle
-    return dict(_result(bundle, res), files=len(jobs))
+    out = dict(_result(bundle, res), files=len(jobs))
+    USAGE.add("merge", user, files=len(jobs), pages=sum(j.pages for j in jobs),
+              questions=out["summary"].get("questions"), status=out["status"], seconds=time.time() - t0,
+              **_style_detail(style))
+    return out
 
 
 @app.post("/api/bundles/zip")
 async def zip_jobs(request: Request) -> dict:
-    """따로 변환한 HWPX들을 ZIP 하나로 묶는다(변환은 파일마다 /convert로 먼저)."""
+    """따로 변환한 HWPX들을 ZIP 하나로 묶는다(변환은 파일마다 /convert로 먼저). 변환 횟수는 /convert 에서 센다."""
     jobs = _members(await _json(request))
     now = time.time()
     if any(j.hwpx is None or not j.hwpx.exists() or now > j.download_until for j in jobs):
         raise HTTPException(409, "아직 변환되지 않았거나 다운로드 시간이 지난 파일이 있습니다. 다시 변환해 주세요.")
     bundle = _new_bundle(f"한글 변환 {len(jobs)}개.zip", jobs)
+    bundle.user = _user(request)
     path = bundle.dir / bundle.filename
     with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as z:  # HWPX는 이미 압축돼 있다
         for j, name in zip(jobs, _unique_names(jobs)):
@@ -401,17 +453,20 @@ async def zip_jobs(request: Request) -> dict:
     bundle.download_until = min(bundle.download_until, min(j.download_until for j in jobs))
     with JOBS_LOCK:
         JOBS[bundle.id] = bundle
+    USAGE.add("zip", bundle.user, files=len(jobs), pages=sum(j.pages for j in jobs))
     return dict(_result(bundle), files=len(jobs))
 
 
 @app.get("/api/jobs/{job_id}/download/{token}")
-def download(job_id: str, token: str) -> FileResponse:
+def download(job_id: str, token: str, request: Request) -> FileResponse:
     job = _get(job_id)
     if not job.token or not secrets.compare_digest(token, job.token) or job.hwpx is None:
         raise HTTPException(404, "다운로드 링크가 올바르지 않습니다.")
     if time.time() > job.download_until:
         raise HTTPException(410, "다운로드 가능 시간이 지났습니다. 다시 변환해 주세요.")
     is_zip = job.hwpx.suffix.lower() == ".zip"
+    kind = "zip" if is_zip else "merged" if job.members else "hwpx"
+    USAGE.add("download", _user(request), files=len(job.members) or 1, kind=kind)
     ascii_name = "documents.zip" if is_zip else "document.hwpx"
     disp = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(job.hwpx.name)}"
     return FileResponse(job.hwpx, media_type="application/zip" if is_zip else "application/hwp+zip",
@@ -428,6 +483,42 @@ def delete_job(job_id: str) -> dict:
 def delete_job_beacon(job_id: str) -> Response:
     _delete(job_id)
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------- 관리자: 이용 기록 --
+@app.get("/admin")
+def admin_page() -> FileResponse:
+    return FileResponse(Path(__file__).parent / "static" / "admin.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/admin/usage")
+def admin_usage(request: Request, days: float = 30, limit: int = 200, user: str = "") -> dict:
+    days = max(1.0, min(days, 3650.0))
+    return {
+        "me": _user(request), "days": days, "keep_days": USAGE.keep_days, "events": EVENTS,
+        "people": sorted(set(ACCESS_KEYS.values())),
+        "summary": USAGE.summary(time.time() - days * 86400, user=user),
+        "everyone": USAGE.summary(time.time() - days * 86400)["users"],
+        "recent": USAGE.recent(limit, user=user),
+        "now": {"jobs": len([j for j in JOBS.values() if not j.members]), "converting": CONVERT_LOCK.locked()},
+    }
+
+
+@app.get("/api/admin/usage.csv")
+def admin_usage_csv(user: str = "") -> PlainTextResponse:
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["시각", "사람", "동작", "파일 수", "쪽수", "문제 수", "결과", "걸린 초", "기타"])
+    for r in USAGE.recent(5000, user=user):
+        w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"])), r["user"], r["label"],
+                    r["files"] or "", r["pages"] or "", r["questions"] or "", r["status"], r["seconds"] or "",
+                    " ".join(f"{k}={v}" for k, v in r["detail"].items())])
+    # 엑셀에서 한글이 깨지지 않게 BOM
+    return PlainTextResponse("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": "attachment; filename=\"usage.csv\"; "
+                                                            "filename*=UTF-8''%EC%9D%B4%EC%9A%A9%EA%B8%B0%EB%A1%9D.csv"})
 
 
 app.mount("/", StaticFiles(directory=str(Path(__file__).parent / "static"), html=True), name="static")

@@ -777,6 +777,7 @@
       const cfg = await api("/api/config");
       state.cfg = cfg;
       $$("[data-cfg]").forEach((el) => { el.textContent = cfg[el.dataset.cfg]; });
+      if (cfg.admin) $("#admin-link").hidden = false;
     } catch (_) { /* 기본값 사용 */ }
     fillFonts();
   })();
