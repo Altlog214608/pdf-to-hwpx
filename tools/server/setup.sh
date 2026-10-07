@@ -72,7 +72,7 @@ After=network.target
 [Service]
 User=pdf2hwpx
 EnvironmentFile=/etc/pdf2hwpx.env
-Environment=HOST=127.0.0.1 PORT=8000 DATA_DIR=/var/lib/pdf2hwpx/jobs PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+Environment=HOST=127.0.0.1 PORT=8000 DATA_DIR=/var/lib/pdf2hwpx/jobs PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 TZ=Asia/Seoul
 WorkingDirectory=$APP/app
 ExecStart=$APP/venv/bin/python webapp/server.py
 StateDirectory=pdf2hwpx

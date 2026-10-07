@@ -312,3 +312,8 @@ svg text { font: 800 13px var(--ui); fill: var(--accent); letter-spacing: .04em;
 .result-files li small { color: var(--muted); flex: none; }
 .result-files li a { flex: none; font-weight: 600; color: var(--text); }
 .result-files li.is-error small { color: #c0392b; }
+
+/* 관리자에게만 보이는 이용 기록 링크 */
+.admin-link { margin-left: auto; margin-right: 12px; color: var(--muted); font-size: 13px; font-weight: 600; text-decoration: none; padding: 6px 10px; border-radius: 9px; }
+.admin-link:hover { color: var(--accent); background: var(--accent-soft); }
+.admin-link + .privacy { margin-left: 0; }

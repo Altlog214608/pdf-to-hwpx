@@ -176,3 +176,55 @@ def test_access_gate(env, monkeypatch):
     # 키를 지우면(다시 배포) 그 사람은 끊긴다
     monkeypatch.setattr(server, "ACCESS_KEYS", server._parse_keys("나:key-for-me-123"))
     assert c.get("/api/config").status_code == 401
+
+
+def test_usage_log_and_admin(env, monkeypatch, tmp_path):
+    """이용 기록: 누가·무엇을·몇 쪽만 남고(파일 이름 없음), 관리자만 /admin 에서 본다."""
+    client, server, pdf = env
+    from webapp.usage import UsageLog
+    log = UsageLog(tmp_path / "usage.sqlite3")
+    monkeypatch.setattr(server, "USAGE", log)
+    monkeypatch.setattr(server, "ACCESS_KEYS", server._parse_keys("me:key-for-me-123,guest:key-for-guest-456"))
+    monkeypatch.setattr(server, "ADMIN_USERS", {"me"})
+    from fastapi.testclient import TestClient
+    guest, me = TestClient(server.app), TestClient(server.app)
+    guest.get("/join/key-for-guest-456", headers={"user-agent": "Mozilla/5.0 (Windows NT 10.0)"}, follow_redirects=False)
+    me.get("/join/key-for-me-123", follow_redirects=False)
+
+    jid = guest.post("/api/jobs", files={"file": ("비밀 제목.pdf", pdf, "application/pdf")}).json()["id"]
+    c = guest.post(f"/api/jobs/{jid}/convert", json={"answers_as_endnotes": True}).json()
+    assert guest.get(c["download_url"]).status_code == 200
+    ids = [guest.post("/api/jobs", files={"file": (f"{k}.pdf", pdf, "application/pdf")}).json()["id"] for k in range(2)]
+    assert guest.post("/api/bundles/merge", json={"jobs": ids}).status_code == 200
+
+    # 관리자만
+    assert guest.get("/api/config").json()["admin"] is False
+    assert me.get("/api/config").json()["admin"] is True
+    assert guest.get("/admin").status_code == 403 and guest.get("/api/admin/usage").status_code == 403
+    assert guest.get("/admin.html").status_code == 403
+    assert me.get("/admin").status_code == 200
+
+    d = me.get("/api/admin/usage?days=7").json()
+    ev = [(r["event"], r["user"]) for r in d["recent"]]
+    assert ("join", "guest") in ev and ("upload", "guest") in ev and ("convert", "guest") in ev
+    assert ("download", "guest") in ev and ("merge", "guest") in ev
+    conv = next(r for r in d["recent"] if r["event"] == "convert")
+    assert conv["pages"] == 3 and conv["questions"] == 5 and conv["status"] == "PASS" and conv["detail"]["endnotes"] is True
+    s = d["summary"]
+    assert s["conversions"] == 2 and s["files"] == 3 and s["questions"] == 15 and s["downloads"] == 1
+    assert {u["user"] for u in d["everyone"]} == {"guest", "me"}
+    assert sum(x["conversions"] for x in s["days"]) == 2
+    assert me.get("/api/admin/usage?user=me").json()["summary"]["conversions"] == 0
+    joined = next(r for r in d["recent"] if r["event"] == "join" and r["user"] == "guest")
+    assert joined["detail"]["device"] == "Windows"
+    csv_text = me.get("/api/admin/usage.csv").content.decode("utf-8-sig")
+    assert "변환" in csv_text and "guest" in csv_text
+    # 파일 이름·제목은 어디에도 남지 않는다
+    raw = (tmp_path / "usage.sqlite3").read_bytes()
+    assert "비밀 제목".encode() not in raw and "비밀 제목" not in csv_text
+
+    # 오래된 기록은 보관 기간이 지나면 지운다
+    log.db.execute("UPDATE usage SET ts = ts - 400 * 86400 WHERE event = 'join'")
+    log.db.commit()
+    log.prune()
+    assert not [r for r in log.recent(500) if r["event"] == "join"]
