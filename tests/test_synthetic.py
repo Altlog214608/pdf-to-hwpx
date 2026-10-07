@@ -122,7 +122,7 @@ def test_doc_style_masterpage(tmp_path):
     pg = d.new_page(width=120, height=24)
     pg.draw_rect(pg.rect, color=(0, 0, 0), fill=(0, 0, 0))
     logo = pg.get_pixmap().tobytes("png")
-    for logo_bytes, name in ((None, "김한춘국어전문학원"), (logo, "")):
+    for logo_bytes, name in ((None, "한빛국어학원"), (logo, "")):
         st = DocStyle(body_font="나눔명조", body_size=11, title="[중간 대비] 합성 시험", academy_name=name,
                       logo=logo_bytes, frame=True)
         res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=st)

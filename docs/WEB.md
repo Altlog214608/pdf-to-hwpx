@@ -73,7 +73,7 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 | GET | `/healthz` | 상태 확인(로드밸런서용) |
 
 CLI에서도 같은 옵션을 쓸 수 있습니다:
-`python .\v0_5_pdf_to_hwpx.py 파일.pdf --font 나눔명조 --size 11 --title "[중간 대비] 2-2" --academy "김한춘 국어전문학원" --logo .\logo.png`
+`python .\v0_5_pdf_to_hwpx.py 파일.pdf --font 나눔명조 --size 11 --title "[중간 대비] 2-2" --academy "한빛 국어학원" --logo .\logo.png`
 
 ## 5. 머리 부분은 한글에서 어떻게 만들어지나
 

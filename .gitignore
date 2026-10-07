@@ -36,3 +36,6 @@ Thumbs.db
 # 배포: 초대 키/배포 설정(비밀), 자동으로 받은 도구
 deploy/
 tools/bin/
+
+# README 화면 캡처(합성 PDF로 만든 것)
+!docs/images/*.png
