@@ -231,43 +231,82 @@ class HwpxWriter:
             if st.logo:
                 self.logo = self._add_logo(st.logo)
         self.endnotes = self._plan_endnotes()
-        self.num_id = self._plan_numbering()
+        self.num_ids = self._plan_numbering()
         self.hidden_cp = (self.styles.add_char(CP["body"], 100, color="#FFFFFF", bold=False, font_id=1)
                           if self.endnotes else None)
 
+    def _questions(self) -> list[Question]:
+        return [it for it in self.doc.items if isinstance(it, Question)]
+
     def _plan_endnotes(self) -> Optional[dict[int, AnswerEntry]]:
-        """미주 번호는 한글이 1, 2, 3…으로 자동으로 매기므로 문제 번호가 연속이고 모든 문제에 정답이 있을 때만 쓴다."""
-        if not self.style.answers_as_endnotes or not self.doc.answers:
+        """정답이 있는 문제마다 미주를 단다. 한글은 미주 번호를 1씩 올리므로, 문제 번호가 건너뛰는 곳(정답 없는 문제,
+        못 찾은 번호)에서는 미주에 '새 번호로 시작'을 넣어 미주 번호를 문제 번호에 맞춘다.
+        문제와 짝이 없는 정답은 문서 끝 [정답 및 해설]에 그대로 둔다."""
+        self.leftover_answers: list[AnswerEntry] = list(self.doc.answers)
+        self.endnote_restart: set[int] = set()
+        if not self.style.answers_as_endnotes:
             return None
-        nums = [it.number for it in self.doc.items if isinstance(it, Question)]
-        ans = {a.number: a for a in self.doc.answers}
-        reason = None
-        if not nums:
-            reason = "문제를 찾지 못함"
-        elif nums != list(range(nums[0], nums[0] + len(nums))):
-            reason = "문제 번호가 연속이 아님"
-        elif len(ans) != len(self.doc.answers) or set(ans) != set(nums):
-            reason = "정답 번호와 문제 번호가 일치하지 않음"
-        if reason:
-            self.doc.warnings.append(f"정답을 미주로 넣지 못하고 문서 끝에 모았습니다({reason}).")
+        qs = self._questions()
+        if not self.doc.answers:
+            if qs:
+                self.doc.warnings.append("PDF에서 정답·해설을 찾지 못해 미주를 만들지 않았습니다.")
             self.stats["endnotes"] = 0
             return None
-        self.stats["endnotes"] = len(nums)
-        return ans
+        by_no: dict[int, AnswerEntry] = {}
+        leftover: list[AnswerEntry] = []
+        for a in self.doc.answers:  # 같은 번호 정답이 둘이면 뒤엣것은 문서 끝으로
+            if a.number in by_no:
+                leftover.append(a)
+            else:
+                by_no[a.number] = a
+        q_nums = [q.number for q in qs]
+        notes = {n: by_no[n] for n in q_nums if n in by_no}
+        leftover += [a for n, a in by_no.items() if n not in notes]
+        if not notes:
+            self.doc.warnings.append("정답 번호가 문제 번호와 하나도 맞지 않아 정답을 문서 끝에 모았습니다.")
+            self.stats["endnotes"] = 0
+            return None
+        prev = None
+        for n in q_nums:
+            if n not in notes:
+                continue
+            if prev is not None and n != prev + 1:
+                self.endnote_restart.add(n)
+            prev = n
+        no_answer = [n for n in q_nums if n not in notes]
+        if no_answer:
+            self.doc.warnings.append(f"정답을 찾지 못한 문제는 미주 없이 넣었습니다: {no_answer[:10]}")
+        if leftover:
+            self.doc.warnings.append(f"문제와 짝이 없는 정답 {len(leftover)}개는 문서 끝 [정답 및 해설]에 두었습니다.")
+        self.leftover_answers = leftover
+        self.stats["endnotes"] = len(notes)
+        self.doc.stats["endnotes_planned"] = len(notes)
+        return notes
 
-    def _plan_numbering(self) -> Optional[int]:
+    def _plan_numbering(self) -> dict[int, int]:
         """문제 번호를 한글 문단 번호로: 문제를 더 넣거나 파일을 이어 붙여도 한글이 번호를 다시 매긴다.
-        한글은 번호를 빠짐없이 1씩 올리므로 문제 번호가 연속일 때만 쓴다(아니면 글자 그대로 둔다)."""
+        한글은 같은 번호 모양 안에서 1씩 올리므로, 번호가 건너뛰는 곳(못 찾은 번호 등)부터는 그 번호로 시작하는
+        번호 모양을 새로 만든다(한글의 '새 번호 목록 시작'과 같은 방식). 돌려주는 값: id(문제) -> 번호 모양 id."""
+        out: dict[int, int] = {}
         if not self.style.auto_number:
-            return None
-        nums = [it.number for it in self.doc.items if isinstance(it, Question)]
-        if not nums:
-            return None
-        if nums != list(range(nums[0], nums[0] + len(nums))):
-            self.doc.warnings.append("문제 번호가 연속이 아니라 번호를 한글 자동 번호 대신 글자로 넣었습니다.")
-            return None
-        self.stats["auto_numbers"] = len(nums)
-        return self.styles.add_numbering(CP["bold"], nums[0])
+            return out
+        qs = self._questions()
+        prev = None
+        nid = None
+        gaps = []
+        for q in qs:
+            if nid is None or q.number != prev + 1:
+                if nid is not None:
+                    gaps.append(f"{prev}→{q.number}")
+                nid = self.styles.add_numbering(CP["bold"], q.number)
+            out[id(q)] = nid
+            prev = q.number
+        if gaps:
+            self.doc.warnings.append(f"문제 번호가 건너뛰는 곳({', '.join(gaps[:5])})은 그 번호부터 새 번호로 시작했습니다. "
+                                     "원본에서 빠진 문제가 없는지 확인해 주세요.")
+        if out:
+            self.stats["auto_numbers"] = len(out)
+        return out
 
     def _add_logo(self, data: bytes) -> Optional[Logo]:
         try:
@@ -528,7 +567,7 @@ class HwpxWriter:
         return (f'<hp:p id="2147483648" paraPrIDRef="{pp}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
                 f'{inner}</hp:p>')
 
-    def _endnote(self, a: AnswerEntry) -> str:
+    def _endnote(self, a: AnswerEntry, restart: bool = False) -> str:
         """문제 첫 줄 앞에 숨긴(1pt 흰 글자) 미주 표시를 넣고, 정답·해설은 미주 본문으로 문서 끝에 모은다.
         수작업 시험지와 같은 방식: 미주 번호 `1)`이 원래 정답 줄의 번호를 대신한다."""
         S = self.styles
@@ -544,7 +583,10 @@ class HwpxWriter:
             paras.append(self._note_p(S.derive(PP["ans_expl"], left=0, intent=_indent_hwp(p.indent_pt)),
                                       self._runs_xml(p.runs, base_bold=p.role == "heading")))
         inst = self._rng.randint(10 ** 9, 2 * 10 ** 9)
-        return (f'<hp:run charPrIDRef="{self.hidden_cp}"><hp:ctrl><hp:endNote number="{num}" suffixChar="41" instId="{inst}">'
+        # 앞 미주와 번호가 이어지지 않으면 '새 번호로 시작'(미주) 조판 부호를 먼저 넣는다
+        new_num = (f'<hp:run charPrIDRef="{self.hidden_cp}"><hp:ctrl><hp:newNum num="{num}" numType="ENDNOTE"/>'
+                   '</hp:ctrl></hp:run>') if restart else ""
+        return new_num + (f'<hp:run charPrIDRef="{self.hidden_cp}"><hp:ctrl><hp:endNote number="{num}" suffixChar="41" instId="{inst}">'
                 '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" '
                 'linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">'
                 f'{"".join(paras)}</hp:subList></hp:endNote></hp:ctrl></hp:run>')
@@ -553,13 +595,15 @@ class HwpxWriter:
         S = self.styles
         base = PP["stem_first"] if first_after_passage else PP["stem"]
         stem_runs = q.stem.runs
-        if self.num_id is not None:  # 번호는 한글이 그린다(자동 내어쓰기)
-            stem_pp = S.derive(base, intent=0, number=self.num_id)
+        if id(q) in self.num_ids:  # 번호는 한글이 그린다(자동 내어쓰기)
+            stem_pp = S.derive(base, intent=0, number=self.num_ids[id(q)])
             stem_runs = _strip_prefix(stem_runs, STEM_NUM_RE)
         else:
             digits = len(str(q.number))
             stem_pp = S.derive(base, intent=-self._hang(1400 if digits == 1 else 1950))
-        note = self._endnote(self.endnotes[q.number]) if self.endnotes else ""
+        note = ""
+        if self.endnotes and q.number in self.endnotes:
+            note = self._endnote(self.endnotes[q.number], restart=q.number in self.endnote_restart)
         out = [self._p(stem_pp, note + self._runs_xml(stem_runs, True))]
         n_blocks = len(q.blocks)
         for i, b in enumerate(q.blocks):
@@ -645,7 +689,7 @@ class HwpxWriter:
     def _answers(self) -> list[str]:
         S = self.styles
         out = [self._p(PP["ans_heading"], self._runs_xml([Run("[정답 및 해설]", bold=True)]))]
-        for a in self.doc.answers:
+        for a in self.leftover_answers:
             out.append(self._p(PP["ans_head"], self._runs_xml(a.head.runs)))
             for p in a.paras:
                 if p.kind != "text":
@@ -703,7 +747,7 @@ class HwpxWriter:
                     body.append(self._p(PP["plain"], self._runs_xml(it.runs)))
         mp = self.master_ids is not None
         sections = [self.section_xml(body, "masterpage0" if mp else None)]
-        if self.doc.answers and not self.endnotes:
+        if self.leftover_answers:
             sections.append(self.section_xml(self._answers(), "masterpage1" if mp else None))
         return sections
 

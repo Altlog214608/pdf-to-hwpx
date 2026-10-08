@@ -258,8 +258,9 @@ def validate(ex: "Extraction | list[Extraction]", doc: Document, hwpx_path: str)
         causes.append(f"정답·해설 인식 실패: 원문 정답 머리줄 {src_heads}개 중 {len(doc.answers)}개만 인식")
     checks["answer_count"] = len(doc.answers)
     checks["endnotes"] = hx.get("endnotes", 0)
-    if checks["endnotes"] and checks["endnotes"] != len(doc.answers):
-        causes.append(f"미주 수({checks['endnotes']}) != 정답 수({len(doc.answers)})")
+    planned = doc.stats.get("endnotes_planned", len(doc.answers))
+    if checks["endnotes"] and checks["endnotes"] != planned:
+        causes.append(f"미주 수({checks['endnotes']}) != 넣으려던 정답 수({planned})")
     checks["loose_items"] = doc.loose_notes[:20]  # 문제/지문 밖 내용(단원 제목 박스 등) — 경고 아님
 
     # ---- 박스 ----
