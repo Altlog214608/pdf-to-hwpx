@@ -378,6 +378,38 @@ def test_invisible_white_rect_is_not_a_box(tmp_path, white_bg):
     assert stems[1].startswith("2.<보기>는 영상 시의") and stems[4].startswith("5.<보기 1>을")
 
 
+@pytest.mark.parametrize("word_box", [(3,), (1, 5)])
+def test_word_box_in_stem_keeps_question(tmp_path, word_box):
+    """실사용(1-4 노찬성과 에반 3번): 발문 속 낱말에 친 작은 네모를 박스로 읽고, 줄 가운데 점이 그 안에 든다고
+    발문 줄 전체를 그 박스에 넣어 3번을 놓쳤다(문제 23, 정답 24). 줄이 가로로 다 들어가는 박스에만 넣는다."""
+    from pdf2hwpx.convert import convert
+
+    base = tmp_path / "base.pdf"
+    build(str(base))
+    pdf = tmp_path / "word.pdf"
+    build(str(pdf), word_box=word_box)
+    want = convert(str(base), out_dir=str(tmp_path), overwrite=True)["validation"]["checks"]
+    v = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=DocStyle(answers_as_endnotes=True))["validation"]
+    assert v["status"] == "PASS", v["root_causes"]
+    c = v["checks"]
+    assert (c["question_count"], c["answer_count"], c["box_groups"]) == (5, 5, want["box_groups"])
+
+
+def test_two_choices_per_line_with_narrow_gap(tmp_path):
+    """실사용(1-2 최척전 5번): 한 줄에 선택지 두 개, 사이가 띄어쓰기 두어 칸뿐이라 ①③⑤ 세 개로 읽혔다.
+    다음 번호이면서 그 줄의 다른 띄어쓰기보다 확연히 넓으면 나눈다."""
+    from pdf2hwpx.convert import convert
+
+    pdf = tmp_path / "narrow.pdf"
+    build(str(pdf), narrow_pairs=True)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    v = res["validation"]
+    assert v["status"] == "PASS", (v["root_causes"], v["warnings"])
+    q1 = next(x for x in res["document"]["items"] if x["type"] == "question" and x["number"] == 1)
+    assert [c[:1] for c in q1["choices"]] == list("①②③④⑤")
+    assert q1["choices"][0].rstrip() == "① ㄱ,ㄴ"
+
+
 def test_publisher_notice_is_dropped(tmp_path):
     """첫 쪽 맨 위 출판사 고지문(「콘텐츠산업 진흥법」 표시, 제작연월일, © 마크, 저작권 경고 박스)은 빼고,
     오른쪽 경고 박스가 왼쪽 지문 박스의 '다음 단으로 이어지는 부분'으로 붙어 지문 중간에 끼던 문제도 막는다."""
@@ -558,6 +590,36 @@ def test_masterpage_template_errors(tmp_path):
         extract_template(b"not a zip")
     pkg = extract_template(_template_hwpx(tmp_path))
     with pytest.raises(ValueError):
-        DocStyle.from_dict({"template": dict(pkg, inner=pkg["inner"] + "<hp:p>")})
+        DocStyle(template=dict(pkg, inner=pkg["inner"] + "<hp:p>")).validate()
     with pytest.raises(ValueError):
-        DocStyle.from_dict({"template": dict(pkg, charPr={"1": '<hh:charPr id="2"/>'})})
+        DocStyle(template=dict(pkg, charPr={"1": '<hh:charPr id="2"/>'})).validate()
+    with pytest.raises(ValueError, match="프리셋"):
+        DocStyle.from_dict({"preset": "없는프리셋"})
+    # 화면에서 바탕쪽 XML을 보내도 받지 않는다(서버에 있는 프리셋 이름만)
+    assert DocStyle.from_dict({"template": pkg}).template is None
+
+
+def test_builtin_preset_hakwon1(tmp_path):
+    """학원 1 프리셋(선생님 시험지 바탕쪽을 한 번 뽑아 둔 것): 학원 칸·글꼴 그대로, 제목 칸만 새 제목. 원래 시험지 글은 없음."""
+    import json
+    import zipfile
+    from importlib import resources
+    from pdf2hwpx.presets import list_presets, load
+
+    assert [p["id"] for p in list_presets()] == ["hakwon1"]
+    raw = resources.files("pdf2hwpx.presets").joinpath("hakwon1.json").read_text(encoding="utf-8")
+    assert "운수" not in raw and "충여" not in raw  # 원래 시험지의 제목·본문은 담지 않는다
+    pkg = load("hakwon1")
+    assert pkg["name"] == "학원 1" and json.loads(raw)["title_text"] == "시험 제목"
+    pdf = tmp_path / "s.pdf"
+    build(str(pdf))
+    out = tmp_path / "preset.hwpx"
+    res = convert(str(pdf), hwpx_path=str(out), write_json=False,
+                  style=DocStyle.from_dict({"preset": "hakwon1", "title": "[중간 대비] 새 시험", "answers_as_endnotes": True}))
+    assert res["validation"]["status"] == "PASS", res["validation"]["root_causes"]
+    assert read_hwpx(str(out))["errors"] == []
+    with zipfile.ZipFile(out) as z:
+        mp = z.read("Contents/masterpage0.xml").decode("utf-8")
+        header = z.read("Contents/header.xml").decode("utf-8")
+    assert "김한춘" in mp and "국어전문학원" in mp and "[중간 대비] 새 시험" in mp and "시험 제목" not in mp
+    assert 'face="엘리스 디지털배움체 OTF"' in header and 'face="잘풀리는오늘 Medium"' in header

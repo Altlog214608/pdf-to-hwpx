@@ -26,9 +26,13 @@ def test_sample(pdf, tmp_path):
         assert v["checks"]["question_count"] == int(m.group(1))
 
 
-@pytest.mark.skipif(not any("1-1." in p.name for p in PDFS), reason="1-1 샘플 없음")
+def _is_1_1(p: Path) -> bool:  # 2026 1-1 문제집(다른 단원의 '1-1.' 파일과 구분)
+    return "1-1." in p.name and "2026" in p.name
+
+
+@pytest.mark.skipif(not any(_is_1_1(p) for p in PDFS), reason="1-1 샘플 없음")
 def test_1_1_known_fixes(tmp_path):
-    pdf = next(p for p in PDFS if "1-1." in p.name)
+    pdf = next(p for p in PDFS if _is_1_1(p))
     res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
     doc = res["document"]
     qs = {x["number"]: x for x in doc["items"] if x["type"] == "question"}

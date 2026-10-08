@@ -18,7 +18,6 @@ EVENTS = {
     "convert": "변환",
     "merge": "통합본 만들기",
     "zip": "ZIP 묶기",
-    "template": "바탕쪽 가져오기",
     "download": "내려받기",
     "error": "오류",
 }

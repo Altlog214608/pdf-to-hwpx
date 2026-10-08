@@ -190,11 +190,13 @@ def _notice(w: "Writer") -> None:
 
 
 def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tuple[int, ...] = (),
-          notice: bool = False) -> dict:
+          notice: bool = False, word_box: tuple[int, ...] = (), narrow_pairs: bool = False) -> dict:
     """answer_style: 'bracket' = '1) [정답] ③ / [해설] …', 'plain' = '1) 정답 ③ / 오답 point / …'(최다오답·최상위 공략형)
     start: 첫 문제 번호(단원 중간부터 시작하는 문제집 일부, 예: 13번부터)
     white_bg: 발문 줄 뒤에 선 없는 흰 사각형(한글이 내보내는 문단 배경, 보이지 않음)이 깔린 문제(몇 번째, 1부터)
-    notice: 첫 쪽 맨 위에 출판사 저작권·콘텐츠 보호 고지문(© 마크 포함)"""
+    notice: 첫 쪽 맨 위에 출판사 저작권·콘텐츠 보호 고지문(© 마크 포함)
+    word_box: 발문 속 낱말 몇 개를 작은 네모로 둘러 강조한 문제(몇 번째, 1부터)
+    narrow_pairs: 한 줄 두 선택지(1번) 사이를 글자 0.9개만 띄움(그 줄 띄어쓰기의 약 1.8배)"""
     w = Writer()
     if notice:
         _notice(w)
@@ -235,6 +237,9 @@ def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tu
         if n in white_bg:  # 실사용 PDF: 발문 두 줄 뒤에 흰색으로만 칠한 사각형(글자보다 먼저 그림)
             w.page.draw_rect(fitz.Rect(w.left, w.y - 1, w.right, w.y + 10), color=None, fill=(1, 1, 1))
             w.page.draw_rect(fitz.Rect(w.left, w.y + 10, w.right, w.y + 20), color=None, fill=(1, 1, 1))
+        if n in word_box:  # 발문 가운데 낱말 3~4글자를 둘러싼 작은 네모(높이 9pt 남짓)
+            x0 = w.left + 24 + tl(stem[:4]) - 1
+            w.page.draw_rect(fitz.Rect(x0, w.y + 5, x0 + tl(stem[4:9]) + 2, w.y + 15), width=0.24)
         n = n + start - 1
         w.text(w.left, w.y + 14, f"{n}.", 13.7)
         w.text(w.left + (24 if n < 10 else 30), w.y + 13, stem)
@@ -245,10 +250,15 @@ def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tu
             w.next_col()
         if two_per_line:
             for a in range(0, len(items), 2):
+                x = w.left + 10
                 for k, idx in enumerate(range(a, min(a + 2, len(items)))):
-                    x = w.left + 10 + k * 110
+                    if k and not narrow_pairs:
+                        x = w.left + 120
+                    text = items[idx].replace(" ", "") if narrow_pairs else items[idx]
                     w.icon("①②③④⑤"[idx], x, w.y + 9)
-                    w.text(x + 13, w.y + 9, items[idx])
+                    w.text(x + 13, w.y + 9, text + " ")
+                    # 좁은 두 열(실제 PDF): 앞 선택지 끝에서 글자 0.9개 = 그 줄 띄어쓰기의 약 1.8배
+                    x += 13 + tl(text) + 0.9 * SIZE
                 w.y += 16
         else:
             for idx, s in enumerate(items):

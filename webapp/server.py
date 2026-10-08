@@ -54,7 +54,7 @@ sys.path.insert(0, str(ROOT))
 
 from pdf2hwpx import VERSION  # noqa: E402
 from pdf2hwpx.convert import convert, convert_many  # noqa: E402
-from pdf2hwpx.master_template import TemplateError, extract_template  # noqa: E402
+from pdf2hwpx.presets import list_presets  # noqa: E402
 from pdf2hwpx.preview import analyze  # noqa: E402
 from pdf2hwpx.style import FONTS, DocStyle  # noqa: E402
 from webapp.samples import SampleStore  # noqa: E402
@@ -232,6 +232,7 @@ def config(request: Request) -> dict:
             "job_ttl_min": JOB_TTL_MIN, "download_ttl_min": DOWNLOAD_TTL_MIN,
             "max_files": MAX_FILES, "max_total_pages": MAX_TOTAL_PAGES,
             "keep_failed_days": SAMPLES.keep_days if SAMPLES.enabled else 0,
+            "presets": list_presets(),
             "admin": _is_admin(_user(request))}
 
 
@@ -323,24 +324,8 @@ def _style(opts: dict, job: Job) -> DocStyle:
         logo = JOBS[opts["logo_job"]].logo
     try:
         return DocStyle.from_dict(opts or {}, logo=logo if opts.get("use_logo", True) else None)
-    except ValueError as e:  # 바탕쪽 묶음이 깨졌을 때 등
+    except ValueError as e:  # 없는 바탕쪽 프리셋 등
         raise HTTPException(400, str(e) or "설정 값이 올바르지 않습니다.")
-
-
-@app.post("/api/template")
-def upload_template(request: Request, file: UploadFile = File(...)) -> dict:
-    """내 한글 파일(HWPX)에서 바탕쪽만 뽑아 돌려준다. 서버에는 남기지 않고, 브라우저가 보관했다가 변환할 때 보낸다."""
-    data = file.file.read(int(MAX_MB * 1024 * 1024) + 1)
-    if len(data) > MAX_MB * 1024 * 1024:
-        raise HTTPException(413, f"파일이 너무 큽니다 (최대 {MAX_MB:g}MB).")
-    try:
-        pkg = extract_template(data)
-    except TemplateError as e:
-        raise HTTPException(422, str(e))
-    except Exception as e:
-        raise HTTPException(422, f"한글 파일을 읽을 수 없습니다: {type(e).__name__}")
-    USAGE.add("template", _user(request), fonts=len(pkg.get("font_names") or []))
-    return pkg
 
 
 def _finish(job: Job, path: Path) -> None:
@@ -430,7 +415,7 @@ def _causes_detail(out: dict) -> dict:
 def _style_detail(style: DocStyle) -> dict:
     """이용 기록에 남길 설정(학원 이름·제목 같은 글자는 남기지 않는다)."""
     return {"endnotes": style.answers_as_endnotes, "auto_number": style.auto_number,
-            "font": style.body_font, "size": style.body_size, **({"template": True} if style.template else {})}
+            "font": style.body_font, "size": style.body_size, **({"preset": style.preset} if style.preset else {})}
 
 
 def _members(d: dict) -> list[Job]:

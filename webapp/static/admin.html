@@ -139,7 +139,7 @@
       if (d.kind) out.push(DETAIL.kind[d.kind] || d.kind);
       if (d.endnotes != null) out.push(d.endnotes ? "정답 미주" : "정답 끝에");
       if (d.auto_number === false) out.push("번호 글자");
-      if (d.template) out.push("내 바탕쪽");
+      if (d.preset) out.push(`바탕쪽 ${d.preset}`);
       if (d.where) out.push(`${d.where}: ${d.error || ""}`);
       if (d.causes && d.causes.length) out.push(`원인: ${d.causes.join(" / ")}`);
       if (d.kept) out.push("파일 보관됨");

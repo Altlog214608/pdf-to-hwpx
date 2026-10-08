@@ -25,7 +25,8 @@ class DocStyle:
     answers_as_endnotes: bool = False  # 정답·해설을 각 문제에 연결된 미주로 넣기(문서 끝에 모임)
     frame: bool = False              # 페이지 바깥 네모 테두리
     auto_number: bool = True         # 문제 번호를 한글 문단 번호로(문제를 더 넣거나 이어 붙이면 번호가 자동으로 이어짐)
-    template: Optional[dict] = None  # 내 한글 파일에서 가져온 바탕쪽(master_template.extract_template). 있으면 학원/제목/테두리 대신
+    preset: str = ""                 # 바탕쪽 프리셋 id(pdf2hwpx/presets, 예: "hakwon1"). 있으면 학원/제목/테두리 대신 그 바탕쪽
+    template: Optional[dict] = None  # 프리셋의 바탕쪽 묶음(master_template 형식). preset 으로 채운다
     extra: dict = field(default_factory=dict)
 
     @property
@@ -49,6 +50,11 @@ class DocStyle:
         for name in ("body_font", "title_font"):
             v = str(getattr(self, name) or "").strip()[:40]
             setattr(self, name, v or DocStyle.__dataclass_fields__[name].default)
+        if self.preset and self.template is None:
+            from .presets import load
+            self.template = load(self.preset)
+            if self.template is None:
+                raise ValueError(f"바탕쪽 프리셋 '{self.preset}'이 없습니다.")
         if self.template is not None:
             from .master_template import check_template
             check_template(self.template)  # TemplateError(ValueError)
@@ -71,7 +77,7 @@ class DocStyle:
             title_color=str(d.get("title_color") or "#000000"),
             answers_as_endnotes=bool(d.get("answers_as_endnotes")),
             auto_number=bool(d.get("auto_number", True)),
-            template=d.get("template") if isinstance(d.get("template"), dict) else None,
+            preset=str(d.get("preset") or "")[:40],  # 바탕쪽 XML은 받지 않고 서버에 있는 프리셋 이름만
         )
         return s.validate()
 
@@ -82,4 +88,4 @@ class DocStyle:
                 "logo": bool(self.logo), "title": self.title,
                 "title_size": self.title_size, "frame": self.frame, "title_color": self.title_color,
                 "answers_as_endnotes": self.answers_as_endnotes, "auto_number": self.auto_number,
-                "template": bool(self.template)}
+                "preset": self.preset}

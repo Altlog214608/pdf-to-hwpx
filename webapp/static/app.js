@@ -17,7 +17,6 @@
   };
   // 목록에 없는 글꼴(내 한글 파일의 산돌 글꼴 등)은 그 이름 그대로: 그 PC에 깔려 있으면 미리보기에도 보인다
   const fontCss = (name, fallback = "inherit") => FONT_STACK[name] || (name ? `"${String(name).replace(/["\\]/g, "")}", ${fallback}` : fallback);
-  const TPL_KEY = "pdf2hwpx:template";
   const PAGE_W = 59528, VIEW_H = 52000;
   const PT_SIZES = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 22, 24];  // 머리 부분 글자 크기 선택지
   const MASTER = { left: 4251, right: 4251, bodyTop: 4251 + 4251, tableW: 54599, tableTop: (84186 - 75791) / 2, headH: 2782 };
@@ -35,8 +34,7 @@
     logoURL: null,      // 로고 미리보기 URL
     logoSize: null,
     academyMode: "text",
-    headMode: "make",   // 머리 부분: "make"(여기서 만들기) | "file"(내 한글 파일 바탕쪽)
-    template: null,     // 내 한글 파일에서 가져온 바탕쪽 묶음(/api/template). 브라우저에만 저장
+    preset: "",         // 바탕쪽 프리셋 id(서버 pdf2hwpx/presets). ""이면 여기서 학원/제목/테두리를 꾸민다
     titleColor: "#000000",
     answerMode: "end",   // "end" | "endnote"
     converted: false,
@@ -85,7 +83,7 @@
     try {
       localStorage.setItem(PREF_KEY, JSON.stringify({
         academy: $("#in-academy").value, academyMode: state.academyMode === "logo" ? "text" : state.academyMode,
-        academySub: $("#in-academy-sub").value, academySize: $("#in-academy-size").value, headMode: state.headMode,
+        academySub: $("#in-academy-sub").value, academySize: $("#in-academy-size").value, preset: state.preset,
         academySubSize: $("#in-academy-sub-size").value, titleSize: $("#in-title-size").value,
         font: $("#in-font").value, titleFont: $("#in-title-font").value, size: $("#in-size").value,
         frame: $("#in-frame").checked, titleColor: state.titleColor, answerMode: state.answerMode,
@@ -392,10 +390,11 @@
     for (const sel of [$("#in-font"), $("#in-title-font")]) {
       sel.innerHTML = fonts.map((f) => `<option value="${esc(f)}" style="font-family:${esc(fontCss(f))}">${esc(f)}</option>`).join("");
       // 내 한글 파일 바탕쪽에 쓰인 글꼴도 고를 수 있게
-      const extra = ((state.template && state.template.font_names) || []).filter((f) => !fonts.includes(f));
-      if (extra.length) sel.insertAdjacentHTML("beforeend", `<optgroup label="내 한글 파일 글꼴">${extra.map((f) => `<option value="${esc(f)}" style="font-family:${esc(fontCss(f))}">${esc(f)}</option>`).join("")}</optgroup>`);
+      // 바탕쪽 프리셋(학원 시험지)에 쓰인 글꼴(산돌 등 직접 설치한 글꼴)도 고를 수 있게
+      const extra = presetFonts().filter((f) => !fonts.includes(f));
+      if (extra.length) sel.insertAdjacentHTML("beforeend", `<optgroup label="학원 바탕쪽 글꼴">${extra.map((f) => `<option value="${esc(f)}" style="font-family:${esc(fontCss(f))}">${esc(f)}</option>`).join("")}</optgroup>`);
     }
-    const allFonts = [...fonts, ...((state.template && state.template.font_names) || [])];
+    const allFonts = [...fonts, ...presetFonts()];
     // 머리 부분 글자 크기(pt): 학원 이름 앞·뒤, 제목
     for (const [sel, def, key] of [["#in-academy-size", 14, "academySize"], ["#in-academy-sub-size", 11, "academySubSize"], ["#in-title-size", 14, "titleSize"]]) {
       const el = $(sel);
@@ -413,7 +412,8 @@
     setTitleColor(/^#[0-9a-fA-F]{6}$/.test(p.titleColor || "") ? p.titleColor : "#000000", false);
     setAnswerMode(p.answerMode === "endnote" ? "endnote" : "end", false);
     setAcademyMode(p.academyMode || "text", false);
-    setHeadMode(p.headMode === "file" ? "file" : "make", false);
+    renderPresets();
+    setPreset(presetById(p.preset) ? p.preset : "", false);
     if (typeof p.autoNum === "boolean") $("#in-autonum").checked = p.autoNum;
     $("#out-size").textContent = (+$("#in-size").value).toFixed(1).replace(/\.0$/, "");
   }
@@ -421,58 +421,38 @@
   function setAcademyMode(mode, render = true) {
     state.academyMode = mode;
     $$("[data-academy-mode]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.academyMode === mode)));
-    $$("[data-academy-pane]").forEach((p) => { p.hidden = state.headMode === "file" || p.dataset.academyPane !== mode; });
+    $$("[data-academy-pane]").forEach((p) => { p.hidden = !!state.preset || p.dataset.academyPane !== mode; });
     if (render) onSettingsChange();
   }
 
-  // 머리 부분: 여기서 만들기 / 내 한글 파일 바탕쪽 그대로
-  function setHeadMode(mode, render = true) {
-    state.headMode = mode;
-    $$("[data-head-mode]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.headMode === mode)));
-    $("#tpl-pane").hidden = mode !== "file";
-    $$(".make-only").forEach((el) => { el.hidden = mode === "file"; });
+  // 바탕쪽 프리셋: "기본"(여기서 꾸미기) 또는 학원 시험지 바탕쪽 그대로(작은 그림 카드)
+  const presets = () => (state.cfg && state.cfg.presets) || [];
+  const presetById = (id) => presets().find((x) => x.id === id) || null;
+  const presetFonts = () => [...new Set(presets().flatMap((x) => x.font_names || []))];
+  function presetCard(id, name, sub, academyHTML, titleHTML) {
+    return `<button type="button" role="radio" class="preset-card" data-preset="${esc(id)}" aria-checked="false">` +
+      `<span class="pc-pic" aria-hidden="true"><span class="pc-academy"><span>${academyHTML}</span></span><span class="pc-title">${titleHTML}</span></span>` +
+      `<span class="pc-name">${esc(name)}<small>${esc(sub)}</small></span></button>`;
+  }
+  function renderPresets() {
+    const run = (r, k) => `<span style="font-family:${esc(fontCss(r.font))};font-size:${k ? 0.8 : 1}em">${esc(r.t)}</span>`;
+    $("#presets").innerHTML = presetCard("", "기본", "학원·제목·테두리를 여기서", "학원 이름", "시험 제목") +
+      presets().map((x) => {
+        const ar = x.academy_runs || [], tr = (x.title_runs || [])[0] || {};
+        const big = Math.max(...ar.map((r) => r.size || 0), 1);
+        return presetCard(x.id, x.name, ar.map((r) => r.t).join("").trim() || "학원 바탕쪽",
+          ar.map((r) => run(r, (r.size || big) < big)).join(""), `<span style="font-family:${esc(fontCss(tr.font))}">시험 제목</span>`);
+      }).join("");
+    $$("[data-preset]").forEach((b) => b.addEventListener("click", () => setPreset(b.dataset.preset)));
+  }
+  function setPreset(id, render = true) {
+    state.preset = presetById(id) ? id : "";
+    $$("[data-preset]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.preset === state.preset)));
+    $$(".make-only").forEach((el) => { el.hidden = !!state.preset; });
+    $("#preset-note").hidden = !state.preset;
     setAcademyMode(state.academyMode, false);
-    showTemplateInfo();
     if (render) onSettingsChange();
   }
-  $$("[data-head-mode]").forEach((b) => b.addEventListener("click", () => setHeadMode(b.dataset.headMode)));
-
-  function runsText(runs) { return (runs || []).map((r) => r.t).join("").trim(); }
-  function showTemplateInfo() {
-    const t = state.template, info = $("#tpl-info");
-    $("#btn-tpl-remove").hidden = !t;
-    $("#btn-tpl").textContent = t ? "다른 한글 파일 고르기" : "한글 파일(.hwpx) 고르기";
-    if (!t) { info.textContent = "한글에서 바탕쪽을 만들어 둔 시험지 파일을 골라 주세요. 파일 안의 문제 내용은 가져오지 않아요."; return; }
-    const fonts = [...new Set([...(t.academy_runs || []), ...(t.title_runs || [])].map((r) => r.font).filter(Boolean))];
-    info.innerHTML = `${t.name ? `<b>${esc(t.name)}</b> · ` : ""}학원 칸 <b>${esc(runsText(t.academy_runs) || "없음")}</b> · ` +
-      `제목 칸 <b>${esc(t.title_text || "없음")}</b>${fonts.length ? ` · 글꼴 ${esc(fonts.join(", "))}` : ""}`;
-  }
-  function loadTemplate() {
-    try { const raw = localStorage.getItem(TPL_KEY); if (raw) state.template = JSON.parse(raw); } catch (_) { state.template = null; }
-  }
-  $("#btn-tpl").addEventListener("click", () => $("#tpl-input").click());
-  $("#tpl-input").addEventListener("change", async (e) => {
-    const f = e.target.files[0];
-    e.target.value = "";
-    if (!f) return;
-    const fd = new FormData();
-    fd.append("file", f);
-    try {
-      const t = await api("/api/template", { method: "POST", body: fd });
-      t.name = f.name.replace(/\.hwpx$/i, "");
-      state.template = t;
-      try { localStorage.setItem(TPL_KEY, JSON.stringify(t)); } catch (_) { toast("브라우저에 저장하지 못해 이번에만 쓰여요.", true); }
-      fillFonts();
-      setHeadMode("file");
-      toast("바탕쪽을 가져왔어요. 제목 칸 글자만 아래 제목으로 바뀌어요.");
-    } catch (err) { toast(err.message, true); }
-  });
-  $("#btn-tpl-remove").addEventListener("click", () => {
-    state.template = null;
-    try { localStorage.removeItem(TPL_KEY); } catch (_) { /* 저장 안 되는 환경 */ }
-    fillFonts();
-    setHeadMode("make");
-  });
   $$("[data-academy-mode]").forEach((b) => b.addEventListener("click", () => setAcademyMode(b.dataset.academyMode)));
 
   // 제목 글자 색
@@ -553,9 +533,8 @@
 
   function currentOptions() {
     const mode = state.academyMode;
-    const tpl = state.headMode === "file" ? state.template : null;
     return {
-      template: tpl || undefined,
+      preset: state.preset || undefined,
       body_font: $("#in-font").value,
       title_font: $("#in-title-font").value,
       body_size: +$("#in-size").value,
@@ -596,7 +575,7 @@
     const u = pw / PAGE_W;
     paper.style.setProperty("--pw", `${pw}px`);
     const o = currentOptions();
-    const tpl = o.template;
+    const tpl = o.preset ? presetById(o.preset) : null;
     const hasAcademy = tpl ? (tpl.academy_runs || []).length > 0 : (o.academy_name || o.academy_sub || o.use_logo);
     const hasHead = hasAcademy || !!o.title;
     const useMaster = hasHead || o.frame || !!tpl;
@@ -886,7 +865,7 @@
 
   // --------------------------------------------------------------- init --
   (async () => {
-    loadTemplate();
+    try { localStorage.removeItem("pdf2hwpx:template"); } catch (_) { /* 예전 '파일에서 가져오기' 기억 지우기 */ }
     try {
       const cfg = await api("/api/config");
       state.cfg = cfg;
