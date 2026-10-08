@@ -378,6 +378,36 @@ def test_invisible_white_rect_is_not_a_box(tmp_path, white_bg):
     assert stems[1].startswith("2.<보기>는 영상 시의") and stems[4].startswith("5.<보기 1>을")
 
 
+def test_publisher_notice_is_dropped(tmp_path):
+    """첫 쪽 맨 위 출판사 고지문(「콘텐츠산업 진흥법」 표시, 제작연월일, © 마크, 저작권 경고 박스)은 빼고,
+    오른쪽 경고 박스가 왼쪽 지문 박스의 '다음 단으로 이어지는 부분'으로 붙어 지문 중간에 끼던 문제도 막는다."""
+    from pdf2hwpx.convert import convert
+
+    plain, noted = tmp_path / "plain.pdf", tmp_path / "notice.pdf"
+    build(str(plain))
+    build(str(noted), notice=True)
+    base = convert(str(plain), out_dir=str(tmp_path), overwrite=True)["validation"]["checks"]
+    res = convert(str(noted), out_dir=str(tmp_path), overwrite=True)
+    v = res["validation"]
+    assert v["status"] == "PASS", v["root_causes"]
+    c = v["checks"]
+    assert (c["question_count"], c["box_groups"], c["pictures"]) == (base["question_count"], base["box_groups"], base["pictures"])
+    text = " ".join(p["text"] for p in read_hwpx(res["hwpx"])["paragraphs"])
+    assert "콘텐츠산업" not in text and "저작권법" not in text and "제작연월일" not in text
+    assert not c["loose_items"]
+    # 지문 속에 법 이름이 나오면 그대로 둔다: 덩어리가 본문 박스의 일부에만 걸치면 빼지 않는다
+    from pdf2hwpx.extract import _notice_items
+    from pdf2hwpx.model import Box, Glyph, Line
+
+    def line(text, y):
+        return Line(1, 0, [Glyph(ch, 60 + 9 * i, y, 69 + 9 * i, y + 10, 9) for i, ch in enumerate(text)],
+                    60, y, 60 + 9 * len(text), y + 10, 9, 9)
+    law, rest = line("저작권법에 의하여 보호되는 권리를", 100), line("정하고 있다.", 112)
+    body = line("본문 문장입니다.", 200)
+    assert _notice_items([law, rest], [], [Box(1, 1, 0, 57, 98, 283, 125, items=[law, rest])], [])
+    assert _notice_items([law, rest, body], [], [Box(1, 1, 0, 57, 98, 283, 300, items=[law, rest, body])], []) == set()
+
+
 @pytest.mark.parametrize("endnotes", [False, True])
 def test_merge_documents_renumbers(tmp_path, endnotes):
     """통합본: 파일 3개(문제 5개씩)를 이으면 1~15번, 정답도 1)~15), 미주도 15개."""
