@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -354,8 +355,14 @@ async def convert_job(job_id: str, request: Request) -> dict:
         raise HTTPException(500, f"변환 중 오류가 발생했습니다: {type(e).__name__}")
     out = _result(job, res)
     USAGE.add("convert", user, files=1, pages=job.pages, questions=out["summary"].get("questions"),
-              status=out["status"], seconds=time.time() - t0, **_style_detail(style))
+              status=out["status"], seconds=time.time() - t0, **_style_detail(style), **_causes_detail(out))
     return out
+
+
+def _causes_detail(out: dict) -> dict:
+    """이용 기록용 검사 실패 원인: 숫자만 남기고 원문 글자(누락 줄 예시)는 지운다."""
+    causes = [re.sub(r"\s*\(누락 줄 예:.*$", "", c)[:80] for c in out.get("root_causes") or []]
+    return {"causes": causes[:4]} if causes else {}
 
 
 def _style_detail(style: DocStyle) -> dict:
@@ -432,7 +439,7 @@ async def merge_jobs(request: Request) -> dict:
     out = dict(_result(bundle, res), files=len(jobs))
     USAGE.add("merge", user, files=len(jobs), pages=sum(j.pages for j in jobs),
               questions=out["summary"].get("questions"), status=out["status"], seconds=time.time() - t0,
-              **_style_detail(style))
+              **_style_detail(style), **_causes_detail(out))
     return out
 
 

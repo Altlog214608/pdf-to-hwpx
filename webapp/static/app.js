@@ -717,7 +717,7 @@
     $("#result-meta").textContent = `${(r.size / 1024).toFixed(0)}KB · ${merged ? `${r.files}개 통합 · ` : ""}${statusText(r.status)}`;
     $("#result-summary").innerHTML = summaryHTML(r.summary || {});
     $("#result-files").hidden = true;
-    showWarnings(r.warnings);
+    showWarnings([...(r.root_causes || []), ...(r.warnings || [])]);
     revealResult(r, merged ? "통합본 내려받기" : "한글 파일 내려받기");
   }
 
@@ -734,7 +734,7 @@
       return `<li><span>${esc(r.filename)}</span><small>${statusText(r.status)}</small><a href="${r.download_url}" download="${esc(r.filename)}">받기</a></li>`;
     }).join("");
     ul.hidden = false;
-    showWarnings(done.flatMap((f) => (f.result.warnings || []).map((w) => `${f.job.filename}: ${w}`)));
+    showWarnings(done.flatMap((f) => [...(f.result.root_causes || []), ...(f.result.warnings || [])].map((w) => `${f.job.filename}: ${w}`)));
     revealResult(z, "ZIP으로 한 번에 내려받기");
   }
   $("#btn-download").addEventListener("click", () => { state.downloaded = true; });

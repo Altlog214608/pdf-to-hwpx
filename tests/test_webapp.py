@@ -228,3 +228,13 @@ def test_usage_log_and_admin(env, monkeypatch, tmp_path):
     log.db.commit()
     log.prune()
     assert not [r for r in log.recent(500) if r["event"] == "join"]
+
+
+def test_usage_causes_have_no_source_text(env):
+    """검사 실패 원인은 이용 기록에 남기되, 원문 글자(누락 줄 예시)는 지운다."""
+    _, server, _ = env
+    d = server._causes_detail({"root_causes": [
+        "원문 텍스트 커버리지 91.2% (누락 줄 예: ['p3: 어느 날 마을 사람들이'])",
+        "정답 수(20) != 문제 수(21)"]})
+    assert d == {"causes": ["원문 텍스트 커버리지 91.2%", "정답 수(20) != 문제 수(21)"]}
+    assert server._causes_detail({"root_causes": []}) == {}
