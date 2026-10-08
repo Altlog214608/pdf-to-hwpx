@@ -350,3 +350,20 @@ def test_sample_store_limits(tmp_path):
     store.prune()
     assert [x["id"] for x in store.list()] == [sids[2]]
     assert store.zip("../../etc", tmp_path / "x.zip") is None and not store.delete("nope")
+
+
+def test_preset_convert(env):
+    """바탕쪽 프리셋: 화면은 /api/config 의 프리셋 목록에서 고르고, 변환에는 이름(id)만 보낸다(파일 올려 뽑기 없음)."""
+    client, server, pdf = env
+    cfg = client.get("/api/config").json()
+    hk = next(p for p in cfg["presets"] if p["id"] == "hakwon1")
+    assert hk["name"] == "학원 1" and "inner" not in hk  # 목록에는 바탕쪽 XML을 싣지 않는다
+    assert "엘리스 디지털배움체 OTF" in hk["font_names"]
+    jid = _upload(client, pdf, "a.pdf")
+    c = client.post(f"/api/jobs/{jid}/convert", json={"title": "새 제목", "preset": "hakwon1"})
+    assert c.status_code == 200 and c.json()["status"] == "PASS", c.text
+    z = zipfile.ZipFile(io.BytesIO(client.get(c.json()["download_url"]).content))
+    mp = z.read("Contents/masterpage0.xml").decode()
+    assert "새 제목" in mp and "김한춘" in mp
+    assert client.post(f"/api/jobs/{jid}/convert", json={"preset": "nope"}).status_code == 400
+    assert client.post("/api/template", files={"file": ("x.hwpx", b"x", "application/octet-stream")}).status_code in (404, 405)

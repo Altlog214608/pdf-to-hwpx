@@ -4,6 +4,8 @@
 - 단계: extract(PDF→페이지 모델) → ir(논리 구조) → hwpx_writer(순수 XML) → validate. 단계 경계를 지킬 것.
 - HWPX는 후처리 패치 없이 IR에서 한 번에 생성한다. 스타일은 `pdf2hwpx/template/header.xml`의 검증된 id를
   재사용하고 변형은 `Styles.derive()`로만 추가한다. 머리 부분(학원/제목/테두리)은 `masterpage.py`의 바탕쪽, 사용자 옵션은 `style.DocStyle`.
+  학원 시험지의 바탕쪽은 프리셋(`pdf2hwpx/presets/*.json`, `tools/make_preset.py`로 한 번 뽑음)으로 고르고 `master_template.py`가
+  id를 바꿔 끼운다. 웹에서 사용자가 올린 파일에서 바탕쪽을 뽑는 기능은 두지 않는다(프리셋에는 바탕쪽만, 시험지 본문·제목은 넣지 않음).
 - 웹: 업로드 파일은 작업 폴더에만 두고 TTL·페이지 이탈 시 삭제한다(저작권). 영구 저장 기능을 추가하지 말 것.
   유일한 예외는 `webapp/samples.py`: 변환 결과가 '문제 있음'(FAIL)이거나 오류가 난 파일만 고치기 위해 기한(기본 14일)·개수 제한을
   두고 보관하며, 관리자만 내려받고, 화면에 이 사실을 알린다. 대상을 넓히거나(정상 파일 등) 기한을 없애지 말 것. 저장소에 넣지 말 것.

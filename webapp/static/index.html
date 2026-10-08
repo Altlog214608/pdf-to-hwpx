@@ -103,7 +103,9 @@
 
             <fieldset class="group">
               <legend>머리 부분 <span class="sub">모든 페이지 맨 위에 반복돼요 (한글 ‘바탕쪽’)</span></legend>
-              <div class="seg" role="radiogroup" aria-label="학원 표시 방식">
+              <div class="presets" id="presets" role="radiogroup" aria-label="바탕쪽 모양"></div>
+              <p class="note" id="preset-note" hidden>학원 칸·테두리·글꼴은 이 바탕쪽 그대로, 제목 칸 글자만 아래 제목으로 바뀌어요.</p>
+              <div class="seg make-only" role="radiogroup" aria-label="학원 표시 방식">
                 <button type="button" role="radio" aria-checked="true" data-academy-mode="text">학원 이름 글자</button>
                 <button type="button" role="radio" aria-checked="false" data-academy-mode="logo">로고 그림</button>
                 <button type="button" role="radio" aria-checked="false" data-academy-mode="none">표시 안 함</button>
@@ -132,11 +134,11 @@
                 <span>시험 제목</span>
                 <div class="text-size">
                   <input id="in-title" type="text" maxlength="80" placeholder="예: [중간 대비] 2. 품격을 높이는 언어생활 ①" aria-label="시험 제목">
-                  <select id="in-title-size" class="pt-select" aria-label="제목 글자 크기"></select>
+                  <select id="in-title-size" class="pt-select make-only" aria-label="제목 글자 크기"></select>
                 </div>
               </div>
               <div class="chips" id="title-chips" aria-label="제목 후보"></div>
-              <div class="field">
+              <div class="field make-only">
                 <span>제목 글자 색</span>
                 <div class="swatches" id="title-colors" role="radiogroup" aria-label="제목 글자 색">
                   <button type="button" role="radio" data-color="#000000" style="--c:#000000" title="검정"></button>
@@ -147,7 +149,7 @@
                   <label class="swatch-custom" title="직접 고르기"><input id="in-title-color" type="color" value="#000000" aria-label="제목 색 직접 고르기"><span>직접</span></label>
                 </div>
               </div>
-              <label class="switch">
+              <label class="switch make-only">
                 <input id="in-frame" type="checkbox" checked>
                 <span class="track" aria-hidden="true"><i></i></span>
                 <span>페이지 바깥 네모 테두리</span>

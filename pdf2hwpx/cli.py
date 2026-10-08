@@ -40,6 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--title-size", type=float, default=14.0, help="제목 글자 크기 pt (기본: 14)")
     ap.add_argument("--logo", help="학원 로고 그림 파일(PNG/JPG). 지정하면 학원 이름 대신 사용")
     ap.add_argument("--frame", action="store_true", help="페이지 바깥 네모 테두리")
+    ap.add_argument("--preset", default="", help="바탕쪽 프리셋 id(pdf2hwpx/presets, 예: hakwon1). 학원/제목/테두리 대신 그 바탕쪽")
     ap.add_argument("--title-color", default="#000000", help="제목 글자 색, 예: #555555")
     ap.add_argument("--endnotes", action="store_true", help="정답·해설을 각 문제에 연결된 미주로 넣기")
     ap.add_argument("--no-auto-number", action="store_true", help="문제 번호를 한글 문단 번호 대신 글자로 넣기")
@@ -53,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     logo = Path(args.logo).read_bytes() if args.logo else None
     style = DocStyle(body_font=args.font, body_size=args.size, title=args.title, academy_name=args.academy,
                      academy_sub=args.academy_sub, academy_size=args.academy_size,
-                     academy_sub_size=args.academy_sub_size, title_size=args.title_size, logo=logo, frame=args.frame, title_color=args.title_color,
+                     academy_sub_size=args.academy_sub_size, title_size=args.title_size, logo=logo, preset=args.preset, frame=args.frame, title_color=args.title_color,
                      answers_as_endnotes=args.endnotes, auto_number=not args.no_auto_number).validate()
     pdfs = _expand(args.inputs)
     if not pdfs:

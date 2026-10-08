@@ -378,6 +378,38 @@ def test_invisible_white_rect_is_not_a_box(tmp_path, white_bg):
     assert stems[1].startswith("2.<보기>는 영상 시의") and stems[4].startswith("5.<보기 1>을")
 
 
+@pytest.mark.parametrize("word_box", [(3,), (1, 5)])
+def test_word_box_in_stem_keeps_question(tmp_path, word_box):
+    """실사용(1-4 노찬성과 에반 3번): 발문 속 낱말에 친 작은 네모를 박스로 읽고, 줄 가운데 점이 그 안에 든다고
+    발문 줄 전체를 그 박스에 넣어 3번을 놓쳤다(문제 23, 정답 24). 줄이 가로로 다 들어가는 박스에만 넣는다."""
+    from pdf2hwpx.convert import convert
+
+    base = tmp_path / "base.pdf"
+    build(str(base))
+    pdf = tmp_path / "word.pdf"
+    build(str(pdf), word_box=word_box)
+    want = convert(str(base), out_dir=str(tmp_path), overwrite=True)["validation"]["checks"]
+    v = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=DocStyle(answers_as_endnotes=True))["validation"]
+    assert v["status"] == "PASS", v["root_causes"]
+    c = v["checks"]
+    assert (c["question_count"], c["answer_count"], c["box_groups"]) == (5, 5, want["box_groups"])
+
+
+def test_two_choices_per_line_with_narrow_gap(tmp_path):
+    """실사용(1-2 최척전 5번): 한 줄에 선택지 두 개, 사이가 띄어쓰기 두어 칸뿐이라 ①③⑤ 세 개로 읽혔다.
+    다음 번호이면서 그 줄의 다른 띄어쓰기보다 확연히 넓으면 나눈다."""
+    from pdf2hwpx.convert import convert
+
+    pdf = tmp_path / "narrow.pdf"
+    build(str(pdf), narrow_pairs=True)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    v = res["validation"]
+    assert v["status"] == "PASS", (v["root_causes"], v["warnings"])
+    q1 = next(x for x in res["document"]["items"] if x["type"] == "question" and x["number"] == 1)
+    assert [c[:1] for c in q1["choices"]] == list("①②③④⑤")
+    assert q1["choices"][0].rstrip() == "① ㄱ,ㄴ"
+
+
 def test_publisher_notice_is_dropped(tmp_path):
     """첫 쪽 맨 위 출판사 고지문(「콘텐츠산업 진흥법」 표시, 제작연월일, © 마크, 저작권 경고 박스)은 빼고,
     오른쪽 경고 박스가 왼쪽 지문 박스의 '다음 단으로 이어지는 부분'으로 붙어 지문 중간에 끼던 문제도 막는다."""
@@ -484,3 +516,132 @@ def test_partial_workbook_starting_at_13(tmp_path):
     assert r["validation"]["status"] == "PASS", r["validation"]
     stems = [int(m.group(1)) for p in read_hwpx(str(out))["paragraphs"] if (m := re.match(r"(\d+)\.(?!\s)", p["text"]))]
     assert stems == list(range(1, 11))
+
+
+def _template_hwpx(tmp_path, logo: bool = False) -> bytes:
+    """테스트용 '내 시험지' 파일: 이 변환기로 바탕쪽(학원 칸·제목 칸·테두리)을 만든 HWPX. 제목 글꼴은 직접 설치한 글꼴 이름."""
+    import pymupdf as fitz
+    from pdf2hwpx.style import DocStyle
+
+    pdf = tmp_path / "tpl_src.pdf"
+    build(str(pdf))
+    png = None
+    if logo:
+        d = fitz.open()
+        pg = d.new_page(width=120, height=24)
+        pg.draw_rect(pg.rect, color=(0.2, 0.2, 0.6), fill=(0.2, 0.2, 0.6))
+        png = pg.get_pixmap().tobytes("png")
+    st = DocStyle(academy_name="김한춘", academy_sub="국어전문학원", academy_size=15, academy_sub_size=12,
+                  title="[충여_추가] 옛 제목", title_font="잘풀리는오늘 Medium", frame=True, logo=png)
+    out = tmp_path / ("tpl_logo.hwpx" if logo else "tpl.hwpx")
+    convert(str(pdf), hwpx_path=str(out), write_json=False, style=st)
+    return out.read_bytes()
+
+
+@pytest.mark.parametrize("logo", [False, True])
+def test_masterpage_template_from_my_hwpx(tmp_path, logo):
+    """내 한글 파일의 바탕쪽을 그대로: 학원 칸·테두리·글꼴(목록에 없는 글꼴 이름 포함)·로고는 그대로, 제목 칸 글자만 새 제목."""
+    import zipfile
+    from pdf2hwpx.master_template import extract_template
+
+    pkg = extract_template(_template_hwpx(tmp_path, logo))
+    assert pkg["title_text"] == "[충여_추가] 옛 제목"
+    assert pkg["title_runs"][0]["font"] == "잘풀리는오늘 Medium" and pkg["title_runs"][0]["size"] == 14
+    if not logo:
+        assert [r["t"] for r in pkg["academy_runs"]] == ["김한춘 ", "국어전문학원"]
+    assert len(pkg["images"]) == (1 if logo else 0)
+
+    pdf = tmp_path / "new.pdf"
+    build(str(pdf))
+    out = tmp_path / "new.hwpx"
+    res = convert(str(pdf), hwpx_path=str(out), write_json=False,
+                  style=DocStyle(title="[충여_추가] 새 제목", template=pkg, answers_as_endnotes=True))
+    assert res["validation"]["status"] == "PASS", res["validation"]["root_causes"]
+    assert read_hwpx(str(out))["errors"] == []  # 가져온 글자·문단 모양·테두리 id가 모두 header.xml에 있다
+    with zipfile.ZipFile(out) as z:
+        mp = z.read("Contents/masterpage0.xml").decode("utf-8")
+        header = z.read("Contents/header.xml").decode("utf-8")
+        hpf = z.read("Contents/content.hpf").decode("utf-8")
+        names = z.namelist()
+    assert "[충여_추가] 새 제목" in mp and "옛 제목" not in mp
+    assert ("김한춘" in mp) != logo and 'textWrap="BEHIND_TEXT"' in mp
+    hangul = re.search(r'<hh:fontface lang="HANGUL" fontCnt="(\d+)">(.*?)</hh:fontface>', header, re.S)
+    faces = dict(re.findall(r'<hh:font id="(\d+)" face="([^"]+)"', hangul.group(2)))
+    assert int(hangul.group(1)) == len(faces) and "잘풀리는오늘 Medium" in faces.values()
+    fid = next(k for k, v in faces.items() if v == "잘풀리는오늘 Medium")
+    title_cp = re.search(r'<hp:run charPrIDRef="(\d+)"><hp:t>\[충여_추가\] 새 제목', mp).group(1)
+    assert re.search(rf'<hh:charPr id="{title_cp}" height="1400"[^>]*>.*?<hh:fontRef hangul="{fid}"', header, re.S)
+    if logo:
+        item = re.search(r'binaryItemIDRef="([^"]+)"', mp).group(1)
+        assert f'id="{item}" href="BinData/{item}.png"' in hpf and f"BinData/{item}.png" in names
+
+
+def test_masterpage_template_errors(tmp_path):
+    """바탕쪽이 없는 파일·한글 파일이 아닌 것·깨진 묶음은 알기 쉬운 오류로."""
+    from pdf2hwpx.master_template import TemplateError, extract_template
+
+    pdf = tmp_path / "plain.pdf"
+    build(str(pdf))
+    plain = tmp_path / "plain.hwpx"
+    convert(str(pdf), hwpx_path=str(plain), write_json=False)  # 머리 부분 없음 = 바탕쪽 없음
+    with pytest.raises(TemplateError, match="바탕쪽이 없습니다"):
+        extract_template(plain.read_bytes())
+    with pytest.raises(TemplateError, match="HWPX"):
+        extract_template(b"not a zip")
+    pkg = extract_template(_template_hwpx(tmp_path))
+    with pytest.raises(ValueError):
+        DocStyle(template=dict(pkg, inner=pkg["inner"] + "<hp:p>")).validate()
+    with pytest.raises(ValueError):
+        DocStyle(template=dict(pkg, charPr={"1": '<hh:charPr id="2"/>'})).validate()
+    with pytest.raises(ValueError, match="프리셋"):
+        DocStyle.from_dict({"preset": "없는프리셋"})
+    # 화면에서 바탕쪽 XML을 보내도 받지 않는다(서버에 있는 프리셋 이름만)
+    assert DocStyle.from_dict({"template": pkg}).template is None
+
+
+def test_builtin_preset_hakwon1(tmp_path):
+    """학원 1 프리셋(선생님 시험지 바탕쪽을 한 번 뽑아 둔 것): 학원 칸·글꼴 그대로, 제목 칸만 새 제목. 원래 시험지 글은 없음."""
+    import json
+    import zipfile
+    from importlib import resources
+    from pdf2hwpx.presets import list_presets, load
+
+    assert [p["id"] for p in list_presets()] == ["hakwon1"]
+    raw = resources.files("pdf2hwpx.presets").joinpath("hakwon1.json").read_text(encoding="utf-8")
+    assert "운수" not in raw and "충여" not in raw  # 원래 시험지의 제목·본문은 담지 않는다
+    pkg = load("hakwon1")
+    assert pkg["name"] == "학원 1" and json.loads(raw)["title_text"] == "시험 제목"
+    pdf = tmp_path / "s.pdf"
+    build(str(pdf))
+    out = tmp_path / "preset.hwpx"
+    res = convert(str(pdf), hwpx_path=str(out), write_json=False,
+                  style=DocStyle.from_dict({"preset": "hakwon1", "title": "[중간 대비] 새 시험", "answers_as_endnotes": True}))
+    assert res["validation"]["status"] == "PASS", res["validation"]["root_causes"]
+    assert read_hwpx(str(out))["errors"] == []
+    with zipfile.ZipFile(out) as z:
+        mp = z.read("Contents/masterpage0.xml").decode("utf-8")
+        header = z.read("Contents/header.xml").decode("utf-8")
+    assert "김한춘" in mp and "국어전문학원" in mp and "[중간 대비] 새 시험" in mp and "시험 제목" not in mp
+    assert 'face="엘리스 디지털배움체 OTF"' in header and 'face="잘풀리는오늘 Medium"' in header
+
+
+def test_answer_numbers_over_100_not_doubled(tmp_path):
+    """실사용(10개 통합본 221문제): 100번부터 미주가 "196)  196) [정답] ①"처럼 번호가 두 번 찍혔다(정답 줄의 번호 글자를
+    두 자리까지만 지움). 98~102번 문제집으로 확인하고, 해설이 있는 정답 줄은 '다음 문단과 함께'(해설이 다음 단으로
+    넘어가면 정답 번호도 같이)."""
+    import zipfile
+
+    pdf = tmp_path / "s98.pdf"
+    build(str(pdf), start=98)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=DocStyle(answers_as_endnotes=True))
+    v = res["validation"]
+    assert v["status"] == "PASS", v["root_causes"]
+    assert v["checks"]["question_count"] == v["checks"]["answer_count"] == v["checks"]["endnotes"] == 5
+    notes = [p["text"] for p in read_hwpx(res["hwpx"])["paragraphs"] if p.get("note") and re.match(r"\d+\)", p["text"])]
+    assert [n.split(")")[0] for n in notes] == ["98", "99", "100", "101", "102"]
+    assert not any(re.match(r"^\d+\)\s*\d{1,3}\s*\)", n) for n in notes), notes
+    with zipfile.ZipFile(res["hwpx"]) as z:
+        header = z.read("Contents/header.xml").decode("utf-8")
+        sec0 = z.read("Contents/section0.xml").decode("utf-8")
+    head_pp = re.search(r'<hp:endNote [^>]*>.*?<hp:p [^>]*paraPrIDRef="(\d+)"', sec0, re.S).group(1)
+    assert re.search(rf'<hh:paraPr id="{head_pp}"[^>]*>.*?keepWithNext="1"', header, re.S)

@@ -17,7 +17,8 @@ from importlib import resources
 from typing import Optional
 from xml.sax.saxutils import escape
 
-from .masterpage import MARGINS_WITH_MASTER, PAPER_W, Logo, MasterIds, build_masterpage
+from .master_template import apply_template
+from .masterpage import MARGINS_WITH_MASTER, NS as MASTER_NS, PAPER_W, Logo, MasterIds, build_masterpage
 from .model import BLANK_BOX, AnswerEntry, AuxBlock, Document, ImageEl, Para, Passage, Question, Run, TableEl
 from .style import DocStyle
 
@@ -39,7 +40,7 @@ PP = {
 CP = {"body": 0, "body_ul": 8, "guide": 7, "bold": 9, "bold_ul": 10}
 
 
-ANSWER_NUM_RE = re.compile(r"^\s*\d{1,2}\s*\)\s*")
+ANSWER_NUM_RE = re.compile(r"^\s*\d{1,3}\s*\)\s*")  # 정답 줄 앞 `196)` (미주 번호가 대신하므로 지움, 통합본은 세 자리)
 STEM_NUM_RE = re.compile(r"^\s*\d{1,3}\s*\.\s*")  # 발문 앞 `12.` (한글 문단 번호로 바꿀 때 지움)
 MISSING_ANSWER = "[정답] (원문에서 찾지 못함 — 직접 입력해 주세요)"  # 자동 번호일 때 정답 없는 문제의 미주
 
@@ -78,6 +79,8 @@ class Styles:
         self.new_bfs: list[str] = []
         self.num_ids = [int(x) for x in re.findall(r'<hh:numbering id="(\d+)"', header_xml)]
         self.new_nums: list[str] = []
+        self.tab_ids = [int(x) for x in re.findall(r'<hh:tabPr id="(\d+)"', header_xml)] or [0]
+        self.new_tabs: list[str] = []
 
     # ---- 글꼴/글자 크기 (템플릿: 글꼴 0 = 제목용 돋움, 1 = 본문용 바탕) ----
     def set_fonts(self, body_font: str, title_font: str) -> None:
@@ -88,6 +91,49 @@ class Styles:
                 return m.group(0)
             return re.sub(r'face="[^"]*"', f'face="{escape(face, {chr(34): "&quot;"})}"', m.group(0), count=1)
         self.header = re.sub(r'<hh:font id="(\d+)" face="[^"]*"', repl, self.header)
+
+    def add_font(self, lang_tag: str, font_xml: str) -> int:
+        """다른 한글 파일의 글꼴(hh:font)을 lang_tag(HANGUL 등) 글꼴 목록에 더한다. 같은 이름이 이미 있으면 그 id."""
+        face = re.search(r'face="([^"]*)"', font_xml)
+        m = re.search(rf'(<hh:fontface lang="{lang_tag}" fontCnt=")(\d+)(">)(.*?)(</hh:fontface>)', self.header, re.S)
+        if not face or not m:
+            return 0
+        same = re.search(rf'<hh:font id="(\d+)" face="{re.escape(face.group(1))}"', m.group(4))
+        if same:
+            return int(same.group(1))
+        fid = int(m.group(2))
+        new = re.sub(r'<hh:font id="\d+"', f'<hh:font id="{fid}"', font_xml, count=1)
+        self.header = (self.header[:m.start()] + m.group(1) + str(fid + 1) + m.group(3) + m.group(4) + new + m.group(5)
+                       + self.header[m.end():])
+        return fid
+
+    def add_raw(self, kind: str, xml: str) -> int:
+        """다른 한글 파일의 모양 정의(charPr, paraPr, borderFill, tabPr)를 새 id로 더한다(바탕쪽 가져오기)."""
+        if kind == "charPr":
+            nid = max(self.char_xml) + 1
+        elif kind == "paraPr":
+            nid = self.next_para
+            self.next_para += 1
+        elif kind == "borderFill":
+            nid = max(self.bf_ids) + 1
+            self.bf_ids.append(nid)
+        elif kind == "tabPr":
+            nid = max(self.tab_ids) + 1
+            self.tab_ids.append(nid)
+        else:
+            raise ValueError(kind)
+        x = re.sub(rf'<hh:{kind} id="\d+"', f'<hh:{kind} id="{nid}"', xml, count=1)
+        if kind == "charPr":
+            self.char_xml[nid] = x
+            self.new_chars.append(x)
+        elif kind == "paraPr":
+            self.para_xml[nid] = x
+            self.new_paras.append(x)
+        elif kind == "borderFill":
+            self.new_bfs.append(x)
+        else:
+            self.new_tabs.append(x)
+        return nid
 
     def set_char_height(self, char_ids: list[int], height: int) -> None:
         for cid in char_ids:
@@ -184,6 +230,9 @@ class Styles:
             h = h.replace("</hh:charProperties>", "".join(self.new_chars) + "</hh:charProperties>")
         if self.new_bfs:
             h = h.replace("</hh:borderFills>", "".join(self.new_bfs) + "</hh:borderFills>")
+        if self.new_tabs:
+            h = h.replace("</hh:tabProperties>", "".join(self.new_tabs) + "</hh:tabProperties>")
+            h = re.sub(r'<hh:tabProperties itemCnt="\d+"', f'<hh:tabProperties itemCnt="{len(self.tab_ids)}"', h)
         if self.new_nums:
             h = h.replace("</hh:numberings>", "".join(self.new_nums) + "</hh:numberings>")
             h = re.sub(r'<hh:numberings itemCnt="\d+"', f'<hh:numberings itemCnt="{len(self.num_ids)}"', h)
@@ -216,13 +265,23 @@ class HwpxWriter:
         self.styles.set_char_height([CP["body"], CP["body_ul"], CP["guide"], CP["bold"], CP["bold_ul"]],
                                     int(round(st.body_size * 100)))
         self.margins = dict(MARGINS_WITH_MASTER if st.uses_masterpage else DEFAULT_MARGINS)
+        if st.template:  # 내 한글 파일의 쪽 여백(바탕쪽 표가 그 여백에 맞춰 그려져 있다)
+            tm = {k: int(v) for k, v in (st.template.get("margins") or {}).items() if k in self.margins}
+            if all(0 <= v <= 15000 for v in tm.values()) and tm.get("left", 0) + tm.get("right", 0) < PAPER_W // 2:
+                self.margins.update(tm)
         col_w = (PAPER_W - self.margins["left"] - self.margins["right"] - COL_GAP) // 2
         self.col_w = col_w
         self.img_max_in_box = col_w - 3000
         self.img_max_free = col_w - 600
         self.master_ids: Optional[MasterIds] = None
         self.logo: Optional[Logo] = None
-        if st.uses_masterpage:
+        self.master_tpl: Optional[tuple[str, str]] = None  # 가져온 바탕쪽 (masterPage 속성, 안쪽 XML)
+        if st.template:
+            seq = iter(range(len(self.images) + 1, 10 ** 6))
+            attrs, inner, imgs = apply_template(st.template, self.styles, st.title, lambda: f"image{next(seq)}")
+            self.images.extend(imgs)
+            self.master_tpl = (attrs, inner)
+        elif st.uses_masterpage:
             S = self.styles
             self.master_ids = MasterIds(
                 frame_bf=S.add_border_fill(), black_bf=S.add_border_fill(fill="#000000"),
@@ -586,7 +645,9 @@ class HwpxWriter:
                 '<hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/>'
                 '</hp:autoNum></hp:ctrl><hp:t> </hp:t></hp:run>')
         head_runs = _strip_prefix(a.head.runs, ANSWER_NUM_RE)
-        paras = [self._note_p(PP["ans_head"], auto + (self._runs_xml(head_runs) if head_runs else ""))]
+        # 해설이 다음 단/쪽으로 넘어가면 정답 줄(번호)도 같이 넘어가게: '다음 문단과 함께'
+        head_pp = self.styles.derive(PP["ans_head"], keep_next=1) if any(p.kind == "text" for p in a.paras) else PP["ans_head"]
+        paras = [self._note_p(head_pp, auto + (self._runs_xml(head_runs) if head_runs else ""))]
         for p in a.paras:
             if p.kind != "text":
                 continue
@@ -700,7 +761,8 @@ class HwpxWriter:
         S = self.styles
         out = [self._p(PP["ans_heading"], self._runs_xml([Run("[정답 및 해설]", bold=True)]))]
         for a in self.leftover_answers:
-            out.append(self._p(PP["ans_head"], self._runs_xml(a.head.runs)))
+            head_pp = S.derive(PP["ans_head"], keep_next=1) if any(p.kind == "text" for p in a.paras) else PP["ans_head"]
+            out.append(self._p(head_pp, self._runs_xml(a.head.runs)))
             for p in a.paras:
                 if p.kind != "text":
                     continue
@@ -755,13 +817,17 @@ class HwpxWriter:
                     body.append(self._p(PP["plain"], self._bracket(it, self.col_w - 200, 0, {})))
                 elif it.kind == "text":
                     body.append(self._p(PP["plain"], self._runs_xml(it.runs)))
-        mp = self.master_ids is not None
+        mp = self.master_ids is not None or self.master_tpl is not None
         sections = [self.section_xml(body, "masterpage0" if mp else None)]
         if self.leftover_answers:
             sections.append(self.section_xml(self._answers(), "masterpage1" if mp else None))
         return sections
 
     def masterpages(self, n_sections: int) -> list[tuple[str, str]]:
+        if self.master_tpl is not None:
+            attrs, inner = self.master_tpl
+            return [(f"masterpage{i}", '<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>'
+                     f'<masterPage {MASTER_NS} id="masterpage{i}" {attrs}>{inner}</masterPage>') for i in range(n_sections)]
         if self.master_ids is None:
             return []
         return [(f"masterpage{i}", build_masterpage(f"masterpage{i}", self.style, self.master_ids, self.margins, self.logo))

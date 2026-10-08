@@ -54,6 +54,7 @@ sys.path.insert(0, str(ROOT))
 
 from pdf2hwpx import VERSION  # noqa: E402
 from pdf2hwpx.convert import convert, convert_many  # noqa: E402
+from pdf2hwpx.presets import list_presets  # noqa: E402
 from pdf2hwpx.preview import analyze  # noqa: E402
 from pdf2hwpx.style import FONTS, DocStyle  # noqa: E402
 from webapp.samples import SampleStore  # noqa: E402
@@ -231,6 +232,7 @@ def config(request: Request) -> dict:
             "job_ttl_min": JOB_TTL_MIN, "download_ttl_min": DOWNLOAD_TTL_MIN,
             "max_files": MAX_FILES, "max_total_pages": MAX_TOTAL_PAGES,
             "keep_failed_days": SAMPLES.keep_days if SAMPLES.enabled else 0,
+            "presets": list_presets(),
             "admin": _is_admin(_user(request))}
 
 
@@ -320,7 +322,10 @@ def _style(opts: dict, job: Job) -> DocStyle:
     logo = job.logo
     if logo is None and opts.get("logo_job") in JOBS:  # 여러 파일: 로고는 첫 파일에만 올린다
         logo = JOBS[opts["logo_job"]].logo
-    return DocStyle.from_dict(opts or {}, logo=logo if opts.get("use_logo", True) else None)
+    try:
+        return DocStyle.from_dict(opts or {}, logo=logo if opts.get("use_logo", True) else None)
+    except ValueError as e:  # 없는 바탕쪽 프리셋 등
+        raise HTTPException(400, str(e) or "설정 값이 올바르지 않습니다.")
 
 
 def _finish(job: Job, path: Path) -> None:
@@ -410,7 +415,7 @@ def _causes_detail(out: dict) -> dict:
 def _style_detail(style: DocStyle) -> dict:
     """이용 기록에 남길 설정(학원 이름·제목 같은 글자는 남기지 않는다)."""
     return {"endnotes": style.answers_as_endnotes, "auto_number": style.auto_number,
-            "font": style.body_font, "size": style.body_size}
+            "font": style.body_font, "size": style.body_size, **({"preset": style.preset} if style.preset else {})}
 
 
 def _members(d: dict) -> list[Job]:

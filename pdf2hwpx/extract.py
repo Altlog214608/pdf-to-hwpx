@@ -775,10 +775,21 @@ def extract(pdf_path: str) -> Extraction:
                     gs[i].underline = True
 
         # ---- 박스 소속 + 내부 도형 수 ----
+        def _box_of_line(ln: Line) -> Optional[Box]:
+            """줄이 가로로 다 들어가는 가장 작은 박스. 가운데 점만 보면 발문 속 낱말 하나를 둘러싼 작은 네모
+            (강조 표시)에 발문 줄 전체가 들어가 버린다."""
+            cy = (ln.y0 + ln.y1) / 2
+            best = None
+            for b in boxes:
+                if b.x0 - 4 <= ln.x0 and ln.x1 <= b.x1 + 4 and b.y0 - 2 <= cy <= b.y1 + 2:
+                    if best is None or (b.x1 - b.x0) * (b.y1 - b.y0) < (best.x1 - best.x0) * (best.y1 - best.y0):
+                        best = b
+            return best
+
         for ln in lines:
             if ln.cell is not None:
                 continue
-            b = _box_of((ln.x0 + ln.x1) / 2, (ln.y0 + ln.y1) / 2)
+            b = _box_of_line(ln)
             if b:
                 ln.box = b.id
                 b.items.append(ln)
@@ -796,6 +807,11 @@ def extract(pdf_path: str) -> Extraction:
             if b and im.x0 >= b.x0 - 3 and im.x1 <= b.x1 + 3:
                 im.box = b.id
                 b.items.append(im)
+        # 낱말 몇 개만 둘러싼 낮은 네모(강조 표시)는 줄을 담지 못해 비어 있다: 박스가 아니다
+        word_boxes = [b for b in boxes if not b.items and b.y1 - b.y0 < 18]
+        if word_boxes:
+            stats["inline_word_boxes"] += len(word_boxes)
+            boxes = [b for b in boxes if b not in word_boxes]
         # 박스 밖의 작은 그림(‘빈출’ 배지 등 편집 장식)은 내용이 아니다
         small = [im for im in content_imgs if im.box is None and im.height < 26 and im.width < 120]
         if small:
