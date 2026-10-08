@@ -238,3 +238,114 @@ def test_usage_causes_have_no_source_text(env):
         "정답 수(20) != 문제 수(21)"]})
     assert d == {"causes": ["원문 텍스트 커버리지 91.2%", "정답 수(20) != 문제 수(21)"]}
     assert server._causes_detail({"root_causes": []}) == {}
+
+
+def test_failed_files_kept_for_admin(env, monkeypatch, tmp_path):
+    """'문제 있음'·오류 파일만 보관(같은 파일은 횟수만), 관리자가 내려받기·삭제. 정상 파일은 남기지 않는다."""
+    client, server, pdf = env
+    from webapp.samples import SampleStore
+    from webapp.usage import UsageLog
+    store = SampleStore(tmp_path / "samples", keep_days=14, max_count=30)
+    monkeypatch.setattr(server, "SAMPLES", store)
+    monkeypatch.setattr(server, "USAGE", UsageLog(tmp_path / "usage.sqlite3"))
+    assert client.get("/api/config").json()["keep_failed_days"] == 14
+    real_convert, real_many = server.convert, server.convert_many
+
+    def failing(fn):
+        def run(*a, **k):
+            res = fn(*a, **k)
+            res["validation"]["status"] = "FAIL"
+            res["validation"]["root_causes"] = ["정답·해설 인식 실패: 원문 정답 머리줄 8개 중 0개만 인식"]
+            return res
+        return run
+
+    # 정상(PASS) 변환은 보관하지 않는다
+    ok = client.post(f"/api/jobs/{_upload(client, pdf, '정상.pdf')}/convert", json={}).json()
+    assert ok["status"] == "PASS" and ok["kept"] is False and store.list() == []
+
+    monkeypatch.setattr(server, "convert", failing(real_convert))
+    jid = _upload(client, pdf, "실패.pdf")
+    r = client.post(f"/api/jobs/{jid}/convert", json={"answers_as_endnotes": True}).json()
+    assert r["status"] == "FAIL" and r["kept"] is True and r["kept_days"] == 14
+    client.post(f"/api/jobs/{jid}/convert", json={})          # 같은 파일이 또 실패하면 횟수만
+    items = store.list()
+    assert len(items) == 1 and items[0]["count"] == 2 and items[0]["files"][0]["name"] == "실패.pdf"
+    assert items[0]["kind"] == "convert" and items[0]["causes"][0].startswith("정답·해설 인식 실패")
+
+    # 변환 중 오류: 원본과 오류 위치(traceback)를 보관하고 화면에 알린다
+    def boom(*a, **k):
+        raise RuntimeError("터짐")
+    monkeypatch.setattr(server, "convert", boom)
+    other = pdf + b"\n% other file\n"  # 다른 파일(같은 파일이면 한 줄로 합쳐진다)
+    e = client.post(f"/api/jobs/{_upload(client, other, '오류.pdf')}/convert", json={})
+    assert e.status_code == 500 and "보관" in e.json()["detail"]
+    err = next(k for k in store.list() if k["status"] == "error")
+    assert "RuntimeError: 터짐" in err["error"] and not err["has_result"]
+
+    # 통합본 실패: 원본 여러 개를 한 묶음으로
+    monkeypatch.setattr(server, "convert_many", failing(real_many))
+    ids = [_upload(client, pdf, f"합치기{k}.pdf") for k in range(2)]
+    m = client.post("/api/bundles/merge", json={"jobs": ids}).json()
+    assert m["kept"] is True
+    merged = next(k for k in store.list() if k["kind"] == "merge")
+    assert [f["name"] for f in merged["files"]] == ["합치기0.pdf", "합치기1.pdf"]
+
+    # 관리자 화면: 목록·내려받기(원래 이름 PDF + 결과 + info.json)·삭제
+    lst = client.get("/api/admin/samples").json()
+    assert lst["enabled"] and len(lst["items"]) == 3
+    sid = next(k["id"] for k in lst["items"] if k["kind"] == "convert" and k["status"] == "FAIL")
+    d = client.get(f"/api/admin/samples/{sid}/download")
+    assert d.status_code == 200 and d.headers["content-type"] == "application/zip"
+    z = zipfile.ZipFile(io.BytesIO(d.content))
+    assert sorted(z.namelist()) == ["info.json", "result.hwpx", "실패.pdf"]
+    assert z.read("실패.pdf") == pdf
+    mz = zipfile.ZipFile(io.BytesIO(client.get(f"/api/admin/samples/{merged['id']}/download").content))
+    assert {"01_합치기0.pdf", "02_합치기1.pdf"} <= set(mz.namelist())
+    assert client.get("/api/admin/samples/..%2F..%2Fetc/download").status_code == 404
+    assert client.delete(f"/api/admin/samples/{sid}").json()["ok"] is True
+    assert client.get(f"/api/admin/samples/{sid}/download").status_code == 404
+    assert len(store.list()) == 2
+
+    # 이용 기록에는 보관 표시만(파일 이름 없음)
+    conv = [x for x in server.USAGE.recent(50) if x["event"] == "convert" and x["status"] == "FAIL"]
+    assert conv and conv[0]["detail"]["kept"]
+    assert "실패.pdf".encode() not in (tmp_path / "usage.sqlite3").read_bytes()
+
+    # 관리자가 아니면 볼 수 없다
+    monkeypatch.setattr(server, "ACCESS_KEYS", server._parse_keys("me:key-for-me-123,guest:key-for-guest-456"))
+    monkeypatch.setattr(server, "ADMIN_USERS", {"me"})
+    from fastapi.testclient import TestClient
+    guest = TestClient(server.app)
+    guest.get("/join/key-for-guest-456", follow_redirects=False)
+    assert guest.get("/api/admin/samples").status_code == 403
+    assert guest.get(f"/api/admin/samples/{merged['id']}/download").status_code == 403
+    assert guest.delete(f"/api/admin/samples/{merged['id']}").status_code == 403
+
+
+def test_sample_store_limits(tmp_path):
+    """보관 기간·개수를 넘으면 오래된 것부터 지우고, 0일이면 아예 보관하지 않는다."""
+    from webapp.samples import SampleStore
+    pdfs = []
+    for k in range(4):
+        p = tmp_path / f"{k}.pdf"
+        p.write_bytes(b"%PDF-1.4 sample " + bytes([k]))
+        pdfs.append(p)
+    off = SampleStore(tmp_path / "off", keep_days=0)
+    assert not off.enabled and off.save("u", "convert", [(pdfs[0], "a.pdf")], "FAIL") is None
+    assert not (tmp_path / "off").exists()
+
+    store = SampleStore(tmp_path / "s", keep_days=14, max_count=2)
+    sids = []
+    for k, p in enumerate(pdfs[:3]):
+        sids.append(store.save("u", "convert", [(p, f"{k}.pdf")], "FAIL"))
+        time.sleep(0.01)
+    assert all(sids) and [x["id"] for x in store.list()] == [sids[2], sids[1]]  # 개수 넘으면 오래된 것부터
+    # 기간이 지난 것
+    import json
+    d = tmp_path / "s" / sids[1]
+    info = json.loads((d / "info.json").read_text(encoding="utf-8"))
+    info["ts"] -= 15 * 86400
+    (d / "info.json").write_text(json.dumps(info), encoding="utf-8")
+    store.prune()
+    assert [x["id"] for x in store.list()] == [sids[2]]
+    assert store.zip("../../etc", tmp_path / "x.zip") is None and not store.delete("nope")

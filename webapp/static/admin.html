@@ -49,6 +49,12 @@
     .tag.good { color: var(--ok); }
     .muted { color: var(--muted); }
     .live { font-size: 12.5px; color: var(--muted); }
+    .kept-name { max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+    .kept-cause { white-space: normal !important; min-width: 200px; color: var(--muted); font-size: 12.5px; }
+    .kept-act { display: flex; gap: 6px; }
+    .kept-act a, .kept-act button { font: inherit; font-size: 12.5px; font-weight: 600; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--text); text-decoration: none; cursor: pointer; }
+    .kept-act a:hover { border-color: var(--accent); color: var(--accent); }
+    .kept-act button:hover { border-color: var(--danger); color: var(--danger); }
     @media (max-width: 900px) { .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } .grid2 { grid-template-columns: 1fr; } }
     @media (max-width: 480px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .tile b { font-size: 22px; } }
   </style>
@@ -81,6 +87,11 @@
     </div>
 
     <section class="tiles" id="tiles" aria-label="요약"></section>
+
+    <article class="card" id="kept-card" hidden>
+      <header class="card-head"><h2>문제 생긴 파일</h2><span class="hint" id="kept-hint"></span></header>
+      <div class="card-body table-wrap"><table id="kept"></table></div>
+    </article>
 
     <div class="grid2">
       <article class="card">
@@ -130,6 +141,7 @@
       if (d.auto_number === false) out.push("번호 글자");
       if (d.where) out.push(`${d.where}: ${d.error || ""}`);
       if (d.causes && d.causes.length) out.push(`원인: ${d.causes.join(" / ")}`);
+      if (d.kept) out.push("파일 보관됨");
       return out.join(" · ");
     }
 
@@ -186,6 +198,33 @@
         }).join("") + "</tbody>";
     }
 
+    // 문제 생긴 파일: 결과가 '문제 있음'이거나 오류가 난 파일만 서버가 보관(정해진 날짜 뒤 자동 삭제)
+    async function loadKept() {
+      const res = await fetch("/api/admin/samples");
+      if (!res.ok) return;
+      const d = await res.json();
+      $("#kept-card").hidden = !d.enabled;
+      if (!d.enabled) return;
+      $("#kept-hint").textContent = `'문제 있음'·오류 파일만 자동 보관 · ${d.keep_days}일 뒤 삭제 · 최대 ${d.max_count}개`;
+      if (!d.items.length) { $("#kept").innerHTML = `<tr><td class="empty">문제 생긴 파일이 없어요.</td></tr>`; return; }
+      $("#kept").innerHTML = `<thead><tr><th>마지막 시각</th><th>사람</th><th>동작</th><th>파일</th><th class="num">쪽</th><th>결과</th><th>원인</th><th class="num">횟수</th><th>삭제까지</th><th></th></tr></thead><tbody>` +
+        d.items.map((k) => {
+          const names = k.files.map((f) => f.name);
+          const name = names.length > 1 ? `${names[0]} 외 ${names.length - 1}개` : names[0];
+          const cause = k.status === "error" ? (k.error.trim().split("\n").pop() || "오류") : k.causes.join(" / ");
+          const st = k.status === "FAIL" ? `<span class="tag bad">문제 있음</span>` : `<span class="tag bad">오류</span>`;
+          const left = Math.max(0, Math.ceil((k.expires_at - Date.now() / 1000) / 86400));
+          return `<tr><td class="muted">${fmtTime(k.ts)}</td><td>${esc(k.user)}</td><td>${esc(k.kind_label)}</td><td class="kept-name" title="${esc(names.join("\n"))}">${esc(name)}</td><td class="num">${num(k.pages)}</td><td>${st}</td><td class="kept-cause">${esc(cause)}</td><td class="num">${num(k.count)}</td><td class="muted">${left}일</td>` +
+            `<td><div class="kept-act"><a href="/api/admin/samples/${encodeURIComponent(k.id)}/download" download>내려받기</a><button type="button" data-del="${esc(k.id)}">삭제</button></div></td></tr>`;
+        }).join("") + "</tbody>";
+    }
+    $("#kept").addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-del]");
+      if (!b || !confirm("이 파일을 지울까요? 되돌릴 수 없어요.")) return;
+      await fetch(`/api/admin/samples/${encodeURIComponent(b.dataset.del)}`, { method: "DELETE" });
+      loadKept();
+    });
+
     async function load() {
       const res = await fetch(`/api/admin/usage?days=${days}&limit=${limit}&user=${encodeURIComponent(who)}`);
       if (!res.ok) {
@@ -230,6 +269,7 @@
     });
     $("#chart").addEventListener("mouseleave", () => tip.classList.remove("show"));
     load();
+    loadKept();
   })();
   </script>
 </body>

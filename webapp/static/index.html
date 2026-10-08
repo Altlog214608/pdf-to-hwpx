@@ -30,9 +30,9 @@
       <li data-step="3"><span>3</span>다운로드</li>
     </ol>
     <a class="admin-link" id="admin-link" href="/admin" hidden>이용 기록</a>
-    <div class="privacy" title="업로드한 파일은 변환에만 쓰이고 자동으로 삭제됩니다">
+    <div class="privacy" id="privacy" title="업로드한 파일은 변환에만 쓰이고 자동으로 삭제됩니다">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6l7-3z"/></svg>
-      <span>파일은 저장되지 않고 자동 삭제됩니다</span>
+      <span id="privacy-text">파일은 저장되지 않고 자동 삭제됩니다</span>
     </div>
     <button class="theme-btn" id="btn-theme" type="button" aria-label="어두운 화면으로 바꾸기" title="화면 밝기 바꾸기">
       <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>
@@ -58,7 +58,7 @@
       <ul class="features" aria-label="특징">
         <li><b>구조 보존</b>지문 박스, &lt;보기&gt;, 시의 연 구분, 밑줄까지</li>
         <li><b>바로 편집</b>박스 안에서 Enter를 눌러도 테두리가 늘어나요</li>
-        <li><b>안전한 처리</b>변환이 끝나면 일정 시간 뒤 서버에서 삭제</li>
+        <li><b>안전한 처리</b><span id="feat-safe">변환이 끝나면 일정 시간 뒤 서버에서 삭제</span></li>
       </ul>
       <div id="upload-progress" class="upload-progress" hidden>
         <div class="up-file"><span class="up-name"></span><span class="up-state">업로드 중…</span></div>

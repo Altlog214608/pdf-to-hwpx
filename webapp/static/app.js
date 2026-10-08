@@ -687,12 +687,14 @@
   const statusText = (s) => (s === "PASS" ? "구조 검사 통과" : s === "WARN" ? "확인이 필요한 부분이 있어요" : "일부 문제가 있어요");
 
   // 자동 번호·미주를 일부만 적용했거나 원문과 다른 점이 있으면 이유를 결과 칸에 보여 준다
-  function showWarnings(list) {
+  // kept: 문제 생긴 파일을 고치려고 서버에 보관했으면 그 안내(맨 위)
+  function showWarnings(list, kept) {
     const ul = $("#result-warn");
     const items = (list || []).filter(Boolean).slice(0, 6);
-    ul.innerHTML = items.map((w) => `<li>${esc(w)}</li>`).join("");
-    ul.hidden = !items.length;
+    ul.innerHTML = (kept ? `<li class="is-kept">${esc(kept)}</li>` : "") + items.map((w) => `<li>${esc(w)}</li>`).join("");
+    ul.hidden = !items.length && !kept;
   }
+  const keptText = (days, n) => `${n > 1 ? `문제가 있는 파일 ${n}개는` : "이 파일은"} 고칠 수 있게 관리자에게 보관했어요(${days}일 뒤 삭제).`;
 
   function revealResult(r, label) {
     state.converted = true;
@@ -717,7 +719,7 @@
     $("#result-meta").textContent = `${(r.size / 1024).toFixed(0)}KB · ${merged ? `${r.files}개 통합 · ` : ""}${statusText(r.status)}`;
     $("#result-summary").innerHTML = summaryHTML(r.summary || {});
     $("#result-files").hidden = true;
-    showWarnings([...(r.root_causes || []), ...(r.warnings || [])]);
+    showWarnings([...(r.root_causes || []), ...(r.warnings || [])], r.kept ? keptText(r.kept_days, 1) : "");
     revealResult(r, merged ? "통합본 내려받기" : "한글 파일 내려받기");
   }
 
@@ -734,7 +736,9 @@
       return `<li><span>${esc(r.filename)}</span><small>${statusText(r.status)}</small><a href="${r.download_url}" download="${esc(r.filename)}">받기</a></li>`;
     }).join("");
     ul.hidden = false;
-    showWarnings(done.flatMap((f) => [...(f.result.root_causes || []), ...(f.result.warnings || [])].map((w) => `${f.job.filename}: ${w}`)));
+    const kept = done.filter((f) => f.result.kept);
+    showWarnings(done.flatMap((f) => [...(f.result.root_causes || []), ...(f.result.warnings || [])].map((w) => `${f.job.filename}: ${w}`)),
+      kept.length ? keptText(kept[0].result.kept_days, kept.length) : "");
     revealResult(z, "ZIP으로 한 번에 내려받기");
   }
   $("#btn-download").addEventListener("click", () => { state.downloaded = true; });
@@ -788,6 +792,12 @@
       state.cfg = cfg;
       $$("[data-cfg]").forEach((el) => { el.textContent = cfg[el.dataset.cfg]; });
       if (cfg.admin) $("#admin-link").hidden = false;
+      if (cfg.keep_failed_days > 0) {  // 문제 생긴 파일만 고치려고 보관하는 예외를 숨기지 않고 알린다
+        const d = cfg.keep_failed_days;
+        $("#privacy-text").textContent = `파일은 자동 삭제 · 변환 실패 파일만 ${d}일 보관`;
+        $("#privacy").title = `업로드한 파일은 변환에만 쓰이고 자동으로 삭제됩니다. 변환 결과가 '문제 있음'이거나 오류가 난 파일만 고치기 위해 관리자가 ${d}일 동안 보관한 뒤 삭제합니다.`;
+        $("#feat-safe").textContent = `변환이 끝나면 일정 시간 뒤 서버에서 삭제(실패한 파일만 고치려고 ${d}일 보관)`;
+      }
     } catch (_) { /* 기본값 사용 */ }
     fillFonts();
   })();
