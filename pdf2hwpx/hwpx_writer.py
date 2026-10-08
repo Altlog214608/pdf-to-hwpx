@@ -40,7 +40,7 @@ PP = {
 CP = {"body": 0, "body_ul": 8, "guide": 7, "bold": 9, "bold_ul": 10}
 
 
-ANSWER_NUM_RE = re.compile(r"^\s*\d{1,2}\s*\)\s*")
+ANSWER_NUM_RE = re.compile(r"^\s*\d{1,3}\s*\)\s*")  # 정답 줄 앞 `196)` (미주 번호가 대신하므로 지움, 통합본은 세 자리)
 STEM_NUM_RE = re.compile(r"^\s*\d{1,3}\s*\.\s*")  # 발문 앞 `12.` (한글 문단 번호로 바꿀 때 지움)
 MISSING_ANSWER = "[정답] (원문에서 찾지 못함 — 직접 입력해 주세요)"  # 자동 번호일 때 정답 없는 문제의 미주
 
@@ -645,7 +645,9 @@ class HwpxWriter:
                 '<hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/>'
                 '</hp:autoNum></hp:ctrl><hp:t> </hp:t></hp:run>')
         head_runs = _strip_prefix(a.head.runs, ANSWER_NUM_RE)
-        paras = [self._note_p(PP["ans_head"], auto + (self._runs_xml(head_runs) if head_runs else ""))]
+        # 해설이 다음 단/쪽으로 넘어가면 정답 줄(번호)도 같이 넘어가게: '다음 문단과 함께'
+        head_pp = self.styles.derive(PP["ans_head"], keep_next=1) if any(p.kind == "text" for p in a.paras) else PP["ans_head"]
+        paras = [self._note_p(head_pp, auto + (self._runs_xml(head_runs) if head_runs else ""))]
         for p in a.paras:
             if p.kind != "text":
                 continue
@@ -759,7 +761,8 @@ class HwpxWriter:
         S = self.styles
         out = [self._p(PP["ans_heading"], self._runs_xml([Run("[정답 및 해설]", bold=True)]))]
         for a in self.leftover_answers:
-            out.append(self._p(PP["ans_head"], self._runs_xml(a.head.runs)))
+            head_pp = S.derive(PP["ans_head"], keep_next=1) if any(p.kind == "text" for p in a.paras) else PP["ans_head"]
+            out.append(self._p(head_pp, self._runs_xml(a.head.runs)))
             for p in a.paras:
                 if p.kind != "text":
                     continue

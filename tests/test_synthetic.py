@@ -623,3 +623,25 @@ def test_builtin_preset_hakwon1(tmp_path):
         header = z.read("Contents/header.xml").decode("utf-8")
     assert "김한춘" in mp and "국어전문학원" in mp and "[중간 대비] 새 시험" in mp and "시험 제목" not in mp
     assert 'face="엘리스 디지털배움체 OTF"' in header and 'face="잘풀리는오늘 Medium"' in header
+
+
+def test_answer_numbers_over_100_not_doubled(tmp_path):
+    """실사용(10개 통합본 221문제): 100번부터 미주가 "196)  196) [정답] ①"처럼 번호가 두 번 찍혔다(정답 줄의 번호 글자를
+    두 자리까지만 지움). 98~102번 문제집으로 확인하고, 해설이 있는 정답 줄은 '다음 문단과 함께'(해설이 다음 단으로
+    넘어가면 정답 번호도 같이)."""
+    import zipfile
+
+    pdf = tmp_path / "s98.pdf"
+    build(str(pdf), start=98)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=DocStyle(answers_as_endnotes=True))
+    v = res["validation"]
+    assert v["status"] == "PASS", v["root_causes"]
+    assert v["checks"]["question_count"] == v["checks"]["answer_count"] == v["checks"]["endnotes"] == 5
+    notes = [p["text"] for p in read_hwpx(res["hwpx"])["paragraphs"] if p.get("note") and re.match(r"\d+\)", p["text"])]
+    assert [n.split(")")[0] for n in notes] == ["98", "99", "100", "101", "102"]
+    assert not any(re.match(r"^\d+\)\s*\d{1,3}\s*\)", n) for n in notes), notes
+    with zipfile.ZipFile(res["hwpx"]) as z:
+        header = z.read("Contents/header.xml").decode("utf-8")
+        sec0 = z.read("Contents/section0.xml").decode("utf-8")
+    head_pp = re.search(r'<hp:endNote [^>]*>.*?<hp:p [^>]*paraPrIDRef="(\d+)"', sec0, re.S).group(1)
+    assert re.search(rf'<hh:paraPr id="{head_pp}"[^>]*>.*?keepWithNext="1"', header, re.S)

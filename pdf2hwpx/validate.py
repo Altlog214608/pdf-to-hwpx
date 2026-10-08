@@ -265,6 +265,10 @@ def validate(ex: "Extraction | list[Extraction]", doc: Document, hwpx_path: str)
     if src_heads and len(doc.answers) < src_heads:
         causes.append(f"정답·해설 인식 실패: 원문 정답 머리줄 {src_heads}개 중 {len(doc.answers)}개만 인식")
     checks["answer_count"] = len(doc.answers)
+    # 미주 번호(한글이 그림) 뒤에 정답 줄의 번호 글자가 남으면 "196) 196) [정답]"처럼 번호가 두 번 보인다
+    doubled = [p["text"][:12] for p in paras if p.get("note") and re.match(r"^\d+\)\s*\d{1,3}\s*\)", p["text"])]
+    if doubled:
+        causes.append(f"미주 번호가 두 번 찍힘 {len(doubled)}개 (예: {doubled[0]})")
     checks["endnotes"] = hx.get("endnotes", 0)
     planned = doc.stats.get("endnotes_planned", len(doc.answers))
     if checks["endnotes"] and checks["endnotes"] != planned:

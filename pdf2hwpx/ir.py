@@ -20,7 +20,7 @@ from .model import (CIRCLED_DIGITS, AnswerEntry, AuxBlock, Box, Choice, ChoiceGr
                     Para, Passage, Question, Run, TableEl)
 
 GUIDE_RE = re.compile(r"^\s*(※|\[\s*\d+\s*[~∼～\-–]\s*\d+\s*\])")
-ANSWER_HEAD_RE = re.compile(r"^\s*(\d{1,2})\s*\)\s*\[?\s*정답\s*\]?")  # "1) [정답] ④" / "1) 정답 ④"
+ANSWER_HEAD_RE = re.compile(r"^\s*(\d{1,3})\s*\)\s*\[?\s*정답\s*\]?")  # "1) [정답] ④" / "1) 정답 ④"
 EXPL_RE = re.compile(r"^\s*\[\s*해설\s*\]")
 LABEL_RE = re.compile(r"^\s*(\([가-힣A-Za-z]\)|\[[A-Z가-힣]\]|<[가-힣]\>)\s*$")
 # 줄 머리에 오면 새 문단을 시작하는 표지 (원문자/목록/화자/섹션 라벨 등)

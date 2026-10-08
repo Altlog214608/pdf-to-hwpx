@@ -242,7 +242,7 @@ def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tu
             w.page.draw_rect(fitz.Rect(x0, w.y + 5, x0 + tl(stem[4:9]) + 2, w.y + 15), width=0.24)
         n = n + start - 1
         w.text(w.left, w.y + 14, f"{n}.", 13.7)
-        w.text(w.left + (24 if n < 10 else 30), w.y + 13, stem)
+        w.text(w.left + (24 if n < 10 else 30 if n < 100 else tl(f"{n}.", 13.7) + 6), w.y + 13, stem)  # 세 자리는 더 넓게
         w.y += 24
 
     def choices(items: list[str], two_per_line: bool = False, credits: list[str] | None = None):
