@@ -484,3 +484,80 @@ def test_partial_workbook_starting_at_13(tmp_path):
     assert r["validation"]["status"] == "PASS", r["validation"]
     stems = [int(m.group(1)) for p in read_hwpx(str(out))["paragraphs"] if (m := re.match(r"(\d+)\.(?!\s)", p["text"]))]
     assert stems == list(range(1, 11))
+
+
+def _template_hwpx(tmp_path, logo: bool = False) -> bytes:
+    """테스트용 '내 시험지' 파일: 이 변환기로 바탕쪽(학원 칸·제목 칸·테두리)을 만든 HWPX. 제목 글꼴은 직접 설치한 글꼴 이름."""
+    import pymupdf as fitz
+    from pdf2hwpx.style import DocStyle
+
+    pdf = tmp_path / "tpl_src.pdf"
+    build(str(pdf))
+    png = None
+    if logo:
+        d = fitz.open()
+        pg = d.new_page(width=120, height=24)
+        pg.draw_rect(pg.rect, color=(0.2, 0.2, 0.6), fill=(0.2, 0.2, 0.6))
+        png = pg.get_pixmap().tobytes("png")
+    st = DocStyle(academy_name="김한춘", academy_sub="국어전문학원", academy_size=15, academy_sub_size=12,
+                  title="[충여_추가] 옛 제목", title_font="잘풀리는오늘 Medium", frame=True, logo=png)
+    out = tmp_path / ("tpl_logo.hwpx" if logo else "tpl.hwpx")
+    convert(str(pdf), hwpx_path=str(out), write_json=False, style=st)
+    return out.read_bytes()
+
+
+@pytest.mark.parametrize("logo", [False, True])
+def test_masterpage_template_from_my_hwpx(tmp_path, logo):
+    """내 한글 파일의 바탕쪽을 그대로: 학원 칸·테두리·글꼴(목록에 없는 글꼴 이름 포함)·로고는 그대로, 제목 칸 글자만 새 제목."""
+    import zipfile
+    from pdf2hwpx.master_template import extract_template
+
+    pkg = extract_template(_template_hwpx(tmp_path, logo))
+    assert pkg["title_text"] == "[충여_추가] 옛 제목"
+    assert pkg["title_runs"][0]["font"] == "잘풀리는오늘 Medium" and pkg["title_runs"][0]["size"] == 14
+    if not logo:
+        assert [r["t"] for r in pkg["academy_runs"]] == ["김한춘 ", "국어전문학원"]
+    assert len(pkg["images"]) == (1 if logo else 0)
+
+    pdf = tmp_path / "new.pdf"
+    build(str(pdf))
+    out = tmp_path / "new.hwpx"
+    res = convert(str(pdf), hwpx_path=str(out), write_json=False,
+                  style=DocStyle(title="[충여_추가] 새 제목", template=pkg, answers_as_endnotes=True))
+    assert res["validation"]["status"] == "PASS", res["validation"]["root_causes"]
+    assert read_hwpx(str(out))["errors"] == []  # 가져온 글자·문단 모양·테두리 id가 모두 header.xml에 있다
+    with zipfile.ZipFile(out) as z:
+        mp = z.read("Contents/masterpage0.xml").decode("utf-8")
+        header = z.read("Contents/header.xml").decode("utf-8")
+        hpf = z.read("Contents/content.hpf").decode("utf-8")
+        names = z.namelist()
+    assert "[충여_추가] 새 제목" in mp and "옛 제목" not in mp
+    assert ("김한춘" in mp) != logo and 'textWrap="BEHIND_TEXT"' in mp
+    hangul = re.search(r'<hh:fontface lang="HANGUL" fontCnt="(\d+)">(.*?)</hh:fontface>', header, re.S)
+    faces = dict(re.findall(r'<hh:font id="(\d+)" face="([^"]+)"', hangul.group(2)))
+    assert int(hangul.group(1)) == len(faces) and "잘풀리는오늘 Medium" in faces.values()
+    fid = next(k for k, v in faces.items() if v == "잘풀리는오늘 Medium")
+    title_cp = re.search(r'<hp:run charPrIDRef="(\d+)"><hp:t>\[충여_추가\] 새 제목', mp).group(1)
+    assert re.search(rf'<hh:charPr id="{title_cp}" height="1400"[^>]*>.*?<hh:fontRef hangul="{fid}"', header, re.S)
+    if logo:
+        item = re.search(r'binaryItemIDRef="([^"]+)"', mp).group(1)
+        assert f'id="{item}" href="BinData/{item}.png"' in hpf and f"BinData/{item}.png" in names
+
+
+def test_masterpage_template_errors(tmp_path):
+    """바탕쪽이 없는 파일·한글 파일이 아닌 것·깨진 묶음은 알기 쉬운 오류로."""
+    from pdf2hwpx.master_template import TemplateError, extract_template
+
+    pdf = tmp_path / "plain.pdf"
+    build(str(pdf))
+    plain = tmp_path / "plain.hwpx"
+    convert(str(pdf), hwpx_path=str(plain), write_json=False)  # 머리 부분 없음 = 바탕쪽 없음
+    with pytest.raises(TemplateError, match="바탕쪽이 없습니다"):
+        extract_template(plain.read_bytes())
+    with pytest.raises(TemplateError, match="HWPX"):
+        extract_template(b"not a zip")
+    pkg = extract_template(_template_hwpx(tmp_path))
+    with pytest.raises(ValueError):
+        DocStyle.from_dict({"template": dict(pkg, inner=pkg["inner"] + "<hp:p>")})
+    with pytest.raises(ValueError):
+        DocStyle.from_dict({"template": dict(pkg, charPr={"1": '<hh:charPr id="2"/>'})})

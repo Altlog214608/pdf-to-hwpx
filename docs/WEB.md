@@ -50,6 +50,10 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
    - 제목 후보는 PDF 머리글에서 찾아 칩으로 보여 줌(`[중간 대비]` 같은 앞머리는 유지).
    - 본문 글꼴 7종, 크기 8~13pt(0.5 단위). 마지막 설정은 브라우저에 기억.
    - 학원 이름은 앞부분(예: 김한춘)과 작은 글씨 뒷부분(예: 국어전문학원)의 글자 크기를 따로, 제목 글자 크기도 따로 정함.
+   - 머리 부분 **내 한글 파일 바탕쪽**: 한글에서 바탕쪽을 만들어 둔 시험지(.hwpx)를 고르면 그 바탕쪽(학원 칸·제목 칸·테두리·
+     산돌 등 직접 설치한 글꼴·로고)을 그대로 쓰고, 제목 칸(바탕쪽에서 가장 긴 글자) 글자만 입력한 제목으로 바꿈.
+     파일 안의 문제 내용은 가져오지 않음. 뽑은 바탕쪽은 브라우저에만 기억(서버에 남기지 않음)하고 변환할 때 함께 보냄.
+     그 파일에 쓰인 글꼴은 본문 글꼴 목록에도 나옴.
    - 제목 글자 색(견본 5색 + 직접 고르기), 정답·해설 방식(문서 끝에 모으기 / 문제와 미주로 연결).
    - 문제 번호를 한글 자동 번호(문단 번호)로 넣기(기본 켬): 한글에서 문제를 더 쓰거나 다른 파일을 붙여 넣으면 번호가 이어짐.
    - 오른쪽 위 버튼으로 밝은/어두운 화면 전환.
@@ -87,6 +91,7 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 - 그렇지 않아도 `JOB_TTL_MIN`이 지나면 30초 간격 청소 스레드가 삭제. 다운로드 링크는 추측 불가능한
   토큰을 포함하고 `DOWNLOAD_TTL_MIN` 뒤 410(만료)을 돌려줍니다.
 - 서버 로그와 이용 기록에 파일 내용·파일 이름은 남기지 않습니다.
+- 바탕쪽을 가져올 한글 파일은 읽어서 바탕쪽만 돌려주고 바로 버립니다(브라우저가 그 바탕쪽만 기억).
 
 ## 5. API
 
@@ -94,6 +99,7 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 |---|---|---|
 | GET | `/api/config` | 글꼴 목록, 제한, 보관 시간 |
 | POST | `/api/jobs` (multipart `file`) | 업로드 + 분석: `text_layer`, `title_candidates`, `sample`, `stats` |
+| POST | `/api/template` (multipart `file`, .hwpx) | 바탕쪽 묶음(바탕쪽 XML + 쓰는 글자·문단 모양·테두리·탭·글꼴·그림, 쪽 여백, 제목 칸 글자). 서버에 남기지 않음. convert/merge 옵션 `template`으로 다시 보냄 |
 | GET | `/api/jobs/{id}/page1.png` | 원본 1쪽 그림 |
 | POST/DELETE | `/api/jobs/{id}/logo` | 로고 그림(PNG/JPG, 2MB) |
 | POST | `/api/jobs/{id}/convert` (JSON) | `body_font, title_font, body_size, academy_name, academy_sub, academy_size, academy_sub_size, use_logo, title, title_size, title_color, frame, answers_as_endnotes, auto_number, logo_job`(다른 작업의 로고 빌려 쓰기) |

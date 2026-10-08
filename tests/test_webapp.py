@@ -350,3 +350,24 @@ def test_sample_store_limits(tmp_path):
     store.prune()
     assert [x["id"] for x in store.list()] == [sids[2]]
     assert store.zip("../../etc", tmp_path / "x.zip") is None and not store.delete("nope")
+
+
+def test_template_upload_and_convert(env, tmp_path):
+    """내 한글 파일 바탕쪽: /api/template 은 바탕쪽만 뽑아 돌려주고(서버에 남기지 않음), 변환 때 그 묶음을 보낸다."""
+    client, server, pdf = env
+    from tests.test_synthetic import _template_hwpx
+    tpl = _template_hwpx(tmp_path)
+    r = client.post("/api/template", files={"file": ("내 시험지.hwpx", tpl, "application/octet-stream")})
+    assert r.status_code == 200, r.text
+    pkg = r.json()
+    assert pkg["title_text"] == "[충여_추가] 옛 제목" and "잘풀리는오늘 Medium" in pkg["font_names"]
+    assert client.post("/api/template", files={"file": ("x.hwpx", b"nope", "application/octet-stream")}).status_code == 422
+
+    jid = _upload(client, pdf, "a.pdf")
+    c = client.post(f"/api/jobs/{jid}/convert", json={"title": "새 제목", "template": pkg})
+    assert c.status_code == 200 and c.json()["status"] == "PASS", c.text
+    z = zipfile.ZipFile(io.BytesIO(client.get(c.json()["download_url"]).content))
+    mp = z.read("Contents/masterpage0.xml").decode()
+    assert "새 제목" in mp and "옛 제목" not in mp and "김한춘" in mp
+    bad = dict(pkg, inner="<hp:p>")
+    assert client.post(f"/api/jobs/{jid}/convert", json={"template": bad}).status_code == 400

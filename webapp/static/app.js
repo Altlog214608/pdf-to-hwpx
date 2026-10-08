@@ -15,6 +15,9 @@
     "나눔명조": '"Nanum Myeongjo","나눔명조",serif',
     "나눔고딕": '"Nanum Gothic","나눔고딕",sans-serif',
   };
+  // 목록에 없는 글꼴(내 한글 파일의 산돌 글꼴 등)은 그 이름 그대로: 그 PC에 깔려 있으면 미리보기에도 보인다
+  const fontCss = (name, fallback = "inherit") => FONT_STACK[name] || (name ? `"${String(name).replace(/["\\]/g, "")}", ${fallback}` : fallback);
+  const TPL_KEY = "pdf2hwpx:template";
   const PAGE_W = 59528, VIEW_H = 52000;
   const PT_SIZES = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 22, 24];  // 머리 부분 글자 크기 선택지
   const MASTER = { left: 4251, right: 4251, bodyTop: 4251 + 4251, tableW: 54599, tableTop: (84186 - 75791) / 2, headH: 2782 };
@@ -32,6 +35,8 @@
     logoURL: null,      // 로고 미리보기 URL
     logoSize: null,
     academyMode: "text",
+    headMode: "make",   // 머리 부분: "make"(여기서 만들기) | "file"(내 한글 파일 바탕쪽)
+    template: null,     // 내 한글 파일에서 가져온 바탕쪽 묶음(/api/template). 브라우저에만 저장
     titleColor: "#000000",
     answerMode: "end",   // "end" | "endnote"
     converted: false,
@@ -80,7 +85,7 @@
     try {
       localStorage.setItem(PREF_KEY, JSON.stringify({
         academy: $("#in-academy").value, academyMode: state.academyMode === "logo" ? "text" : state.academyMode,
-        academySub: $("#in-academy-sub").value, academySize: $("#in-academy-size").value,
+        academySub: $("#in-academy-sub").value, academySize: $("#in-academy-size").value, headMode: state.headMode,
         academySubSize: $("#in-academy-sub-size").value, titleSize: $("#in-title-size").value,
         font: $("#in-font").value, titleFont: $("#in-title-font").value, size: $("#in-size").value,
         frame: $("#in-frame").checked, titleColor: state.titleColor, answerMode: state.answerMode,
@@ -385,8 +390,12 @@
   function fillFonts() {
     const fonts = state.cfg.fonts;
     for (const sel of [$("#in-font"), $("#in-title-font")]) {
-      sel.innerHTML = fonts.map((f) => `<option value="${esc(f)}" style="font-family:${esc(FONT_STACK[f] || "inherit")}">${esc(f)}</option>`).join("");
+      sel.innerHTML = fonts.map((f) => `<option value="${esc(f)}" style="font-family:${esc(fontCss(f))}">${esc(f)}</option>`).join("");
+      // 내 한글 파일 바탕쪽에 쓰인 글꼴도 고를 수 있게
+      const extra = ((state.template && state.template.font_names) || []).filter((f) => !fonts.includes(f));
+      if (extra.length) sel.insertAdjacentHTML("beforeend", `<optgroup label="내 한글 파일 글꼴">${extra.map((f) => `<option value="${esc(f)}" style="font-family:${esc(fontCss(f))}">${esc(f)}</option>`).join("")}</optgroup>`);
     }
+    const allFonts = [...fonts, ...((state.template && state.template.font_names) || [])];
     // 머리 부분 글자 크기(pt): 학원 이름 앞·뒤, 제목
     for (const [sel, def, key] of [["#in-academy-size", 14, "academySize"], ["#in-academy-sub-size", 11, "academySubSize"], ["#in-title-size", 14, "titleSize"]]) {
       const el = $(sel);
@@ -395,8 +404,8 @@
       el.value = PT_SIZES.includes(saved) ? saved : def;
     }
     const p = loadPrefs();
-    $("#in-font").value = fonts.includes(p.font) ? p.font : "함초롬바탕";
-    $("#in-title-font").value = fonts.includes(p.titleFont) ? p.titleFont : "함초롬돋움";
+    $("#in-font").value = allFonts.includes(p.font) ? p.font : "함초롬바탕";
+    $("#in-title-font").value = allFonts.includes(p.titleFont) ? p.titleFont : "함초롬돋움";
     if (p.size) $("#in-size").value = p.size;
     if (typeof p.frame === "boolean") $("#in-frame").checked = p.frame;
     if (p.academy) $("#in-academy").value = p.academy;
@@ -404,6 +413,7 @@
     setTitleColor(/^#[0-9a-fA-F]{6}$/.test(p.titleColor || "") ? p.titleColor : "#000000", false);
     setAnswerMode(p.answerMode === "endnote" ? "endnote" : "end", false);
     setAcademyMode(p.academyMode || "text", false);
+    setHeadMode(p.headMode === "file" ? "file" : "make", false);
     if (typeof p.autoNum === "boolean") $("#in-autonum").checked = p.autoNum;
     $("#out-size").textContent = (+$("#in-size").value).toFixed(1).replace(/\.0$/, "");
   }
@@ -411,9 +421,58 @@
   function setAcademyMode(mode, render = true) {
     state.academyMode = mode;
     $$("[data-academy-mode]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.academyMode === mode)));
-    $$("[data-academy-pane]").forEach((p) => { p.hidden = p.dataset.academyPane !== mode; });
+    $$("[data-academy-pane]").forEach((p) => { p.hidden = state.headMode === "file" || p.dataset.academyPane !== mode; });
     if (render) onSettingsChange();
   }
+
+  // 머리 부분: 여기서 만들기 / 내 한글 파일 바탕쪽 그대로
+  function setHeadMode(mode, render = true) {
+    state.headMode = mode;
+    $$("[data-head-mode]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.headMode === mode)));
+    $("#tpl-pane").hidden = mode !== "file";
+    $$(".make-only").forEach((el) => { el.hidden = mode === "file"; });
+    setAcademyMode(state.academyMode, false);
+    showTemplateInfo();
+    if (render) onSettingsChange();
+  }
+  $$("[data-head-mode]").forEach((b) => b.addEventListener("click", () => setHeadMode(b.dataset.headMode)));
+
+  function runsText(runs) { return (runs || []).map((r) => r.t).join("").trim(); }
+  function showTemplateInfo() {
+    const t = state.template, info = $("#tpl-info");
+    $("#btn-tpl-remove").hidden = !t;
+    $("#btn-tpl").textContent = t ? "다른 한글 파일 고르기" : "한글 파일(.hwpx) 고르기";
+    if (!t) { info.textContent = "한글에서 바탕쪽을 만들어 둔 시험지 파일을 골라 주세요. 파일 안의 문제 내용은 가져오지 않아요."; return; }
+    const fonts = [...new Set([...(t.academy_runs || []), ...(t.title_runs || [])].map((r) => r.font).filter(Boolean))];
+    info.innerHTML = `${t.name ? `<b>${esc(t.name)}</b> · ` : ""}학원 칸 <b>${esc(runsText(t.academy_runs) || "없음")}</b> · ` +
+      `제목 칸 <b>${esc(t.title_text || "없음")}</b>${fonts.length ? ` · 글꼴 ${esc(fonts.join(", "))}` : ""}`;
+  }
+  function loadTemplate() {
+    try { const raw = localStorage.getItem(TPL_KEY); if (raw) state.template = JSON.parse(raw); } catch (_) { state.template = null; }
+  }
+  $("#btn-tpl").addEventListener("click", () => $("#tpl-input").click());
+  $("#tpl-input").addEventListener("change", async (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    const fd = new FormData();
+    fd.append("file", f);
+    try {
+      const t = await api("/api/template", { method: "POST", body: fd });
+      t.name = f.name.replace(/\.hwpx$/i, "");
+      state.template = t;
+      try { localStorage.setItem(TPL_KEY, JSON.stringify(t)); } catch (_) { toast("브라우저에 저장하지 못해 이번에만 쓰여요.", true); }
+      fillFonts();
+      setHeadMode("file");
+      toast("바탕쪽을 가져왔어요. 제목 칸 글자만 아래 제목으로 바뀌어요.");
+    } catch (err) { toast(err.message, true); }
+  });
+  $("#btn-tpl-remove").addEventListener("click", () => {
+    state.template = null;
+    try { localStorage.removeItem(TPL_KEY); } catch (_) { /* 저장 안 되는 환경 */ }
+    fillFonts();
+    setHeadMode("make");
+  });
   $$("[data-academy-mode]").forEach((b) => b.addEventListener("click", () => setAcademyMode(b.dataset.academyMode)));
 
   // 제목 글자 색
@@ -494,7 +553,9 @@
 
   function currentOptions() {
     const mode = state.academyMode;
+    const tpl = state.headMode === "file" ? state.template : null;
     return {
+      template: tpl || undefined,
       body_font: $("#in-font").value,
       title_font: $("#in-title-font").value,
       body_size: +$("#in-size").value,
@@ -535,16 +596,17 @@
     const u = pw / PAGE_W;
     paper.style.setProperty("--pw", `${pw}px`);
     const o = currentOptions();
-    const hasAcademy = (o.academy_name || o.academy_sub || o.use_logo);
+    const tpl = o.template;
+    const hasAcademy = tpl ? (tpl.academy_runs || []).length > 0 : (o.academy_name || o.academy_sub || o.use_logo);
     const hasHead = hasAcademy || !!o.title;
-    const useMaster = hasHead || o.frame;
+    const useMaster = hasHead || o.frame || !!tpl;
     const g = useMaster ? MASTER : PLAIN;
     const pt = (n) => n * 100 * u;  // pt -> 미리보기 px
 
     // 바탕쪽: 머리 칸 + 바깥 테두리
     const head = $("#mp-head"), frame = $("#mp-frame");
     const tx = (PAGE_W - MASTER.tableW) / 2;
-    frame.hidden = !o.frame;
+    frame.hidden = !(o.frame || tpl);
     Object.assign(frame.style, { left: `${tx * u}px`, top: `${MASTER.tableTop * u}px`, width: `${MASTER.tableW * u}px`, height: `${75791 * u}px` });
     head.hidden = !hasHead;
     Object.assign(head.style, { left: `${tx * u}px`, top: `${MASTER.tableTop * u}px`, width: `${MASTER.tableW * u}px`, height: `${MASTER.headH * u}px` });
@@ -574,20 +636,36 @@
     if (!hasHead && state.academyMode !== "none") head.hidden = false; // 비어 있어도 눌러서 입력할 수 있게 표시
     ac.style.width = `${aw * u}px`;
     ac.style.fontSize = `${pt(o.academy_size)}px`;
-    ac.style.fontFamily = FONT_STACK[o.title_font] || "inherit";
+    ac.style.fontFamily = fontCss(o.title_font);
     ti.textContent = o.title || "시험 제목 입력";
     ti.classList.toggle("is-empty", !o.title);
     ti.style.fontSize = `${pt(o.title_size)}px`;
     ti.style.color = o.title ? o.title_color : "";
-    ti.style.fontFamily = FONT_STACK[o.title_font] || "inherit";
+    ti.style.fontFamily = fontCss(o.title_font);
     ti.style.borderLeftWidth = state.academyMode === "none" ? "0" : "";
+    ac.style.background = "";
+    if (tpl) {  // 내 한글 파일 바탕쪽: 가져온 글자·글꼴·크기로 비슷하게만 보여 준다(결과는 그 파일 바탕쪽 그대로)
+      const span = (r, text) => `<span style="font-family:${esc(fontCss(r.font))};font-size:${pt(r.size || 14)}px;` +
+        `color:${esc(r.color || "#000")};font-weight:${r.bold ? 800 : 500}">${esc(text ?? r.t)}</span>`;
+      const ar = tpl.academy_runs || [];
+      const tr = (tpl.title_runs || [])[0] || { size: 14, color: "#000000", bold: true };
+      head.hidden = false;
+      ac.hidden = !ar.length;
+      ac.classList.remove("is-empty");
+      ac.innerHTML = "<span>" + ar.map((r) => span(r)).join("") + "</span>";
+      ac.style.background = ar.length && /^#F{6}$/i.test(ar[0].color) ? "" : "#fff";  // 흰 글씨면 검은 칸
+      const text = ar.reduce((n, r) => n + r.t.length * (r.size || 14), 0);
+      ac.style.width = `${Math.max(6000, Math.min(20000, text * 100 * 0.98 + 1600)) * u}px`;
+      ti.innerHTML = o.title ? span(tr, o.title) : "시험 제목 입력";
+      ti.style.borderLeftWidth = ar.length ? "" : "0";
+    }
 
     // 본문 2단
     const cols = $("#body-cols");
     Object.assign(cols.style, {
       left: `${g.left * u}px`, top: `${g.bodyTop * u}px`, width: `${(PAGE_W - g.left - g.right) * u}px`,
       height: `${(VIEW_H - g.bodyTop) * u}px`, columnGap: `${2268 * u}px`,
-      fontSize: `${o.body_size * 100 * u}px`, fontFamily: FONT_STACK[o.body_font] || "serif",
+      fontSize: `${o.body_size * 100 * u}px`, fontFamily: fontCss(o.body_font, "serif"),
     });
     const s = (state.job && state.job.sample) || {};
     let html = "";
@@ -808,6 +886,7 @@
 
   // --------------------------------------------------------------- init --
   (async () => {
+    loadTemplate();
     try {
       const cfg = await api("/api/config");
       state.cfg = cfg;

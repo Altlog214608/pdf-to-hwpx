@@ -25,6 +25,7 @@ class DocStyle:
     answers_as_endnotes: bool = False  # 정답·해설을 각 문제에 연결된 미주로 넣기(문서 끝에 모임)
     frame: bool = False              # 페이지 바깥 네모 테두리
     auto_number: bool = True         # 문제 번호를 한글 문단 번호로(문제를 더 넣거나 이어 붙이면 번호가 자동으로 이어짐)
+    template: Optional[dict] = None  # 내 한글 파일에서 가져온 바탕쪽(master_template.extract_template). 있으면 학원/제목/테두리 대신
     extra: dict = field(default_factory=dict)
 
     @property
@@ -33,7 +34,7 @@ class DocStyle:
 
     @property
     def uses_masterpage(self) -> bool:
-        return self.header_enabled or self.frame
+        return self.header_enabled or self.frame or bool(self.template)
 
     def validate(self) -> "DocStyle":
         self.body_size = max(7.0, min(16.0, float(self.body_size)))
@@ -48,6 +49,9 @@ class DocStyle:
         for name in ("body_font", "title_font"):
             v = str(getattr(self, name) or "").strip()[:40]
             setattr(self, name, v or DocStyle.__dataclass_fields__[name].default)
+        if self.template is not None:
+            from .master_template import check_template
+            check_template(self.template)  # TemplateError(ValueError)
         return self
 
     @classmethod
@@ -67,6 +71,7 @@ class DocStyle:
             title_color=str(d.get("title_color") or "#000000"),
             answers_as_endnotes=bool(d.get("answers_as_endnotes")),
             auto_number=bool(d.get("auto_number", True)),
+            template=d.get("template") if isinstance(d.get("template"), dict) else None,
         )
         return s.validate()
 
@@ -76,4 +81,5 @@ class DocStyle:
                 "academy_size": self.academy_size, "academy_sub_size": self.academy_sub_size,
                 "logo": bool(self.logo), "title": self.title,
                 "title_size": self.title_size, "frame": self.frame, "title_color": self.title_color,
-                "answers_as_endnotes": self.answers_as_endnotes, "auto_number": self.auto_number}
+                "answers_as_endnotes": self.answers_as_endnotes, "auto_number": self.auto_number,
+                "template": bool(self.template)}
