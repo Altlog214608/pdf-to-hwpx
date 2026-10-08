@@ -205,7 +205,8 @@ def validate(ex: "Extraction | list[Extraction]", doc: Document, hwpx_path: str)
     # ---- 텍스트 커버리지 ----
     skip = {id(l) for l in doc.image_only_lines}
     src_lines = [l for l in _source_lines(ex) if id(l) not in skip]
-    keep_numbers = not doc.stats.get("merged_files")
+    # 통합본·번호를 이어 매긴 문서는 문제·정답 번호가 원문과 다르므로 숫자는 비교하지 않는다
+    keep_numbers = not (doc.stats.get("merged_files") or doc.stats.get("renumbered"))
     out_text = _compact("".join(p["text"] for p in paras), keep_numbers)
     out_sh = _shingles(out_text)
     # 줄 단위 n-gram: 읽기 순서가 바뀌거나 그림으로 대체된 줄이 있어도 경계 n-gram이 왜곡되지 않게
@@ -240,13 +241,17 @@ def validate(ex: "Extraction | list[Extraction]", doc: Document, hwpx_path: str)
     first = qs[0].number if qs else 1  # 문제집 일부는 13번 등에서 시작한다
     seq_ok = [q.number for q in qs] == list(range(first, first + len(qs)))
     sec0 = [p for p in paras if p["section"].endswith("section0.xml") and not p.get("note")]
+    # 원문 번호가 건너뛰어도 자동 번호는 이어서 매기므로(writer), HWPX에서는 첫 번호부터 1씩 나와야 한다
+    shown = [first + k for k in range(len(qs))] if doc.stats.get("renumbered") else [q.number for q in qs]
     k = 0
     for p in sec0:
-        if k < len(qs) and re.match(rf"^\s*{qs[k].number}\s*\.", p["text"]):
+        if k < len(qs) and re.match(rf"^\s*{shown[k]}\s*\.", p["text"]):
             k += 1
     checks["question_order_status"] = "PASS" if seq_ok and k == len(qs) and qs else "FAIL"
     if checks["question_order_status"] == "FAIL":
-        causes.append(f"문제 번호 순서/누락 (IR {len(qs)}개, HWPX에서 순서대로 찾은 수 {k})")
+        gaps = [f"{a.number}→{b.number}" for a, b in zip(qs, qs[1:]) if b.number != a.number + 1]
+        causes.append(f"문제 번호 순서/누락 (IR {len(qs)}개, HWPX에서 순서대로 찾은 수 {k}"
+                      + (f", 건너뛴 곳 {', '.join(gaps[:3])}" if gaps else "") + ")")
     bad_choices = [q.number for q in qs if q.choices and len(q.choices) != 5]
     checks["choice_count_status"] = "PASS" if not bad_choices else "WARN"
     if bad_choices:

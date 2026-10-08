@@ -38,6 +38,7 @@ class MasterIds:
     black_bf: int      # 검은 바탕 칸
     title_cp: int      # 제목 글자
     academy_cp: int    # 흰 학원 이름 글자
+    academy_sub_cp: int  # 학원 이름 뒷부분(작은 흰 글자)
     center_pp: int     # 가운데 정렬 문단
     plain_pp: int = 0
     plain_cp: int = 0
@@ -94,14 +95,17 @@ def academy_cell_width(style: DocStyle, logo: Optional[Logo]) -> int:
     if logo:
         w = int((HEAD_H - 600) * logo.px_w / max(1, logo.px_h)) + 900
     else:
-        w = int(len(style.academy_name) * style.title_size * 100 * 0.98) + 1600
+        text = len(style.academy_name) * style.academy_size
+        if style.academy_sub:
+            text += (len(style.academy_sub) + (0.5 if style.academy_name else 0)) * style.academy_sub_size
+        w = int(text * 100 * 0.98) + 1600
     return max(6000, min(20000, w))
 
 
 def build_masterpage(page_id: str, style: DocStyle, ids: MasterIds, margins: dict,
                      logo: Optional[Logo], seed: int = 7) -> str:
     rng = random.Random(seed)
-    has_academy = bool(logo or style.academy_name)
+    has_academy = bool(logo or style.academy_name or style.academy_sub)
     has_title = bool(style.title)
     head = has_academy or has_title
     rows = []
@@ -114,8 +118,12 @@ def build_masterpage(page_id: str, style: DocStyle, ids: MasterIds, margins: dic
             if logo:
                 inner = _p(ids.center_pp, f'<hp:run charPrIDRef="{ids.academy_cp}">'
                                           f'{_logo_pic(logo, aw - 600, HEAD_H - 600, rng)}<hp:t/></hp:run>')
-            else:
-                inner = _p(ids.center_pp, f'<hp:run charPrIDRef="{ids.academy_cp}"><hp:t>{escape(style.academy_name)}</hp:t></hp:run>')
+            else:  # "김한춘 국어전문학원": 이름은 크게, 뒷부분은 작게(한 문단 안의 글자 크기만 다르게)
+                name = style.academy_name + (" " if style.academy_name and style.academy_sub else "")
+                runs = f'<hp:run charPrIDRef="{ids.academy_cp}"><hp:t>{escape(name)}</hp:t></hp:run>' if name else ""
+                if style.academy_sub:
+                    runs += f'<hp:run charPrIDRef="{ids.academy_sub_cp}"><hp:t>{escape(style.academy_sub)}</hp:t></hp:run>'
+                inner = _p(ids.center_pp, runs)
             cells.append(_cell(col, 0, aw if has_title else TABLE_W, HEAD_H, ids.black_bf, inner))
             col += 1
         if has_title:

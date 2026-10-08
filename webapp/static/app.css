@@ -175,6 +175,9 @@ svg text { font: 800 13px var(--ui); fill: var(--accent); letter-spacing: .04em;
 .switch input:checked + .track i { transform: translateX(16px); }
 .switch input:focus-visible + .track { outline: 3px solid color-mix(in srgb, var(--accent) 40%, transparent); outline-offset: 2px; }
 .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.text-size { display: flex; gap: 6px; }
+.text-size input { flex: 1; min-width: 0; }
+.field .text-size .pt-select { flex: none; width: 88px; }
 .size-row { display: flex; align-items: center; gap: 6px; }
 .size-row input { flex: 1; accent-color: var(--accent); min-width: 0; }
 .btn-step { width: 30px; height: 30px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); cursor: pointer; font-weight: 700; flex: none; }

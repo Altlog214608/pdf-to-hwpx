@@ -33,7 +33,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--font", default="함초롬바탕", help="본문 글꼴 (기본: 함초롬바탕)")
     ap.add_argument("--size", type=float, default=10.0, help="본문 글자 크기 pt (기본: 10)")
     ap.add_argument("--title", default="", help="바탕쪽 제목, 예: \"[중간 대비] 2. 품격을 높이는 언어생활 ①\"")
-    ap.add_argument("--academy", default="", help="바탕쪽 학원 이름(검은 칸 흰 글씨)")
+    ap.add_argument("--academy", default="", help="바탕쪽 학원 이름(검은 칸 흰 글씨), 예: 김한춘")
+    ap.add_argument("--academy-sub", default="", help="학원 이름 뒤 작은 글씨, 예: 국어전문학원")
+    ap.add_argument("--academy-size", type=float, default=14.0, help="학원 이름 글자 크기 pt (기본: 14)")
+    ap.add_argument("--academy-sub-size", type=float, default=11.0, help="뒷부분 글자 크기 pt (기본: 11)")
+    ap.add_argument("--title-size", type=float, default=14.0, help="제목 글자 크기 pt (기본: 14)")
     ap.add_argument("--logo", help="학원 로고 그림 파일(PNG/JPG). 지정하면 학원 이름 대신 사용")
     ap.add_argument("--frame", action="store_true", help="페이지 바깥 네모 테두리")
     ap.add_argument("--title-color", default="#000000", help="제목 글자 색, 예: #555555")
@@ -48,7 +52,8 @@ def main(argv: list[str] | None = None) -> int:
 
     logo = Path(args.logo).read_bytes() if args.logo else None
     style = DocStyle(body_font=args.font, body_size=args.size, title=args.title, academy_name=args.academy,
-                     logo=logo, frame=args.frame, title_color=args.title_color,
+                     academy_sub=args.academy_sub, academy_size=args.academy_size,
+                     academy_sub_size=args.academy_sub_size, title_size=args.title_size, logo=logo, frame=args.frame, title_color=args.title_color,
                      answers_as_endnotes=args.endnotes, auto_number=not args.no_auto_number).validate()
     pdfs = _expand(args.inputs)
     if not pdfs:

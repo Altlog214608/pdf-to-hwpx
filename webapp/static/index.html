@@ -108,10 +108,17 @@
                 <button type="button" role="radio" aria-checked="false" data-academy-mode="logo">로고 그림</button>
                 <button type="button" role="radio" aria-checked="false" data-academy-mode="none">표시 안 함</button>
               </div>
-              <label class="field" data-academy-pane="text">
-                <span>학원 이름</span>
-                <input id="in-academy" type="text" maxlength="30" placeholder="예: 김한춘 국어전문학원" autocomplete="organization">
-              </label>
+              <div class="field" data-academy-pane="text">
+                <span>학원 이름 <small>앞뒤 글자 크기를 따로 정할 수 있어요</small></span>
+                <div class="text-size">
+                  <input id="in-academy" type="text" maxlength="30" placeholder="예: 김한춘" autocomplete="organization" aria-label="학원 이름">
+                  <select id="in-academy-size" class="pt-select" aria-label="학원 이름 글자 크기"></select>
+                </div>
+                <div class="text-size">
+                  <input id="in-academy-sub" type="text" maxlength="30" placeholder="작은 글씨 뒷부분 (예: 국어전문학원)" aria-label="학원 이름 뒷부분(작은 글씨)">
+                  <select id="in-academy-sub-size" class="pt-select" aria-label="뒷부분 글자 크기"></select>
+                </div>
+              </div>
               <div class="field logo-field" data-academy-pane="logo" hidden>
                 <span>로고 그림 <small>PNG·JPG, 가로로 긴 그림 권장</small></span>
                 <div class="logo-row">
@@ -121,10 +128,13 @@
                 </div>
                 <input id="logo-input" type="file" accept="image/png,image/jpeg" hidden>
               </div>
-              <label class="field">
+              <div class="field">
                 <span>시험 제목</span>
-                <input id="in-title" type="text" maxlength="80" placeholder="예: [중간 대비] 2. 품격을 높이는 언어생활 ①">
-              </label>
+                <div class="text-size">
+                  <input id="in-title" type="text" maxlength="80" placeholder="예: [중간 대비] 2. 품격을 높이는 언어생활 ①" aria-label="시험 제목">
+                  <select id="in-title-size" class="pt-select" aria-label="제목 글자 크기"></select>
+                </div>
+              </div>
               <div class="chips" id="title-chips" aria-label="제목 후보"></div>
               <div class="field">
                 <span>제목 글자 색</span>

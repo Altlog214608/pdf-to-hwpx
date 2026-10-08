@@ -41,6 +41,7 @@ CP = {"body": 0, "body_ul": 8, "guide": 7, "bold": 9, "bold_ul": 10}
 
 ANSWER_NUM_RE = re.compile(r"^\s*\d{1,2}\s*\)\s*")
 STEM_NUM_RE = re.compile(r"^\s*\d{1,3}\s*\.\s*")  # 발문 앞 `12.` (한글 문단 번호로 바꿀 때 지움)
+MISSING_ANSWER = "[정답] (원문에서 찾지 못함 — 직접 입력해 주세요)"  # 자동 번호일 때 정답 없는 문제의 미주
 
 
 def _strip_prefix(runs: list[Run], pat: re.Pattern) -> list[Run]:
@@ -226,7 +227,8 @@ class HwpxWriter:
             self.master_ids = MasterIds(
                 frame_bf=S.add_border_fill(), black_bf=S.add_border_fill(fill="#000000"),
                 title_cp=S.add_char(CP["bold"], int(st.title_size * 100), color=st.title_color, font_id=0),
-                academy_cp=S.add_char(CP["bold"], int(st.title_size * 100), color="#FFFFFF", font_id=0),
+                academy_cp=S.add_char(CP["bold"], int(st.academy_size * 100), color="#FFFFFF", font_id=0),
+                academy_sub_cp=S.add_char(CP["bold"], int(st.academy_sub_size * 100), color="#FFFFFF", font_id=0),
                 center_pp=S.derive(0, align="CENTER"), plain_pp=0, plain_cp=0)
             if st.logo:
                 self.logo = self._add_logo(st.logo)
@@ -239,11 +241,16 @@ class HwpxWriter:
         return [it for it in self.doc.items if isinstance(it, Question)]
 
     def _plan_endnotes(self) -> Optional[dict[int, AnswerEntry]]:
-        """정답이 있는 문제마다 미주를 단다. 한글은 미주 번호를 1씩 올리므로, 문제 번호가 건너뛰는 곳(정답 없는 문제,
-        못 찾은 번호)에서는 미주에 '새 번호로 시작'을 넣어 미주 번호를 문제 번호에 맞춘다.
-        문제와 짝이 없는 정답은 문서 끝 [정답 및 해설]에 그대로 둔다."""
+        """문제마다 정답·해설 미주를 단다. 문제와 짝이 없는 정답은 문서 끝 [정답 및 해설]에 그대로 둔다.
+
+        한글은 미주 번호를 문서 순서대로 1씩 매긴다.
+        - 자동 번호(기본): 문제 번호도 한글이 1씩 매기므로, 정답을 못 찾은 문제에도 '찾지 못함' 미주를 달아
+          '문제 하나 = 미주 하나'를 지킨다. 그러면 문제를 지우거나 다른 시험지에 붙여 넣어도 두 번호가 함께 움직인다.
+          '새 번호로 시작'은 넣지 않는다(그 번호가 고정돼 편집하면 미주 번호가 문제 번호와 어긋난다).
+        - 글자 번호: 번호가 건너뛰는 곳에서 미주에 '새 번호로 시작'을 넣어 미주 번호를 글자 번호에 맞춘다."""
         self.leftover_answers: list[AnswerEntry] = list(self.doc.answers)
         self.endnote_restart: set[int] = set()
+        self.note_numbers: dict[int, int] = {}  # 문제 번호(원문) -> 미주에 쓸 번호
         if not self.style.answers_as_endnotes:
             return None
         qs = self._questions()
@@ -266,16 +273,25 @@ class HwpxWriter:
             self.doc.warnings.append("정답 번호가 문제 번호와 하나도 맞지 않아 정답을 문서 끝에 모았습니다.")
             self.stats["endnotes"] = 0
             return None
-        prev = None
-        for n in q_nums:
-            if n not in notes:
-                continue
-            if prev is not None and n != prev + 1:
-                self.endnote_restart.add(n)
-            prev = n
         no_answer = [n for n in q_nums if n not in notes]
-        if no_answer:
-            self.doc.warnings.append(f"정답을 찾지 못한 문제는 미주 없이 넣었습니다: {no_answer[:10]}")
+        if self.style.auto_number:
+            for n in no_answer:
+                notes[n] = AnswerEntry(n, Para(runs=[Run(MISSING_ANSWER)]))
+            notes = {n: notes[n] for n in q_nums}  # 문서 순서
+            self.note_numbers = {n: q_nums[0] + k for k, n in enumerate(q_nums)}
+            if no_answer:
+                self.doc.warnings.append(f"정답을 찾지 못한 문제({', '.join(map(str, no_answer[:10]))}번)는 미주에 "
+                                         "'찾지 못함'으로 넣었습니다. 한글에서 직접 채워 주세요.")
+        else:
+            prev = None
+            for n in q_nums:
+                if n not in notes:
+                    continue
+                if prev is not None and n != prev + 1:
+                    self.endnote_restart.add(n)
+                prev = n
+            if no_answer:
+                self.doc.warnings.append(f"정답을 찾지 못한 문제는 미주 없이 넣었습니다: {no_answer[:10]}")
         if leftover:
             self.doc.warnings.append(f"문제와 짝이 없는 정답 {len(leftover)}개는 문서 끝 [정답 및 해설]에 두었습니다.")
         self.leftover_answers = leftover
@@ -284,28 +300,22 @@ class HwpxWriter:
         return notes
 
     def _plan_numbering(self) -> dict[int, int]:
-        """문제 번호를 한글 문단 번호로: 문제를 더 넣거나 파일을 이어 붙여도 한글이 번호를 다시 매긴다.
-        한글은 같은 번호 모양 안에서 1씩 올리므로, 번호가 건너뛰는 곳(못 찾은 번호 등)부터는 그 번호로 시작하는
-        번호 모양을 새로 만든다(한글의 '새 번호 목록 시작'과 같은 방식). 돌려주는 값: id(문제) -> 번호 모양 id."""
+        """문제 번호를 한글 문단 번호로: 문제를 더 넣거나 지우거나 다른 시험지에 붙여 넣어도 한글이 번호를 다시 매긴다.
+        번호 모양은 문서 전체에 하나(첫 문제 번호부터 1씩)만 쓴다. 원문 번호가 건너뛰는 곳(놓친 문제 등)에서 새 번호
+        모양으로 '그 번호부터 시작'하게 하면 그 번호가 고정돼, 편집하면 번호 순서가 꼬인다(1 2 3 5 4 5 …).
+        돌려주는 값: id(문제) -> 번호 모양 id."""
         out: dict[int, int] = {}
-        if not self.style.auto_number:
-            return out
         qs = self._questions()
-        prev = None
-        nid = None
-        gaps = []
-        for q in qs:
-            if nid is None or q.number != prev + 1:
-                if nid is not None:
-                    gaps.append(f"{prev}→{q.number}")
-                nid = self.styles.add_numbering(CP["bold"], q.number)
-            out[id(q)] = nid
-            prev = q.number
+        if not self.style.auto_number or not qs:
+            return out
+        nid = self.styles.add_numbering(CP["bold"], qs[0].number)
+        out = {id(q): nid for q in qs}
+        gaps = [f"{a.number}→{b.number}" for a, b in zip(qs, qs[1:]) if b.number != a.number + 1]
         if gaps:
-            self.doc.warnings.append(f"문제 번호가 건너뛰는 곳({', '.join(gaps[:5])})은 그 번호부터 새 번호로 시작했습니다. "
-                                     "원본에서 빠진 문제가 없는지 확인해 주세요.")
-        if out:
-            self.stats["auto_numbers"] = len(out)
+            self.doc.stats["renumbered"] = 1
+            self.doc.warnings.append(f"원문 문제 번호가 건너뛰는 곳({', '.join(gaps[:5])})이 있어 자동 번호는 끊기지 않게 "
+                                     "이어서 매겼습니다. 원본에서 빠진 문제가 없는지 확인해 주세요.")
+        self.stats["auto_numbers"] = len(out)
         return out
 
     def _add_logo(self, data: bytes) -> Optional[Logo]:
@@ -571,7 +581,7 @@ class HwpxWriter:
         """문제 첫 줄 앞에 숨긴(1pt 흰 글자) 미주 표시를 넣고, 정답·해설은 미주 본문으로 문서 끝에 모은다.
         수작업 시험지와 같은 방식: 미주 번호 `1)`이 원래 정답 줄의 번호를 대신한다."""
         S = self.styles
-        num = a.number
+        num = self.note_numbers.get(a.number, a.number)
         auto = (f'<hp:run charPrIDRef="{CP["body"]}"><hp:ctrl><hp:autoNum num="{num}" numType="ENDNOTE">'
                 '<hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/>'
                 '</hp:autoNum></hp:ctrl><hp:t> </hp:t></hp:run>')

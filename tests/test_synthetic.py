@@ -4,6 +4,7 @@ import re
 import pytest
 
 from pdf2hwpx.convert import convert
+from pdf2hwpx.style import DocStyle
 from pdf2hwpx.validate import read_hwpx
 from tests.synth_pdf import build
 
@@ -137,6 +138,34 @@ def test_doc_style_masterpage(tmp_path):
         assert '<hp:masterPage idRef="masterpage0"/>' in sec0 and 'masterPageCnt="1"' in sec0
         assert "[중간 대비] 합성 시험" in mp and 'textWrap="BEHIND_TEXT"' in mp
         assert (name in mp) if name else ("<hp:pic" in mp)
+
+
+def test_academy_name_two_sizes(tmp_path):
+    """학원 이름을 앞(김한춘)·뒤(국어전문학원) 글자 크기를 따로: 수작업 시험지처럼 한 칸 안에서 뒷부분만 작게."""
+    import zipfile
+    from pdf2hwpx.style import DocStyle
+
+    pdf = tmp_path / "s.pdf"
+    build(str(pdf))
+    st = DocStyle(academy_name="김한춘", academy_sub="국어전문학원", academy_size=15, academy_sub_size=12,
+                  title="[중간 대비] 합성", title_size=16, frame=True)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=st)
+    assert res["validation"]["status"] == "PASS", res["validation"]
+    with zipfile.ZipFile(res["hwpx"]) as z:
+        header = z.read("Contents/header.xml").decode("utf-8")
+        mp = z.read("Contents/masterpage0.xml").decode("utf-8")
+    runs = re.findall(r'<hp:run charPrIDRef="(\d+)"><hp:t>([^<]*)</hp:t></hp:run>', mp)
+    by_text = {t: cid for cid, t in runs}
+    assert "김한춘 " in by_text and "국어전문학원" in by_text
+
+    def height(cid):
+        return int(re.search(rf'<hh:charPr id="{cid}" height="(\d+)" textColor="(#[0-9A-F]+)"', header).group(1))
+    assert height(by_text["김한춘 "]) == 1500 and height(by_text["국어전문학원"]) == 1200
+    assert height(by_text["[중간 대비] 합성"]) == 1600
+    # 뒷부분만 써도 된다
+    st2 = DocStyle(academy_sub="국어전문학원", academy_sub_size=12).validate()
+    assert st2.header_enabled
+    assert DocStyle.from_dict({"academy_name": "김한춘", "academy_sub": "국어전문학원", "academy_size": 99}).academy_size == 24
 
 
 def test_answers_as_endnotes_and_title_color(tmp_path):
@@ -275,15 +304,10 @@ def test_auto_number_paragraphs(result, tmp_path):
     assert res["validation"]["status"] == "PASS" and "auto_numbers" not in res["writer"]
 
 
-def test_numbering_and_endnotes_survive_gaps(tmp_path):
-    """번호가 건너뛰거나(못 찾은 문제) 정답이 빠져도 자동 번호·미주를 끄지 않는다:
-    건너뛴 곳부터 새 번호 모양(시작 번호), 미주는 '새 번호로 시작'으로 문제 번호에 맞추고, 짝 없는 정답은 문서 끝으로."""
-    import zipfile
+def _gap_doc(tmp_path):
     from pdf2hwpx.extract import extract
-    from pdf2hwpx.hwpx_writer import HwpxWriter
     from pdf2hwpx.ir import build_document
     from pdf2hwpx.model import Question
-    from pdf2hwpx.style import DocStyle
 
     pdf = tmp_path / "s.pdf"
     build(str(pdf))
@@ -291,27 +315,66 @@ def test_numbering_and_endnotes_survive_gaps(tmp_path):
     qs = [it for it in doc.items if isinstance(it, Question)]
     qs[-1].number = 9                                   # 1 2 3 4 9 (5번을 못 찾은 것처럼)
     doc.answers = [a for a in doc.answers if a.number != 2]  # 2번 정답 없음, 5번 정답은 짝 없음
+    return doc
+
+
+def test_numbering_and_endnotes_survive_gaps(tmp_path):
+    """번호가 건너뛰거나(못 찾은 문제) 정답이 빠져도 자동 번호·미주를 끄지 않고, 한글에서 편집해도 꼬이지 않게:
+    번호 모양은 문서에 하나(1부터 1씩), 미주는 문제마다 하나(정답이 없으면 '찾지 못함'), '새 번호로 시작'은 없음.
+    (건너뛴 곳에 '9부터 시작'을 고정하면 문제를 지우거나 다른 시험지에 붙여 넣을 때 번호·미주가 1 2 3 5 4 …로 꼬였다)"""
+    import zipfile
+    from pdf2hwpx.hwpx_writer import MISSING_ANSWER, HwpxWriter
+    from pdf2hwpx.style import DocStyle
+
+    doc = _gap_doc(tmp_path)
     out = tmp_path / "gap.hwpx"
     HwpxWriter(doc, style=DocStyle(answers_as_endnotes=True)).write(str(out))
     with zipfile.ZipFile(out) as z:
         header = z.read("Contents/header.xml").decode("utf-8")
         sec0 = z.read("Contents/section0.xml").decode("utf-8")
-        names = z.namelist()
-    # 번호 모양 두 개: 1부터, 9부터
+        sec1 = z.read("Contents/section1.xml").decode("utf-8")
     starts = re.findall(r'<hh:numbering id="\d+" start="0"><hh:paraHead start="(\d+)" level="1"', header)
-    assert starts == ["1", "1", "9"]  # 템플릿 기본 1개 + 문제용 2개
+    assert starts == ["1", "1"]  # 템플릿 기본 1개 + 문제용 1개
     paras = [p["text"] for p in read_hwpx(str(out))["paragraphs"] if not p.get("note")]
-    assert [int(m.group(1)) for t in paras if (m := re.match(r"(\d+)\.(?!\s)", t))][:5] == [1, 2, 3, 4, 9]
-    # 미주: 1, 3, 4번에만. 3번 앞에 '새 번호로 시작'(미주 3)
+    assert [int(m.group(1)) for t in paras if (m := re.match(r"(\d+)\.(?!\s)", t))][:5] == [1, 2, 3, 4, 5]
+    # 미주: 문제마다 하나, 번호도 1~5. 2번·9번(→5)은 '찾지 못함'
+    assert re.findall(r'<hp:endNote number="(\d+)"', sec0) == ["1", "2", "3", "4", "5"]
+    assert "numType=\"ENDNOTE\"/>" not in sec0 and "<hp:newNum" not in sec0
+    assert sec0.count(MISSING_ANSWER) == 2
+    # 짝 없는 5번 정답은 문서 끝 [정답 및 해설]
+    assert "[정답 및 해설]" in sec1 and "5)" in sec1
+    w = " ".join(doc.warnings)
+    assert "4→9" in w and "2, 9번" in w and "짝이 없는 정답 1개" in w
+
+
+def test_typed_numbers_keep_endnote_restart(tmp_path):
+    """자동 번호를 끄면(번호가 글자) 미주 번호를 글자 번호에 맞추려고 건너뛴 곳에 '새 번호로 시작'을 넣는다."""
+    import zipfile
+    from pdf2hwpx.hwpx_writer import HwpxWriter
+    from pdf2hwpx.style import DocStyle
+
+    doc = _gap_doc(tmp_path)
+    out = tmp_path / "typed.hwpx"
+    HwpxWriter(doc, style=DocStyle(answers_as_endnotes=True, auto_number=False)).write(str(out))
+    sec0 = zipfile.ZipFile(out).read("Contents/section0.xml").decode("utf-8")
     assert re.findall(r'<hp:endNote number="(\d+)"', sec0) == ["1", "3", "4"]
     assert re.findall(r'<hp:newNum num="(\d+)" numType="ENDNOTE"/>', sec0) == ["3"]
     assert sec0.index('<hp:newNum num="3"') < sec0.index('<hp:endNote number="3"')
-    # 짝 없는 5번 정답은 문서 끝 [정답 및 해설]
-    assert "Contents/section1.xml" in names
-    sec1 = zipfile.ZipFile(out).read("Contents/section1.xml").decode("utf-8")
-    assert "[정답 및 해설]" in sec1 and "5)" in sec1
-    w = " ".join(doc.warnings)
-    assert "4→9" in w and "[2, 9]" in w and "짝이 없는 정답 1개" in w
+
+
+@pytest.mark.parametrize("framed", [(2,), (5,), (1, 3)])
+def test_framed_stem_is_a_question(tmp_path, framed):
+    """발문 줄에 네모 테두리를 친 문제(문제 강조)를 보기 박스로 읽어 그 번호를 놓치던 문제(실사용: 22문제 중 4번)."""
+    from pdf2hwpx.convert import convert
+
+    pdf = tmp_path / "framed.pdf"
+    build(str(pdf), framed=framed)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=DocStyle(answers_as_endnotes=True))
+    v = res["validation"]
+    assert v["status"] == "PASS", v["root_causes"]
+    assert v["checks"]["question_count"] == v["checks"]["answer_count"] == 5
+    stems = [x["stem"] for x in res["document"]["items"] if x["type"] == "question"]
+    assert stems[1].startswith("2.<보기>는 영상 시의") and stems[4].startswith("5.<보기 1>을")
 
 
 @pytest.mark.parametrize("endnotes", [False, True])

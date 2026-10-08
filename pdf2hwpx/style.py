@@ -14,7 +14,10 @@ class DocStyle:
     body_font: str = "함초롬바탕"   # 본문(지문·문제·선택지·해설) 글꼴
     title_font: str = "함초롬돋움"  # 바탕쪽 제목/학원 이름 글꼴
     body_size: float = 10.0          # 본문 글자 크기(pt)
-    academy_name: str = ""           # 바탕쪽 왼쪽 위 학원 이름(검은 칸에 흰 글씨)
+    academy_name: str = ""           # 바탕쪽 왼쪽 위 학원 이름(검은 칸에 흰 글씨), 예: "김한춘"
+    academy_sub: str = ""            # 학원 이름 뒤에 작은 글씨로 붙는 부분, 예: "국어전문학원"
+    academy_size: float = 14.0       # 학원 이름 글자 크기(pt)
+    academy_sub_size: float = 11.0   # 뒷부분 글자 크기(pt)
     logo: Optional[bytes] = None     # 학원 로고 그림(PNG/JPG). 있으면 이름 대신 사용
     title: str = ""                  # 바탕쪽 제목, 예: "[중간 대비] 2. 품격을 높이는 언어생활 ①"
     title_size: float = 14.0
@@ -26,7 +29,7 @@ class DocStyle:
 
     @property
     def header_enabled(self) -> bool:
-        return bool(self.academy_name.strip() or self.logo or self.title.strip())
+        return bool(self.academy_name.strip() or self.academy_sub.strip() or self.logo or self.title.strip())
 
     @property
     def uses_masterpage(self) -> bool:
@@ -35,7 +38,10 @@ class DocStyle:
     def validate(self) -> "DocStyle":
         self.body_size = max(7.0, min(16.0, float(self.body_size)))
         self.title_size = max(9.0, min(24.0, float(self.title_size)))
+        self.academy_size = max(8.0, min(24.0, float(self.academy_size)))
+        self.academy_sub_size = max(8.0, min(24.0, float(self.academy_sub_size)))
         self.academy_name = self.academy_name.strip()[:30]
+        self.academy_sub = self.academy_sub.strip()[:30]
         self.title = self.title.strip()[:80]
         c = str(self.title_color or "").strip()
         self.title_color = c.upper() if re.fullmatch(r"#[0-9A-Fa-f]{6}", c) else "#000000"
@@ -51,6 +57,9 @@ class DocStyle:
             title_font=str(d.get("title_font") or cls.title_font),
             body_size=float(d.get("body_size") or cls.body_size),
             academy_name=str(d.get("academy_name") or ""),
+            academy_sub=str(d.get("academy_sub") or ""),
+            academy_size=float(d.get("academy_size") or cls.academy_size),
+            academy_sub_size=float(d.get("academy_sub_size") or cls.academy_sub_size),
             logo=logo,
             title=str(d.get("title") or ""),
             title_size=float(d.get("title_size") or cls.title_size),
@@ -63,6 +72,8 @@ class DocStyle:
 
     def summary(self) -> dict:
         return {"body_font": self.body_font, "title_font": self.title_font, "body_size": self.body_size,
-                "academy_name": self.academy_name, "logo": bool(self.logo), "title": self.title,
+                "academy_name": self.academy_name, "academy_sub": self.academy_sub,
+                "academy_size": self.academy_size, "academy_sub_size": self.academy_sub_size,
+                "logo": bool(self.logo), "title": self.title,
                 "title_size": self.title_size, "frame": self.frame, "title_color": self.title_color,
                 "answers_as_endnotes": self.answers_as_endnotes, "auto_number": self.auto_number}

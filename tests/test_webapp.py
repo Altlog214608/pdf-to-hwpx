@@ -58,7 +58,8 @@ def test_full_flow(env):
     assert lr["width"] == 120
 
     opts = {"body_font": "나눔명조", "body_size": 11, "title": "[중간 대비] 테스트",
-            "academy_name": "테스트학원", "use_logo": True, "frame": True}
+            "academy_name": "테스트학원", "academy_sub": "본관", "academy_size": 15, "academy_sub_size": 12,
+            "use_logo": True, "frame": True}
     c = client.post(f"/api/jobs/{jid}/convert", json=opts).json()
     assert c["status"] == "PASS", c
     assert c["seconds_left"] > 0
