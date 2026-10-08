@@ -32,6 +32,9 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 | `USAGE_DB` | `DATA_DIR` 옆 `pdf2hwpx_usage.sqlite3` | 이용 기록 파일(SQLite) |
 | `USAGE_KEEP_DAYS` | 365 | 이용 기록 보관 기간(일) |
 | `ADMIN_USERS` | `ACCESS_KEYS`의 첫 사람 | 이용 기록을 볼 수 있는 초대 이름(쉼표로 여러 명) |
+| `SAMPLE_KEEP_DAYS` | 14 | 문제 생긴 파일 보관 기간(일). 0이면 보관하지 않음 |
+| `SAMPLE_MAX` / `SAMPLE_MAX_MB` | 30 / 1000 | 문제 생긴 파일 최대 개수·용량(넘으면 오래된 것부터 삭제) |
+| `SAMPLES_DIR` | `DATA_DIR` 옆 `pdf2hwpx_samples` | 문제 생긴 파일 보관 폴더 |
 | `DATA_DIR` | 시스템 임시 폴더`/pdf2hwpx_jobs` | 작업 폴더 |
 | `HOST` / `PORT` | 127.0.0.1 / 8000 | 컨테이너에서는 `0.0.0.0` |
 
@@ -63,9 +66,22 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 - `USAGE_KEEP_DAYS`(기본 365일)가 지난 기록은 자동으로 지웁니다. 서버(Lightsail)에서는 `/var/lib/pdf2hwpx/`에 있어
   다시 배포해도 유지되고, `-Delete`로 서버를 지우면 함께 사라집니다.
 
+### 문제 생긴 파일
+
+- 변환 결과가 **문제 있음**(FAIL)이거나 변환·업로드 중 **오류**가 난 PDF만 `webapp/samples.py`가 자동으로 보관합니다.
+  정상·"확인 필요" 파일은 보관하지 않습니다.
+- 함께 남는 것: 원본 PDF(원래 이름), 그때의 결과 HWPX, 검사 원인·경고, 설정(정답 미주·자동 번호·글꼴), 오류 위치(traceback), 사람, 시각.
+  같은 파일이 다시 실패하면 새로 쌓지 않고 횟수와 최신 결과만 바꿉니다.
+- `/admin`의 **문제 생긴 파일** 표에서 ZIP으로 내려받거나 지웁니다. `SAMPLE_KEEP_DAYS`(14일)가 지나거나
+  `SAMPLE_MAX`(30개)를 넘으면 오래된 것부터 자동 삭제.
+- 쓰는 방법: 내려받은 ZIP의 PDF로 원인을 고치고, 머지 전에 `$env:PDF2HWPX_SAMPLES="폴더"; python -m pytest tests -q`로 다시 확인.
+  PDF는 저장소에 넣지 않습니다.
+- 화면에 알림: 오른쪽 위 "파일은 자동 삭제 · 변환 실패 파일만 14일 보관", 실패했을 때 결과 칸에 "관리자에게 보관했어요(14일 뒤 삭제)".
+
 ## 4. 파일 보관 정책 (저작권 보호)
 
 - 업로드 파일·결과물은 서버 디스크의 작업 폴더에만 있고 DB·외부 저장소에 남기지 않습니다.
+  예외는 위의 **문제 생긴 파일**뿐입니다(기한·개수 제한, 관리자만, 화면에 안내).
 - 페이지를 떠나면 브라우저가 `sendBeacon`으로 삭제 요청 → 즉시 폴더 삭제.
 - 그렇지 않아도 `JOB_TTL_MIN`이 지나면 30초 간격 청소 스레드가 삭제. 다운로드 링크는 추측 불가능한
   토큰을 포함하고 `DOWNLOAD_TTL_MIN` 뒤 410(만료)을 돌려줍니다.
@@ -86,6 +102,7 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 | DELETE · POST `.../delete` | `/api/jobs/{id}` | 작업 삭제 |
 | GET | `/healthz` | 상태 확인(로드밸런서용) |
 | GET | `/admin` · `/api/admin/usage?days=&limit=&user=` · `/api/admin/usage.csv` | 이용 기록(관리자만) |
+| GET · DELETE | `/api/admin/samples` · `/api/admin/samples/{id}/download` · `/api/admin/samples/{id}` | 문제 생긴 파일 목록·ZIP·삭제(관리자만) |
 
 CLI에서도 같은 옵션을 쓸 수 있습니다:
 `python .\v0_5_pdf_to_hwpx.py 파일.pdf --font 나눔명조 --size 11 --title "[중간 대비] 2-2" --academy "김한춘 국어전문학원" --logo .\logo.png`

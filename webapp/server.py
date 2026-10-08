@@ -23,6 +23,8 @@
 보관 정책(저작권 보호): 업로드 파일과 결과물은 서버 디스크의 작업 폴더에만 있고,
 작업 보관 시간(JOB_TTL_MIN)이 지나거나 사용자가 페이지를 떠나면 폴더째 삭제된다.
 다운로드 링크는 변환 후 DOWNLOAD_TTL_MIN 동안만 유효하다.
+예외: 변환 결과가 '문제 있음'이거나 오류가 난 파일만 고치기 위해 SAMPLE_KEEP_DAYS(기본 14일) 동안 보관하고
+관리자만 /admin 에서 내려받는다(samples.py, SAMPLE_KEEP_DAYS=0 이면 끔). 화면에 이 사실을 알린다.
 """
 from __future__ import annotations
 
@@ -34,6 +36,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 import zipfile
 from dataclasses import dataclass, field
@@ -44,6 +47,7 @@ from urllib.parse import quote
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -52,6 +56,7 @@ from pdf2hwpx import VERSION  # noqa: E402
 from pdf2hwpx.convert import convert, convert_many  # noqa: E402
 from pdf2hwpx.preview import analyze  # noqa: E402
 from pdf2hwpx.style import FONTS, DocStyle  # noqa: E402
+from webapp.samples import SampleStore  # noqa: E402
 from webapp.usage import EVENTS, UsageLog, device_of  # noqa: E402
 
 DATA_DIR = Path(os.environ.get("DATA_DIR") or Path(tempfile.gettempdir()) / "pdf2hwpx_jobs")
@@ -85,6 +90,11 @@ ADMIN_USERS = {x.strip() for x in os.environ.get("ADMIN_USERS", "").split(",") i
     set(list(ACCESS_KEYS.values())[:1])
 USAGE = UsageLog(Path(os.environ.get("USAGE_DB") or DATA_DIR.parent / "pdf2hwpx_usage.sqlite3"),
                  keep_days=float(os.environ.get("USAGE_KEEP_DAYS", "365")))
+# 문제 생긴 파일(FAIL·오류)만 고치기 위해 보관. 0일이면 끈다.
+SAMPLES = SampleStore(Path(os.environ.get("SAMPLES_DIR") or DATA_DIR.parent / "pdf2hwpx_samples"),
+                      keep_days=float(os.environ.get("SAMPLE_KEEP_DAYS", "14")),
+                      max_count=int(os.environ.get("SAMPLE_MAX", "30")),
+                      max_mb=float(os.environ.get("SAMPLE_MAX_MB", "1000")))
 ACCESS_COOKIE = "pdf2hwpx_access"
 ACCESS_DAYS = int(os.environ.get("ACCESS_DAYS", "180"))
 
@@ -136,6 +146,7 @@ def _sweeper() -> None:
         for d in DATA_DIR.iterdir():
             if d.is_dir() and d.name not in JOBS and now - d.stat().st_mtime > JOB_TTL_MIN * 60:
                 shutil.rmtree(d, ignore_errors=True)
+        SAMPLES.maybe_prune()
 
 
 threading.Thread(target=_sweeper, daemon=True).start()
@@ -219,7 +230,27 @@ def config(request: Request) -> dict:
     return {"version": VERSION, "fonts": FONTS, "max_mb": MAX_MB, "max_pages": MAX_PAGES,
             "job_ttl_min": JOB_TTL_MIN, "download_ttl_min": DOWNLOAD_TTL_MIN,
             "max_files": MAX_FILES, "max_total_pages": MAX_TOTAL_PAGES,
+            "keep_failed_days": SAMPLES.keep_days if SAMPLES.enabled else 0,
             "admin": _is_admin(_user(request))}
+
+
+def _keep(user: str, kind: str, jobs: list["Job"], status: str, res: Optional[dict] = None,
+          result: Optional[Path] = None, style: Optional[DocStyle] = None, error: str = "") -> Optional[str]:
+    """문제 생긴 파일만 관리자 확인용으로 보관(samples.py). 보관에 실패해도 변환 응답에는 영향이 없다."""
+    v = (res or {}).get("validation") or {}
+    return SAMPLES.save(user, kind, [(j.pdf, j.filename) for j in jobs], status, result=result,
+                        causes=v.get("root_causes"), warnings=v.get("warnings"),
+                        settings=_style_detail(style) if style else None, error=error,
+                        pages=sum(j.pages for j in jobs), questions=(v.get("checks") or {}).get("question_count"))
+
+
+def _kept(sid: Optional[str]) -> dict:
+    """이용 기록에는 보관했다는 표시만 남긴다(보관 id 는 시각+난수)."""
+    return {"kept": sid} if sid else {}
+
+
+def _kept_note(sid: Optional[str]) -> str:
+    return f" 고칠 수 있게 이 파일을 관리자에게 보관했어요({SAMPLES.keep_days:g}일 뒤 삭제)." if sid else ""
 
 
 @app.post("/api/jobs")
@@ -237,9 +268,10 @@ def create_job(request: Request, file: UploadFile = File(...)) -> JSONResponse:
     try:
         info = analyze(str(job.pdf))
     except Exception as e:
+        sid = _keep(job.user, "upload", [job], "error", error=traceback.format_exc())
         shutil.rmtree(jdir, ignore_errors=True)
-        USAGE.add("error", job.user, status="unreadable", where="upload", error=type(e).__name__)
-        raise HTTPException(422, f"PDF를 읽을 수 없습니다: {type(e).__name__}")
+        USAGE.add("error", job.user, status="unreadable", where="upload", error=type(e).__name__, **_kept(sid))
+        raise HTTPException(422, f"PDF를 읽을 수 없습니다: {type(e).__name__}." + _kept_note(sid))
     tl = info["text_layer"]
     if tl["pages"] > MAX_PAGES:
         shutil.rmtree(jdir, ignore_errors=True)
@@ -337,25 +369,35 @@ async def convert_job(job_id: str, request: Request) -> dict:
 
     user = _user(request)
     t0 = time.time()
+    kept: dict = {}  # 오류가 나도 보관 id 를 바깥에서 알 수 있게
 
-    def work() -> dict:
+    def work() -> tuple[dict, Optional[str]]:
         with CONVERT_LOCK, job.lock:
             out = job.dir / "out"
             shutil.rmtree(out, ignore_errors=True)
             out.mkdir()
             name = Path(job.filename).stem + ".hwpx"
-            res = convert(str(job.pdf), hwpx_path=str(out / name), write_json=False, style=style)
+            try:
+                res = convert(str(job.pdf), hwpx_path=str(out / name), write_json=False, style=style)
+            except Exception:
+                kept["sid"] = _keep(user, "convert", [job], "error", style=style, error=traceback.format_exc())
+                raise
             _finish(job, out / name)
-            return res
+            sid = None
+            if res["validation"]["status"] == "FAIL":
+                sid = _keep(user, "convert", [job], "FAIL", res=res, result=job.hwpx, style=style)
+            return res, sid
 
     try:
-        res = await run_in_threadpool(work)
+        res, sid = await run_in_threadpool(work)
     except Exception as e:
-        USAGE.add("error", user, files=1, pages=job.pages, where="convert", error=type(e).__name__)
-        raise HTTPException(500, f"변환 중 오류가 발생했습니다: {type(e).__name__}")
-    out = _result(job, res)
+        sid = kept.get("sid")
+        USAGE.add("error", user, files=1, pages=job.pages, where="convert", error=type(e).__name__, **_kept(sid))
+        raise HTTPException(500, f"변환 중 오류가 발생했습니다: {type(e).__name__}." + _kept_note(sid))
+    out = dict(_result(job, res), kept=bool(sid), kept_days=SAMPLES.keep_days)
     USAGE.add("convert", user, files=1, pages=job.pages, questions=out["summary"].get("questions"),
-              status=out["status"], seconds=time.time() - t0, **_style_detail(style), **_causes_detail(out))
+              status=out["status"], seconds=time.time() - t0, **_style_detail(style), **_causes_detail(out),
+              **_kept(sid))
     return out
 
 
@@ -417,29 +459,38 @@ async def merge_jobs(request: Request) -> dict:
     bundle = _new_bundle(f"{stem} 외 {len(jobs) - 1}개 통합.hwpx", jobs)
     user = _user(request)
     t0 = time.time()
+    kept: dict = {}
     from starlette.concurrency import run_in_threadpool
 
-    def work() -> dict:
+    def work() -> tuple[dict, Optional[str]]:
         with CONVERT_LOCK:
             path = bundle.dir / bundle.filename
-            res = convert_many([str(j.pdf) for j in jobs], str(path), style=style,
-                               names=[j.filename for j in jobs])
+            try:
+                res = convert_many([str(j.pdf) for j in jobs], str(path), style=style,
+                                   names=[j.filename for j in jobs])
+            except Exception:
+                kept["sid"] = _keep(user, "merge", jobs, "error", style=style, error=traceback.format_exc())
+                raise
             _finish(bundle, path)
-            return res
+            sid = None
+            if res["validation"]["status"] == "FAIL":
+                sid = _keep(user, "merge", jobs, "FAIL", res=res, result=path, style=style)
+            return res, sid
 
     try:
-        res = await run_in_threadpool(work)
+        res, sid = await run_in_threadpool(work)
     except Exception as e:
+        sid = kept.get("sid")
         shutil.rmtree(bundle.dir, ignore_errors=True)
         USAGE.add("error", user, files=len(jobs), pages=sum(j.pages for j in jobs), where="merge",
-                  error=type(e).__name__)
-        raise HTTPException(500, f"통합 중 오류가 발생했습니다: {type(e).__name__}")
+                  error=type(e).__name__, **_kept(sid))
+        raise HTTPException(500, f"통합 중 오류가 발생했습니다: {type(e).__name__}." + _kept_note(sid))
     with JOBS_LOCK:
         JOBS[bundle.id] = bundle
-    out = dict(_result(bundle, res), files=len(jobs))
+    out = dict(_result(bundle, res), files=len(jobs), kept=bool(sid), kept_days=SAMPLES.keep_days)
     USAGE.add("merge", user, files=len(jobs), pages=sum(j.pages for j in jobs),
               questions=out["summary"].get("questions"), status=out["status"], seconds=time.time() - t0,
-              **_style_detail(style), **_causes_detail(out))
+              **_style_detail(style), **_causes_detail(out), **_kept(sid))
     return out
 
 
@@ -526,6 +577,33 @@ def admin_usage_csv(user: str = "") -> PlainTextResponse:
     return PlainTextResponse("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": "attachment; filename=\"usage.csv\"; "
                                                             "filename*=UTF-8''%EC%9D%B4%EC%9A%A9%EA%B8%B0%EB%A1%9D.csv"})
+
+
+# ------------------------------------------------- 관리자: 문제 생긴 파일(samples.py) --
+@app.get("/api/admin/samples")
+def admin_samples() -> dict:
+    return {"enabled": SAMPLES.enabled, "keep_days": SAMPLES.keep_days, "max_count": SAMPLES.max_count,
+            "items": SAMPLES.list()}
+
+
+@app.get("/api/admin/samples/{sid}/download")
+def admin_sample_download(sid: str) -> FileResponse:
+    fd, tmp = tempfile.mkstemp(suffix=".zip")
+    os.close(fd)
+    name = SAMPLES.zip(sid, Path(tmp))
+    if name is None:
+        os.unlink(tmp)
+        raise HTTPException(404, "보관된 파일이 없습니다(기간이 지나 지워졌을 수 있어요).")
+    disp = f"attachment; filename=\"sample.zip\"; filename*=UTF-8''{quote(name)}"
+    return FileResponse(tmp, media_type="application/zip", headers={"Content-Disposition": disp},
+                        background=BackgroundTask(os.unlink, tmp))
+
+
+@app.delete("/api/admin/samples/{sid}")
+def admin_sample_delete(sid: str) -> dict:
+    if not SAMPLES.delete(sid):
+        raise HTTPException(404, "보관된 파일이 없습니다.")
+    return {"ok": True}
 
 
 app.mount("/", StaticFiles(directory=str(Path(__file__).parent / "static"), html=True), name="static")

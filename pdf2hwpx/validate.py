@@ -24,8 +24,9 @@ NS = {
 NGRAM = 6
 
 
-def _compact(s: str) -> str:
-    return re.sub(r"[\s\uF8F0]+", "", s)  # 빈칸 네모 표시는 HWPX에서 글자가 아니라 네모(표)로 나간다
+def _compact(s: str, numbers: bool = True) -> str:
+    s = re.sub(r"[\s\uF8F0]+", "", s)  # 빈칸 네모 표시는 HWPX에서 글자가 아니라 네모(표)로 나간다
+    return s if numbers else re.sub(r"\d+", "#", s)  # 통합본은 문제·정답 번호를 다시 매기므로 숫자는 비교하지 않는다
 
 
 def _shingles(s: str, n: int = NGRAM) -> set[str]:
@@ -204,17 +205,18 @@ def validate(ex: "Extraction | list[Extraction]", doc: Document, hwpx_path: str)
     # ---- 텍스트 커버리지 ----
     skip = {id(l) for l in doc.image_only_lines}
     src_lines = [l for l in _source_lines(ex) if id(l) not in skip]
-    out_text = _compact("".join(p["text"] for p in paras))
+    keep_numbers = not doc.stats.get("merged_files")
+    out_text = _compact("".join(p["text"] for p in paras), keep_numbers)
     out_sh = _shingles(out_text)
     # 줄 단위 n-gram: 읽기 순서가 바뀌거나 그림으로 대체된 줄이 있어도 경계 n-gram이 왜곡되지 않게
     src_sh: set[str] = set()
     for l in src_lines:
-        src_sh |= _shingles(_compact(l.text))
+        src_sh |= _shingles(_compact(l.text, keep_numbers))
     coverage = len(src_sh & out_sh) / max(1, len(src_sh))
     precision = len(src_sh & out_sh) / max(1, len(out_sh))
     missing = []
     for l in src_lines:
-        c = _compact(l.text)
+        c = _compact(l.text, keep_numbers)
         sh = _shingles(c)
         if len(c) >= NGRAM and sh and len(sh & out_sh) / len(sh) < 0.5:
             missing.append(f"p{l.page}: {l.text[:40]}")
@@ -235,7 +237,8 @@ def validate(ex: "Extraction | list[Extraction]", doc: Document, hwpx_path: str)
     checks["question_count"] = len(qs)
     checks["objective"] = sum(1 for q in qs if q.qtype == "objective")
     checks["subjective"] = len(qs) - checks["objective"]
-    seq_ok = [q.number for q in qs] == list(range(1, len(qs) + 1))
+    first = qs[0].number if qs else 1  # 문제집 일부는 13번 등에서 시작한다
+    seq_ok = [q.number for q in qs] == list(range(first, first + len(qs)))
     sec0 = [p for p in paras if p["section"].endswith("section0.xml") and not p.get("note")]
     k = 0
     for p in sec0:

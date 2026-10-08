@@ -60,25 +60,28 @@ def merge_documents(docs: list[Document], names: list[str] | None = None) -> Doc
     off = 0
     pid_off = 0
     for d, name in zip(docs, names):
+        # 문제집 일부(13번부터 등)도 앞 파일 바로 다음 번호부터 이어지게: 이 파일의 첫 번호를 off+1 로
+        nums = [it.number for it in d.items if isinstance(it, Question)] or [a.number for a in d.answers] or [1]
+        shift = off - (min(nums) - 1)
         last = 0
         max_pid = 0
         for it in d.items:
             if isinstance(it, Question):
-                it.number += off
+                it.number += shift
                 last = max(last, it.number)
-                _shift_para(it.stem, STEM_NO_RE, off)
+                _shift_para(it.stem, STEM_NO_RE, shift)
                 if it.passage_id is not None:
                     it.passage_id += pid_off
             elif isinstance(it, Passage):
                 max_pid = max(max_pid, it.id)
                 it.id += pid_off
-                it.question_numbers = [n + off for n in it.question_numbers]
-                _shift_para(it.guide, RANGE_RE, off)
+                it.question_numbers = [n + shift for n in it.question_numbers]
+                _shift_para(it.guide, RANGE_RE, shift)
             out.items.append(it)
         for a in d.answers:
-            a.number += off
+            a.number += shift
             last = max(last, a.number)
-            _shift_para(a.head, ANSWER_NO_RE, off)
+            _shift_para(a.head, ANSWER_NO_RE, shift)
             out.answers.append(a)
         out.warnings.extend(f"{name}: {w}" for w in d.warnings)
         out.image_only_lines.extend(d.image_only_lines)

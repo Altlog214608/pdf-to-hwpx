@@ -167,8 +167,9 @@ DIALOG = "“그날 밤에 무슨 일이 있었습니까?” 하고 물었다."
 POEM = ["바람이 불어오는 언덕에서", "나는 오래 너를 기다렸다", None, "해가 지고 별이 뜨면", "그리움도 잠이 든다"]
 
 
-def build(path: str, answer_style: str = "bracket") -> dict:
-    """answer_style: 'bracket' = '1) [정답] ③ / [해설] …', 'plain' = '1) 정답 ③ / 오답 point / …'(최다오답·최상위 공략형)"""
+def build(path: str, answer_style: str = "bracket", start: int = 1) -> dict:
+    """answer_style: 'bracket' = '1) [정답] ③ / [해설] …', 'plain' = '1) 정답 ③ / 오답 point / …'(최다오답·최상위 공략형)
+    start: 첫 문제 번호(단원 중간부터 시작하는 문제집 일부, 예: 13번부터)"""
     w = Writer()
     # ---------- 지문 1: (가) 산문 + (나) 시, 단을 넘어가는 박스 ----------
     w.text(w.left, w.y, "※ 다음 글을 읽고 물음에 답하시오.", 7.9)
@@ -204,6 +205,7 @@ def build(path: str, answer_style: str = "bracket") -> dict:
         if with_badge:  # 문제 위의 '빈출' 배지(장식 그림)
             w.page.insert_image(fitz.Rect(w.right - 37, w.y - 2, w.right, w.y + 18), stream=badge, keep_proportion=False)
             w.y += 20
+        n = n + start - 1
         w.text(w.left, w.y + 14, f"{n}.", 13.7)
         w.text(w.left + (24 if n < 10 else 30), w.y + 13, stem)
         w.y += 24
@@ -309,7 +311,7 @@ def build(path: str, answer_style: str = "bracket") -> dict:
 
     # ---------- 정답 및 해설 ----------
     w.new_page()
-    for n, ans in enumerate(["③", "⑤", "①", "주제는 그리움이다.", "①"], start=1):
+    for n, ans in enumerate(["③", "⑤", "①", "주제는 그리움이다.", "①"], start=start):
         head = f"{n}) [정답] " if answer_style == "bracket" else f"{n}) 정답 "
         w.text(w.left + 10, w.y + 9, head)
         if ans in ICONS:
