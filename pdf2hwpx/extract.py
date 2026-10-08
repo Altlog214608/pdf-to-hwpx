@@ -151,10 +151,62 @@ def _page_fragments(page: fitz.Page) -> list[_Frag]:
     return frags
 
 
+# 출판사가 첫 쪽 등에 넣는 법정 고지문: "◇「콘텐츠산업 진흥법 시행령」제33조에 의한 표시 / 제작연월일 / …저작권법에 의하여…"
+NOTICE_RE = re.compile(r"콘텐츠\s*산업\s*진흥법|제작\s*연월일|저작권법에\s*의(?:하여|해|한)")
+
+
+def _table_lines(t) -> list:
+    return [x for cl in t.cells for x in cl.items if isinstance(x, Line)]
+
+
+def _notice_items(lines: list, imgs: list, boxes: list, tables: list) -> set[int]:
+    """고지문 줄에서 시작해 위아래·옆으로 맞붙은 줄과 그림(© 마크)까지 넓힌 덩어리의 id.
+    지문·표 안에 법 이름이 나오는 경우처럼 덩어리가 본문 박스나 표의 일부에만 걸치거나, 고지문이라기엔
+    너무 길면 아무것도 빼지 않는다."""
+    seeds = [ln for ln in lines if NOTICE_RE.search(ln.text)]
+    if not seeds:
+        return set()
+
+    def near(a, b) -> bool:
+        h = max(4.0, min(a.y1 - a.y0, b.y1 - b.y0))
+        xo = min(a.x1, b.x1) - max(a.x0, b.x0)  # 가로로 겹친 길이(음수면 떨어진 거리)
+        yo = min(a.y1, b.y1) - max(a.y0, b.y0)
+        return (xo > 0 and -yo <= 0.9 * h) or (yo > 0.5 * h and -xo <= 20)
+
+    pool = list(lines) + list(imgs)
+    group = list(seeds)
+    ids = {id(x) for x in group}
+    grown = True
+    while grown:
+        grown = False
+        for x in pool:
+            if id(x) not in ids and any(near(x, g) for g in group):
+                ids.add(id(x))
+                group.append(x)
+                grown = True
+    if sum(1 for x in group if isinstance(x, Line)) > 15:
+        return set()
+    for items in [b.items for b in boxes] + [_table_lines(t) for t in tables]:
+        inside = sum(1 for x in items if id(x) in ids)
+        if 0 < inside < len(items):
+            return set()
+    return ids
+
+
+def _invisible(d: dict) -> bool:
+    """선(stroke)이 없고 칠한 색이 흰색이거나 거의 투명한 그림 명령: 화면에 보이지 않는다."""
+    if d.get("type") != "f":
+        return False
+    fill = d.get("fill")
+    return not fill or min(float(v) for v in fill[:3]) > 0.97 or d.get("fill_opacity", 1.0) < 0.2
+
+
 def _page_segments(page: fitz.Page) -> tuple[list[_Seg], int]:
     segs: list[_Seg] = []
     others = []
     for d in page.get_drawings():
+        if _invisible(d):  # 선 없이 흰색으로만 칠한 사각형(한글이 문단 배경으로 내보냄)은 보이지 않으므로 테두리가 아니다
+            continue
         w = float(d.get("width") or 0.0)
         for it in d.get("items", []):
             op = it[0]
@@ -774,6 +826,15 @@ def extract(pdf_path: str) -> Extraction:
                     n += 4
             b.inner_drawings = n
             b.items.sort(key=lambda it: (it.y0, it.x0))
+
+        # ---- 출판사 저작권·콘텐츠 보호 고지문(© 마크 포함)은 문제 내용이 아니다 ----
+        drop = _notice_items(lines, content_imgs, boxes, tables)
+        if drop:
+            stats["dropped_notice_lines"] += sum(1 for ln in lines if id(ln) in drop)
+            lines = [ln for ln in lines if id(ln) not in drop]
+            content_imgs = [im for im in content_imgs if id(im) not in drop]
+            boxes = [b for b in boxes if not (b.items and all(id(x) in drop for x in b.items))]
+            tables = [t for t in tables if not _table_lines(t) or not all(id(x) in drop for x in _table_lines(t))]
 
         # ---- 단 경계 ----
         def _col_bounds(col: int) -> tuple[float, float]:

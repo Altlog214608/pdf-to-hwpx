@@ -44,6 +44,7 @@ class Writer:
         self.page = None
         self.col = 0
         self.y = TOP
+        self.first_page_pad = 0.0  # 첫 쪽 맨 위를 차지한 고지문 높이(두 단 모두 그 아래부터)
         self.new_page()
 
     def new_page(self):
@@ -58,7 +59,7 @@ class Writer:
 
     def next_col(self):
         if self.col == 0:
-            self.col, self.y = 1, TOP + 10
+            self.col, self.y = 1, TOP + 10 + (self.first_page_pad if self.doc.page_count == 1 else 0)
         else:
             self.new_page()
 
@@ -167,10 +168,36 @@ DIALOG = "“그날 밤에 무슨 일이 있었습니까?” 하고 물었다."
 POEM = ["바람이 불어오는 언덕에서", "나는 오래 너를 기다렸다", None, "해가 지고 별이 뜨면", "그리움도 잠이 든다"]
 
 
-def build(path: str, answer_style: str = "bracket", start: int = 1) -> dict:
+NOTICE_LEFT = ["◇「콘텐츠산업 진흥법 시행령」제33조에 의한 표시", "1) 제작연월일 : 2024-12-31", "2) 제작자 : 합성출판㈜",
+               "3) 이 콘텐츠는 「콘텐츠산업 진흥법」에 따라", "최초 제작일부터 5년간 보호됩니다."]
+NOTICE_RIGHT = ["◇「콘텐츠산업 진흥법」외에도「저작권법」에 의하여 보호되", "는 콘텐츠의 경우, 그 콘텐츠의 전부 또는 일부를 무단으",
+                "로 복제하거나 전송하는 것은 법적 책임을 질 수 있습니다."]
+
+
+def _notice(w: "Writer") -> None:
+    """첫 쪽 맨 위 출판사 고지문: 왼쪽 © 마크(박스 안 그림) + 법정 표시 5줄, 오른쪽 박스 안 경고문 3줄."""
+    y = w.y
+    mark = _picture_png(40, 40, (0.3, 0.3, 0.3))
+    w.page.draw_rect(fitz.Rect(57, y, 100, y + 56), width=0.5)
+    w.page.insert_image(fitz.Rect(62, y + 6, 95, y + 50), stream=mark, keep_proportion=False)
+    for k, t in enumerate(NOTICE_LEFT):
+        w.text(104, y + 10 + 11 * k, t, 6.6)
+    w.page.draw_rect(fitz.Rect(330, y, 537, y + 56), width=0.5)
+    for k, t in enumerate(NOTICE_RIGHT):
+        w.text(335, y + 14 + 12 * k, t, 6.6)
+    w.first_page_pad = 76.0
+    w.y += 76.0
+
+
+def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tuple[int, ...] = (),
+          notice: bool = False) -> dict:
     """answer_style: 'bracket' = '1) [정답] ③ / [해설] …', 'plain' = '1) 정답 ③ / 오답 point / …'(최다오답·최상위 공략형)
-    start: 첫 문제 번호(단원 중간부터 시작하는 문제집 일부, 예: 13번부터)"""
+    start: 첫 문제 번호(단원 중간부터 시작하는 문제집 일부, 예: 13번부터)
+    white_bg: 발문 줄 뒤에 선 없는 흰 사각형(한글이 내보내는 문단 배경, 보이지 않음)이 깔린 문제(몇 번째, 1부터)
+    notice: 첫 쪽 맨 위에 출판사 저작권·콘텐츠 보호 고지문(© 마크 포함)"""
     w = Writer()
+    if notice:
+        _notice(w)
     # ---------- 지문 1: (가) 산문 + (나) 시, 단을 넘어가는 박스 ----------
     w.text(w.left, w.y, "※ 다음 글을 읽고 물음에 답하시오.", 7.9)
     w.y += 10
@@ -205,6 +232,9 @@ def build(path: str, answer_style: str = "bracket", start: int = 1) -> dict:
         if with_badge:  # 문제 위의 '빈출' 배지(장식 그림)
             w.page.insert_image(fitz.Rect(w.right - 37, w.y - 2, w.right, w.y + 18), stream=badge, keep_proportion=False)
             w.y += 20
+        if n in white_bg:  # 실사용 PDF: 발문 두 줄 뒤에 흰색으로만 칠한 사각형(글자보다 먼저 그림)
+            w.page.draw_rect(fitz.Rect(w.left, w.y - 1, w.right, w.y + 10), color=None, fill=(1, 1, 1))
+            w.page.draw_rect(fitz.Rect(w.left, w.y + 10, w.right, w.y + 20), color=None, fill=(1, 1, 1))
         n = n + start - 1
         w.text(w.left, w.y + 14, f"{n}.", 13.7)
         w.text(w.left + (24 if n < 10 else 30), w.y + 13, stem)

@@ -49,6 +49,7 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
    - 미리보기의 학원 칸·제목 칸을 누르면 해당 입력칸으로 이동.
    - 제목 후보는 PDF 머리글에서 찾아 칩으로 보여 줌(`[중간 대비]` 같은 앞머리는 유지).
    - 본문 글꼴 7종, 크기 8~13pt(0.5 단위). 마지막 설정은 브라우저에 기억.
+   - 학원 이름은 앞부분(예: 김한춘)과 작은 글씨 뒷부분(예: 국어전문학원)의 글자 크기를 따로, 제목 글자 크기도 따로 정함.
    - 제목 글자 색(견본 5색 + 직접 고르기), 정답·해설 방식(문서 끝에 모으기 / 문제와 미주로 연결).
    - 문제 번호를 한글 자동 번호(문단 번호)로 넣기(기본 켬): 한글에서 문제를 더 쓰거나 다른 파일을 붙여 넣으면 번호가 이어짐.
    - 오른쪽 위 버튼으로 밝은/어두운 화면 전환.
@@ -95,7 +96,7 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 | POST | `/api/jobs` (multipart `file`) | 업로드 + 분석: `text_layer`, `title_candidates`, `sample`, `stats` |
 | GET | `/api/jobs/{id}/page1.png` | 원본 1쪽 그림 |
 | POST/DELETE | `/api/jobs/{id}/logo` | 로고 그림(PNG/JPG, 2MB) |
-| POST | `/api/jobs/{id}/convert` (JSON) | `body_font, title_font, body_size, academy_name, use_logo, title, title_color, frame, answers_as_endnotes, auto_number, logo_job`(다른 작업의 로고 빌려 쓰기) |
+| POST | `/api/jobs/{id}/convert` (JSON) | `body_font, title_font, body_size, academy_name, academy_sub, academy_size, academy_sub_size, use_logo, title, title_size, title_color, frame, answers_as_endnotes, auto_number, logo_job`(다른 작업의 로고 빌려 쓰기) |
 | POST | `/api/bundles/merge` (JSON `jobs, options`) | 여러 작업을 이어 통합본 하나(번호 이어서). 응답은 convert와 같은 모양 + `id`(묶음 작업) |
 | POST | `/api/bundles/zip` (JSON `jobs`) | 변환을 마친 작업들의 HWPX를 ZIP 하나로 |
 | GET | `/api/jobs/{id}/download/{token}` | HWPX (만료 시 410) |

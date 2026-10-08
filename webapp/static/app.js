@@ -16,6 +16,7 @@
     "나눔고딕": '"Nanum Gothic","나눔고딕",sans-serif',
   };
   const PAGE_W = 59528, VIEW_H = 52000;
+  const PT_SIZES = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 22, 24];  // 머리 부분 글자 크기 선택지
   const MASTER = { left: 4251, right: 4251, bodyTop: 4251 + 4251, tableW: 54599, tableTop: (84186 - 75791) / 2, headH: 2782 };
   const PLAIN = { left: 2268, right: 2268, bodyTop: 2268 + 1134 };
   const PREF_KEY = "pdf2hwpx:prefs";
@@ -79,6 +80,8 @@
     try {
       localStorage.setItem(PREF_KEY, JSON.stringify({
         academy: $("#in-academy").value, academyMode: state.academyMode === "logo" ? "text" : state.academyMode,
+        academySub: $("#in-academy-sub").value, academySize: $("#in-academy-size").value,
+        academySubSize: $("#in-academy-sub-size").value, titleSize: $("#in-title-size").value,
         font: $("#in-font").value, titleFont: $("#in-title-font").value, size: $("#in-size").value,
         frame: $("#in-frame").checked, titleColor: state.titleColor, answerMode: state.answerMode,
         autoNum: $("#in-autonum").checked,
@@ -384,12 +387,20 @@
     for (const sel of [$("#in-font"), $("#in-title-font")]) {
       sel.innerHTML = fonts.map((f) => `<option value="${esc(f)}" style="font-family:${esc(FONT_STACK[f] || "inherit")}">${esc(f)}</option>`).join("");
     }
+    // 머리 부분 글자 크기(pt): 학원 이름 앞·뒤, 제목
+    for (const [sel, def, key] of [["#in-academy-size", 14, "academySize"], ["#in-academy-sub-size", 11, "academySubSize"], ["#in-title-size", 14, "titleSize"]]) {
+      const el = $(sel);
+      el.innerHTML = PT_SIZES.map((n) => `<option value="${n}">${n}pt</option>`).join("");
+      const saved = +loadPrefs()[key];
+      el.value = PT_SIZES.includes(saved) ? saved : def;
+    }
     const p = loadPrefs();
     $("#in-font").value = fonts.includes(p.font) ? p.font : "함초롬바탕";
     $("#in-title-font").value = fonts.includes(p.titleFont) ? p.titleFont : "함초롬돋움";
     if (p.size) $("#in-size").value = p.size;
     if (typeof p.frame === "boolean") $("#in-frame").checked = p.frame;
     if (p.academy) $("#in-academy").value = p.academy;
+    if (p.academySub) $("#in-academy-sub").value = p.academySub;
     setTitleColor(/^#[0-9a-fA-F]{6}$/.test(p.titleColor || "") ? p.titleColor : "#000000", false);
     setAnswerMode(p.answerMode === "endnote" ? "endnote" : "end", false);
     setAcademyMode(p.academyMode || "text", false);
@@ -435,7 +446,8 @@
   $$("[data-answer-mode]").forEach((b) => b.addEventListener("click", () => setAnswerMode(b.dataset.answerMode)));
 
   $("#in-title").addEventListener("input", () => setTitle($("#in-title").value));
-  ["#in-academy", "#in-title", "#in-font", "#in-title-font", "#in-size", "#in-frame", "#in-autonum"].forEach((sel) => {
+  ["#in-academy", "#in-academy-sub", "#in-academy-size", "#in-academy-sub-size", "#in-title-size",
+    "#in-title", "#in-font", "#in-title-font", "#in-size", "#in-frame", "#in-autonum"].forEach((sel) => {
     $(sel).addEventListener("input", onSettingsChange);
     $(sel).addEventListener("change", onSettingsChange);
   });
@@ -487,6 +499,10 @@
       title_font: $("#in-title-font").value,
       body_size: +$("#in-size").value,
       academy_name: mode === "text" ? $("#in-academy").value.trim() : "",
+      academy_sub: mode === "text" ? $("#in-academy-sub").value.trim() : "",
+      academy_size: +$("#in-academy-size").value || 14,
+      academy_sub_size: +$("#in-academy-sub-size").value || 11,
+      title_size: +$("#in-title-size").value || 14,
       use_logo: mode === "logo" && !!state.logoURL,
       title: $("#in-title").value.trim(),
       auto_number: $("#in-autonum").checked,
@@ -519,11 +535,11 @@
     const u = pw / PAGE_W;
     paper.style.setProperty("--pw", `${pw}px`);
     const o = currentOptions();
-    const hasAcademy = (o.academy_name || o.use_logo);
+    const hasAcademy = (o.academy_name || o.academy_sub || o.use_logo);
     const hasHead = hasAcademy || !!o.title;
     const useMaster = hasHead || o.frame;
     const g = useMaster ? MASTER : PLAIN;
-    const titlePx = 14 * 100 * u;
+    const pt = (n) => n * 100 * u;  // pt -> 미리보기 px
 
     // 바탕쪽: 머리 칸 + 바깥 테두리
     const head = $("#mp-head"), frame = $("#mp-frame");
@@ -539,9 +555,14 @@
         aw = Math.max(6000, Math.min(20000, (MASTER.headH - 600) * state.logoSize[0] / state.logoSize[1] + 900));
         ac.innerHTML = `<img src="${state.logoURL}" alt="학원 로고">`;
         ac.classList.remove("is-empty");
-      } else if (o.academy_name) {
-        aw = Math.max(6000, Math.min(20000, o.academy_name.length * 14 * 100 * 0.98 + 1600));
-        ac.textContent = o.academy_name;
+      } else if (o.academy_name || o.academy_sub) {  // masterpage.academy_cell_width 와 같은 계산
+        const text = o.academy_name.length * o.academy_size
+          + (o.academy_sub ? (o.academy_sub.length + (o.academy_name ? 0.5 : 0)) * o.academy_sub_size : 0);
+        aw = Math.max(6000, Math.min(20000, text * 100 * 0.98 + 1600));
+        // 칸(button)이 flex라 글자 조각 사이 공백이 사라지지 않게 한 span 안에 넣는다
+        ac.innerHTML = "<span>" + (o.academy_name ? `<span style="font-size:${pt(o.academy_size)}px">${esc(o.academy_name)}</span>` : "")
+          + (o.academy_name && o.academy_sub ? " " : "")
+          + (o.academy_sub ? `<span style="font-size:${pt(o.academy_sub_size)}px">${esc(o.academy_sub)}</span>` : "") + "</span>";
         ac.classList.remove("is-empty");
       } else {
         aw = 12000;
@@ -552,11 +573,11 @@
     ac.hidden = state.academyMode === "none";
     if (!hasHead && state.academyMode !== "none") head.hidden = false; // 비어 있어도 눌러서 입력할 수 있게 표시
     ac.style.width = `${aw * u}px`;
-    ac.style.fontSize = `${titlePx}px`;
+    ac.style.fontSize = `${pt(o.academy_size)}px`;
     ac.style.fontFamily = FONT_STACK[o.title_font] || "inherit";
     ti.textContent = o.title || "시험 제목 입력";
     ti.classList.toggle("is-empty", !o.title);
-    ti.style.fontSize = `${titlePx}px`;
+    ti.style.fontSize = `${pt(o.title_size)}px`;
     ti.style.color = o.title ? o.title_color : "";
     ti.style.fontFamily = FONT_STACK[o.title_font] || "inherit";
     ti.style.borderLeftWidth = state.academyMode === "none" ? "0" : "";
