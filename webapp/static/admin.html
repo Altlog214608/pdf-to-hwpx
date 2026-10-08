@@ -40,6 +40,7 @@
     table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
     th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12.5px; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
     td { padding: 9px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    td.muted:last-child { white-space: normal; min-width: 200px; }
     td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
     tr:last-child td { border-bottom: 0; }
     .tag { display: inline-block; padding: 2px 8px; border-radius: 7px; background: var(--surface-2); font-size: 12px; font-weight: 600; }
@@ -128,6 +129,7 @@
       if (d.endnotes != null) out.push(d.endnotes ? "정답 미주" : "정답 끝에");
       if (d.auto_number === false) out.push("번호 글자");
       if (d.where) out.push(`${d.where}: ${d.error || ""}`);
+      if (d.causes && d.causes.length) out.push(`원인: ${d.causes.join(" / ")}`);
       return out.join(" · ");
     }
 
