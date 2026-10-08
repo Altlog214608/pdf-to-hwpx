@@ -686,6 +686,14 @@
   }
   const statusText = (s) => (s === "PASS" ? "구조 검사 통과" : s === "WARN" ? "확인이 필요한 부분이 있어요" : "일부 문제가 있어요");
 
+  // 자동 번호·미주를 일부만 적용했거나 원문과 다른 점이 있으면 이유를 결과 칸에 보여 준다
+  function showWarnings(list) {
+    const ul = $("#result-warn");
+    const items = (list || []).filter(Boolean).slice(0, 6);
+    ul.innerHTML = items.map((w) => `<li>${esc(w)}</li>`).join("");
+    ul.hidden = !items.length;
+  }
+
   function revealResult(r, label) {
     state.converted = true;
     state.downloaded = false;
@@ -709,6 +717,7 @@
     $("#result-meta").textContent = `${(r.size / 1024).toFixed(0)}KB · ${merged ? `${r.files}개 통합 · ` : ""}${statusText(r.status)}`;
     $("#result-summary").innerHTML = summaryHTML(r.summary || {});
     $("#result-files").hidden = true;
+    showWarnings(r.warnings);
     revealResult(r, merged ? "통합본 내려받기" : "한글 파일 내려받기");
   }
 
@@ -725,6 +734,7 @@
       return `<li><span>${esc(r.filename)}</span><small>${statusText(r.status)}</small><a href="${r.download_url}" download="${esc(r.filename)}">받기</a></li>`;
     }).join("");
     ul.hidden = false;
+    showWarnings(done.flatMap((f) => (f.result.warnings || []).map((w) => `${f.job.filename}: ${w}`)));
     revealResult(z, "ZIP으로 한 번에 내려받기");
   }
   $("#btn-download").addEventListener("click", () => { state.downloaded = true; });

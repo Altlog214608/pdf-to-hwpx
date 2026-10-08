@@ -122,7 +122,7 @@ def test_doc_style_masterpage(tmp_path):
     pg = d.new_page(width=120, height=24)
     pg.draw_rect(pg.rect, color=(0, 0, 0), fill=(0, 0, 0))
     logo = pg.get_pixmap().tobytes("png")
-    for logo_bytes, name in ((None, "한빛국어학원"), (logo, "")):
+    for logo_bytes, name in ((None, "김한춘국어전문학원"), (logo, "")):
         st = DocStyle(body_font="나눔명조", body_size=11, title="[중간 대비] 합성 시험", academy_name=name,
                       logo=logo_bytes, frame=True)
         res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=st)
@@ -168,16 +168,6 @@ def test_answers_as_endnotes_and_title_color(tmp_path):
     assert '<hp:autoNum num="1" numType="ENDNOTE">' in first and "③" in text and not text.lstrip().startswith("1)")
     assert "[정답 및 해설]" not in sec0
 
-    # 문제 번호가 연속이 아니면(미주 자동 번호와 어긋남) 문서 끝 정답으로 되돌리고 알린다
-    from pdf2hwpx.hwpx_writer import HwpxWriter
-    from pdf2hwpx.model import Question
-    from pdf2hwpx.extract import extract
-    from pdf2hwpx.ir import build_document
-    doc = build_document(extract(str(pdf)))
-    qs = [it for it in doc.items if isinstance(it, Question)]
-    qs[-1].number = 9
-    w = HwpxWriter(doc, style=DocStyle(answers_as_endnotes=True))
-    assert w.endnotes is None and any("미주" in x for x in doc.warnings)
 
 
 def test_tables_and_brackets(tmp_path):
@@ -278,15 +268,50 @@ def test_auto_number_paragraphs(result, tmp_path):
     assert result["validation"]["checks"]["question_order_status"] == "PASS"
     assert result["writer"]["auto_numbers"] == 5
 
-    # 끄면 예전처럼 글자, 번호가 연속이 아니면 글자로 되돌리고 알린다
+    # 끄면 예전처럼 글자
     pdf = tmp_path / "s.pdf"
     build(str(pdf))
     res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=DocStyle(auto_number=False))
     assert res["validation"]["status"] == "PASS" and "auto_numbers" not in res["writer"]
+
+
+def test_numbering_and_endnotes_survive_gaps(tmp_path):
+    """번호가 건너뛰거나(못 찾은 문제) 정답이 빠져도 자동 번호·미주를 끄지 않는다:
+    건너뛴 곳부터 새 번호 모양(시작 번호), 미주는 '새 번호로 시작'으로 문제 번호에 맞추고, 짝 없는 정답은 문서 끝으로."""
+    import zipfile
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.hwpx_writer import HwpxWriter
+    from pdf2hwpx.ir import build_document
+    from pdf2hwpx.model import Question
+    from pdf2hwpx.style import DocStyle
+
+    pdf = tmp_path / "s.pdf"
+    build(str(pdf))
     doc = build_document(extract(str(pdf)))
-    [it for it in doc.items if isinstance(it, Question)][-1].number = 9
-    w = HwpxWriter(doc, style=DocStyle())
-    assert w.num_id is None and any("자동 번호" in x for x in doc.warnings)
+    qs = [it for it in doc.items if isinstance(it, Question)]
+    qs[-1].number = 9                                   # 1 2 3 4 9 (5번을 못 찾은 것처럼)
+    doc.answers = [a for a in doc.answers if a.number != 2]  # 2번 정답 없음, 5번 정답은 짝 없음
+    out = tmp_path / "gap.hwpx"
+    HwpxWriter(doc, style=DocStyle(answers_as_endnotes=True)).write(str(out))
+    with zipfile.ZipFile(out) as z:
+        header = z.read("Contents/header.xml").decode("utf-8")
+        sec0 = z.read("Contents/section0.xml").decode("utf-8")
+        names = z.namelist()
+    # 번호 모양 두 개: 1부터, 9부터
+    starts = re.findall(r'<hh:numbering id="\d+" start="0"><hh:paraHead start="(\d+)" level="1"', header)
+    assert starts == ["1", "1", "9"]  # 템플릿 기본 1개 + 문제용 2개
+    paras = [p["text"] for p in read_hwpx(str(out))["paragraphs"] if not p.get("note")]
+    assert [int(m.group(1)) for t in paras if (m := re.match(r"(\d+)\.(?!\s)", t))][:5] == [1, 2, 3, 4, 9]
+    # 미주: 1, 3, 4번에만. 3번 앞에 '새 번호로 시작'(미주 3)
+    assert re.findall(r'<hp:endNote number="(\d+)"', sec0) == ["1", "3", "4"]
+    assert re.findall(r'<hp:newNum num="(\d+)" numType="ENDNOTE"/>', sec0) == ["3"]
+    assert sec0.index('<hp:newNum num="3"') < sec0.index('<hp:endNote number="3"')
+    # 짝 없는 5번 정답은 문서 끝 [정답 및 해설]
+    assert "Contents/section1.xml" in names
+    sec1 = zipfile.ZipFile(out).read("Contents/section1.xml").decode("utf-8")
+    assert "[정답 및 해설]" in sec1 and "5)" in sec1
+    w = " ".join(doc.warnings)
+    assert "4→9" in w and "[2, 9]" in w and "짝이 없는 정답 1개" in w
 
 
 @pytest.mark.parametrize("endnotes", [False, True])
