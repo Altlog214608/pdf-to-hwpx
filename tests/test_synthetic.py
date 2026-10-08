@@ -361,3 +361,32 @@ def test_merge_rewrites_literal_numbers():
     assert ps[1].guide.text == "[4~5] 다음 글을 읽고" and ps[1].guide.runs[0].bold
     assert ps[1].question_numbers == [4, 5] and ps[1].id == 2
     assert [a.head.text for a in m.answers][3:] == ["4) [정답] ③", "5) [정답] ③"]
+
+
+def test_partial_workbook_starting_at_13(tmp_path):
+    """문제집 일부(13번부터, 정답도 '13) [정답]'부터)도 문제·정답을 찾는다. 전에는 1번을 기다리다 0개였다."""
+    import zipfile
+    from pdf2hwpx.convert import convert_many
+    from pdf2hwpx.style import DocStyle
+
+    pdf = tmp_path / "s13.pdf"
+    build(str(pdf), start=13)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=DocStyle(answers_as_endnotes=True))
+    v = res["validation"]
+    assert v["status"] == "PASS", v
+    assert [q["number"] for q in _items(res, "question")] == [13, 14, 15, 16, 17]
+    assert v["checks"]["answer_count"] == v["checks"]["endnotes"] == 5
+    with zipfile.ZipFile(res["hwpx"]) as z:
+        header = z.read("Contents/header.xml").decode("utf-8")
+        sec0 = z.read("Contents/section0.xml").decode("utf-8")
+    assert re.findall(r'<hh:numbering id="\d+" start="0"><hh:paraHead start="(\d+)"', header)[-1] == "13"
+    assert re.findall(r'<hp:endNote number="(\d+)"', sec0) == ["13", "14", "15", "16", "17"]
+
+    # 통합본: 13번부터인 파일도 앞 파일 바로 다음 번호로 이어진다(1~5 + 6~10)
+    a = tmp_path / "a.pdf"
+    build(str(a))
+    out = tmp_path / "m.hwpx"
+    r = convert_many([str(a), str(pdf)], str(out), style=DocStyle(answers_as_endnotes=True))
+    assert r["validation"]["status"] == "PASS", r["validation"]
+    stems = [int(m.group(1)) for p in read_hwpx(str(out))["paragraphs"] if (m := re.match(r"(\d+)\.(?!\s)", p["text"]))]
+    assert stems == list(range(1, 11))

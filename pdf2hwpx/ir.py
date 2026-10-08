@@ -407,34 +407,54 @@ def build_document(ex: Extraction) -> Document:
     flow = ex.flow
     body = ex.body_size
 
-    # 정답부 시작
+    # 정답부 시작: 정답 머리줄('13) [정답]') 중 가장 작은 번호가 처음 나오는 곳.
+    # 문제집 일부(단원 중간)를 잘라 온 PDF는 1번이 아니라 13번 등에서 시작한다.
+    ans_heads = [(i, int(m.group(1))) for i, it in enumerate(flow)
+                 if isinstance(it, Line) and (m := ANSWER_HEAD_RE.match(it.text))]
     answer_idx = len(flow)
-    for i, it in enumerate(flow):
-        if isinstance(it, Line) and ANSWER_HEAD_RE.match(it.text) and ANSWER_HEAD_RE.match(it.text).group(1) == "1":
-            answer_idx = i
-            break
+    first_answer_no = None
+    if ans_heads:
+        first_answer_no = min(n for _, n in ans_heads)
+        answer_idx = next(i for i, n in ans_heads if n == first_answer_no)
 
-    # 문제 머리줄
-    headers: list[int] = []
-    header_numbers: list[int] = []
-    skipped: list[int] = []
-    expected = 1
-    for i, it in enumerate(flow[:answer_idx]):
-        if not isinstance(it, Line):
-            continue
-        if _is_question_header(it, expected, body):
-            headers.append(i)
-            header_numbers.append(expected)
-            expected += 1
-            continue
-        # 복구: 번호 하나를 놓쳐도 이후 문제를 전부 잃지 않도록, 큰 글씨 번호가 1~2개 건너뛰어 나오면 따라간다
-        for jump in (1, 2):
-            if it.lead_size >= 1.15 * body and _is_question_header(it, expected + jump, body):
-                skipped.extend(range(expected, expected + jump))
+    def find_headers(start: int) -> tuple[list[int], list[int], list[int]]:
+        """start 번부터 차례로 문제 머리줄을 찾는다. (줄 위치, 번호, 건너뛴 번호)"""
+        headers: list[int] = []
+        numbers: list[int] = []
+        skipped: list[int] = []
+        expected = start
+        for i, it in enumerate(flow[:answer_idx]):
+            if not isinstance(it, Line):
+                continue
+            if _is_question_header(it, expected, body):
                 headers.append(i)
-                header_numbers.append(expected + jump)
-                expected += jump + 1
+                numbers.append(expected)
+                expected += 1
+                continue
+            # 복구: 번호 하나를 놓쳐도 이후 문제를 전부 잃지 않도록, 큰 글씨 번호가 1~2개 건너뛰어 나오면 따라간다
+            for jump in (1, 2):
+                if it.lead_size >= 1.15 * body and _is_question_header(it, expected + jump, body):
+                    skipped.extend(range(expected, expected + jump))
+                    headers.append(i)
+                    numbers.append(expected + jump)
+                    expected += jump + 1
+                    break
+        return headers, numbers, skipped
+
+    # 첫 문제 번호 후보: 정답부의 첫 번호, 1, 그리고 문제 머리 모양(큰 글씨/굵게, 박스 밖)인 첫 줄의 번호
+    starts: list[int] = ([first_answer_no] if first_answer_no else []) + [1]
+    for it in flow[:answer_idx]:
+        if isinstance(it, Line):
+            m = re.match(r"^\s*(\d{1,3})\s*\.\s*(?=\S)", it.text)
+            if m and _is_question_header(it, int(m.group(1)), body):
+                starts.append(int(m.group(1)))
                 break
+    best = None
+    for st in dict.fromkeys(starts):  # 순서 유지, 중복 제거
+        found = find_headers(st)
+        if best is None or len(found[0]) > len(best[0]):
+            best = found
+    headers, header_numbers, skipped = best
 
     # 원문자 아이콘 판별 후 치환
     labels = _label_icons(ex, headers, answer_idx)
