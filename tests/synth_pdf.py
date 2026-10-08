@@ -167,10 +167,10 @@ DIALOG = "“그날 밤에 무슨 일이 있었습니까?” 하고 물었다."
 POEM = ["바람이 불어오는 언덕에서", "나는 오래 너를 기다렸다", None, "해가 지고 별이 뜨면", "그리움도 잠이 든다"]
 
 
-def build(path: str, answer_style: str = "bracket", start: int = 1, framed: tuple[int, ...] = ()) -> dict:
+def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tuple[int, ...] = ()) -> dict:
     """answer_style: 'bracket' = '1) [정답] ③ / [해설] …', 'plain' = '1) 정답 ③ / 오답 point / …'(최다오답·최상위 공략형)
     start: 첫 문제 번호(단원 중간부터 시작하는 문제집 일부, 예: 13번부터)
-    framed: 발문 줄을 네모 테두리로 강조한 문제(몇 번째 문제인지, 1부터)"""
+    white_bg: 발문 줄 뒤에 선 없는 흰 사각형(한글이 내보내는 문단 배경, 보이지 않음)이 깔린 문제(몇 번째, 1부터)"""
     w = Writer()
     # ---------- 지문 1: (가) 산문 + (나) 시, 단을 넘어가는 박스 ----------
     w.text(w.left, w.y, "※ 다음 글을 읽고 물음에 답하시오.", 7.9)
@@ -206,8 +206,9 @@ def build(path: str, answer_style: str = "bracket", start: int = 1, framed: tupl
         if with_badge:  # 문제 위의 '빈출' 배지(장식 그림)
             w.page.insert_image(fitz.Rect(w.right - 37, w.y - 2, w.right, w.y + 18), stream=badge, keep_proportion=False)
             w.y += 20
-        if n in framed:  # 발문만 둘러싼 테두리(문제 강조)
-            w.page.draw_rect(fitz.Rect(w.left - 2, w.y - 1, w.right, w.y + 20), width=0.6)
+        if n in white_bg:  # 실사용 PDF: 발문 두 줄 뒤에 흰색으로만 칠한 사각형(글자보다 먼저 그림)
+            w.page.draw_rect(fitz.Rect(w.left, w.y - 1, w.right, w.y + 10), color=None, fill=(1, 1, 1))
+            w.page.draw_rect(fitz.Rect(w.left, w.y + 10, w.right, w.y + 20), color=None, fill=(1, 1, 1))
         n = n + start - 1
         w.text(w.left, w.y + 14, f"{n}.", 13.7)
         w.text(w.left + (24 if n < 10 else 30), w.y + 13, stem)

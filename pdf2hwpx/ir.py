@@ -403,28 +403,10 @@ def _is_question_header(ln: Line, expected: int, body: float) -> bool:
     return big or bold
 
 
-STEM_NO_RE = re.compile(r"^\s*(\d{1,3})\s*\.\s*(?=\S)")
+def build_document(ex: Extraction) -> Document:
+    flow = ex.flow
+    body = ex.body_size
 
-
-def _stem_frame_no(b: Box, body: float) -> Optional[int]:
-    """발문만 둘러싼 테두리(문제를 강조하는 네모)면 그 문제 번호. 보기 박스와 달리 안에 번호로 시작하는
-    굵은/큰 발문 한두 줄만 있고, 선택지·그림·도형은 없다."""
-    if b.parts or b.inner_drawings:
-        return None
-    items = b.items
-    if not items or len(items) > 3 or not all(isinstance(x, Line) for x in items):
-        return None
-    first = items[0]
-    m = STEM_NO_RE.match(first.text)
-    if not m or not (first.lead_size >= 1.15 * body or any(g.bold for g in first.glyphs[:3])):
-        return None
-    if any(x.glyphs and (x.glyphs[0].c in CIRCLED_DIGITS or x.glyphs[0].icon) for x in items):
-        return None
-    return int(m.group(1))
-
-
-def _locate_questions(flow: list, body: float) -> tuple[int, tuple[list[int], list[int], list[int]]]:
-    """정답부 시작 위치와 문제 머리줄들(줄 위치, 번호, 건너뛴 번호)."""
     # 정답부 시작: 정답 머리줄('13) [정답]') 중 가장 작은 번호가 처음 나오는 곳.
     # 문제집 일부(단원 중간)를 잘라 온 PDF는 1번이 아니라 13번 등에서 시작한다.
     ans_heads = [(i, int(m.group(1))) for i, it in enumerate(flow)
@@ -472,29 +454,7 @@ def _locate_questions(flow: list, body: float) -> tuple[int, tuple[list[int], li
         found = find_headers(st)
         if best is None or len(found[0]) > len(best[0]):
             best = found
-    return answer_idx, best
-
-
-def build_document(ex: Extraction) -> Document:
-    body = ex.body_size
-    answer_idx, (headers, header_numbers, skipped) = _locate_questions(ex.flow, body)
-    # 발문에 테두리를 친 문제는 박스(보기)로 읽혀 머리를 놓친다: 놓친 번호로 시작하는 '발문만 든 박스'를 풀고 다시 찾는다
-    missing = set(skipped) | ({header_numbers[-1] + 1} if header_numbers else set())
-    frames = {k for k, it in enumerate(ex.flow[:answer_idx])
-              if isinstance(it, Box) and _stem_frame_no(it, body) in missing}
-    if frames:
-        flow = []
-        for k, it in enumerate(ex.flow):
-            if k in frames:
-                for ln in it.items:
-                    ln.box = None
-                flow.extend(it.items)
-            else:
-                flow.append(it)
-        ex.flow = flow
-        ex.stats["stem_frames"] = len(frames)
-        answer_idx, (headers, header_numbers, skipped) = _locate_questions(ex.flow, body)
-    flow = ex.flow
+    headers, header_numbers, skipped = best
 
     # 원문자 아이콘 판별 후 치환
     labels = _label_icons(ex, headers, answer_idx)

@@ -362,17 +362,18 @@ def test_typed_numbers_keep_endnote_restart(tmp_path):
     assert sec0.index('<hp:newNum num="3"') < sec0.index('<hp:endNote number="3"')
 
 
-@pytest.mark.parametrize("framed", [(2,), (5,), (1, 3)])
-def test_framed_stem_is_a_question(tmp_path, framed):
-    """발문 줄에 네모 테두리를 친 문제(문제 강조)를 보기 박스로 읽어 그 번호를 놓치던 문제(실사용: 22문제 중 4번)."""
+@pytest.mark.parametrize("white_bg", [(2,), (5,), (1, 3)])
+def test_invisible_white_rect_is_not_a_box(tmp_path, white_bg):
+    """실사용(22문제 중 4번): 발문 뒤에 깔린 선 없는 흰 사각형(보이지 않음)의 가장자리를 박스 테두리로 읽어
+    발문을 보기 박스에 넣고 그 문제 번호를 놓쳤다(문제 21개, 정답 22개)."""
     from pdf2hwpx.convert import convert
 
-    pdf = tmp_path / "framed.pdf"
-    build(str(pdf), framed=framed)
+    pdf = tmp_path / "white.pdf"
+    build(str(pdf), white_bg=white_bg)
     res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=DocStyle(answers_as_endnotes=True))
     v = res["validation"]
     assert v["status"] == "PASS", v["root_causes"]
-    assert v["checks"]["question_count"] == v["checks"]["answer_count"] == 5
+    assert v["checks"]["question_count"] == v["checks"]["answer_count"] == v["checks"]["endnotes"] == 5
     stems = [x["stem"] for x in res["document"]["items"] if x["type"] == "question"]
     assert stems[1].startswith("2.<보기>는 영상 시의") and stems[4].startswith("5.<보기 1>을")
 

@@ -151,10 +151,20 @@ def _page_fragments(page: fitz.Page) -> list[_Frag]:
     return frags
 
 
+def _invisible(d: dict) -> bool:
+    """선(stroke)이 없고 칠한 색이 흰색이거나 거의 투명한 그림 명령: 화면에 보이지 않는다."""
+    if d.get("type") != "f":
+        return False
+    fill = d.get("fill")
+    return not fill or min(float(v) for v in fill[:3]) > 0.97 or d.get("fill_opacity", 1.0) < 0.2
+
+
 def _page_segments(page: fitz.Page) -> tuple[list[_Seg], int]:
     segs: list[_Seg] = []
     others = []
     for d in page.get_drawings():
+        if _invisible(d):  # 선 없이 흰색으로만 칠한 사각형(한글이 문단 배경으로 내보냄)은 보이지 않으므로 테두리가 아니다
+            continue
         w = float(d.get("width") or 0.0)
         for it in d.get("items", []):
             op = it[0]
