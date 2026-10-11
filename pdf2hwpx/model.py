@@ -134,7 +134,8 @@ class Cell:
     x1: float
     y1: float
     fill: Optional[str] = None  # 칸 배경색 "#RRGGBB"
-    sides: tuple = ()  # 선 없는 배치용 표에서 이 칸에만 긋는 변("right" = 시 풀이의 닫는 괄호)
+    sides: tuple = ()  # 선 없는 배치용 표에서 이 칸에만 긋는 변(시 풀이의 닫는 괄호 칸은 위·오른쪽·아래)
+    valign: str = ""  # 칸 세로 정렬("CENTER" 등). 비우면 표 종류를 따른다
     items: list = field(default_factory=list)  # Line | ImageEl (원문 순서)
     paras: list = field(default_factory=list)  # IR 단계에서 채움: list[Para]
 
@@ -150,6 +151,7 @@ class TableEl:
     box: Optional[int] = None
     lines: bool = True  # False: 선 없는 배치용 표(전폭 상자 안 좌우 두 칸)
     nested: bool = False  # 다른 표의 칸 안에 든 표(그 칸의 items 에 들어 있다)
+    text_pt: float = 0.0  # 원문 위치를 살리는 배치용 표: 본문 글자 크기(pt). 칸 폭·왼쪽 여백을 글자 크기 비율로 키운다
 
     @property
     def x0(self) -> float:
@@ -211,6 +213,7 @@ class Para:
     children: list = field(default_factory=list)  # kind == "bracket": 괄호 안 문단들
     frame: Optional[str] = None  # 이 문단만 둘러싼 띠 테두리("SOLID" | "DOUBLE_SLIM", 낱말 띠 등)
     left_pt: float = 0.0  # 왼쪽 여백(pt): 시 풀이에서 구절 아래 풀이를 원문 위치에 맞출 때
+    spacing: int = 0  # 원문 자간(%): 한글 글자 사이 간격으로 잰 값(원문 모양을 살리는 문제 밖 내용에만 쓴다)
     wide: bool = False  # 전폭 쪽(PageInfo.single)의 문제 밖 내용: 새 쪽에 한 단(가운데 선 없음)으로
     top: bool = False  # 원문 쪽의 첫 내용(전폭 부분은 여기서 쪽을 나눈다)
 

@@ -345,8 +345,11 @@ def _detect_boxes(segs: list[_Seg], top: float, bottom: float) -> list[tuple[flo
             if j == i or j in used or rx <= lx + 40:
                 continue
             if abs(ry0 - ly0) <= 5 and abs(ry1 - ly1) <= 5:
-                if best is None or rx < runs[best][0]:
-                    best = j
+                # 위아래 끝이 더 잘 맞는 짝 먼저(테두리 안에 조금 들어간 칠 사각형의 세로선과 엇갈려 짝짓지 않게),
+                # 같으면 가까운 쪽
+                key = (round((abs(ry0 - ly0) + abs(ry1 - ly1)) / 1.5), rx)
+                if best is None or key < best_key:
+                    best, best_key = j, key
         if best is not None:
             used.add(i)
             used.add(best)
@@ -379,6 +382,15 @@ def _cluster(values: list[float], tol: float = 2.0) -> list[float]:
             continue
         out.append(v)
     return out
+
+
+def _frame_grid(xs: list[float], ys: list[float]) -> bool:
+    """바깥 테두리와 그 안에 몇 pt 들여 그린 사각형이 만든 격자: 가장자리 칸이 모두 얇고(12pt 이하) 가운데 칸 하나만 크다."""
+    if not (3 <= len(xs) <= 4 and 2 <= len(ys) <= 4):
+        return False
+    thin_x = xs[1] - xs[0] <= 12 and xs[-1] - xs[-2] <= 12 and len(xs) == 4
+    thin_y = len(ys) == 2 or (len(ys) == 4 and ys[1] - ys[0] <= 12 and ys[-1] - ys[-2] <= 12)
+    return thin_x and thin_y and xs[2] - xs[1] > 60
 
 
 def _detect_tables(segs: list[_Seg], fills: list[tuple[fitz.Rect, Optional[str]]], top: float, bottom: float, W: float,
@@ -641,6 +653,8 @@ def extract(pdf_path: str) -> Extraction:
 
     bracket_id = 0
     wide_ids: set[int] = set()
+    pill_order: dict[str, int] = {}  # 알약 번호 그림 해시 -> 처음 나온 차례(1, 2, ...)
+    pill_glyphs: list[tuple[Glyph, int]] = []
     for pno, W, H, frags, segs, others, imgs, top, bottom, fills in raw_pages:
         # ---- 단 분리선 ----
         content_h = max(1.0, bottom - top)
@@ -685,6 +699,8 @@ def extract(pdf_path: str) -> Extraction:
             stats["single_column_pages"] += 1
         tables: list[TableEl] = []
         for xs, ys, cells in grids:
+            if _frame_grid(xs, ys):  # 테두리 안에 조금 들여 그린 칠 사각형(Tip 상자)은 표가 아니라 상자
+                continue
             col = 0 if (xs[0] + xs[-1]) / 2 < split_x else 1
             tables.append(TableEl(pno, col, xs, ys, cells))
         # 표 칸 안에 든 표: 바깥 표의 그 칸에 넣는다(글자는 가장 안쪽 칸으로)
@@ -763,6 +779,15 @@ def extract(pdf_path: str) -> Extraction:
             if (y0 + y1) / 2 <= top or (y0 + y1) / 2 >= bottom or (x1 - x0 >= 0.6 * W and (y1 <= top + 1 or y0 >= bottom - 1)):
                 stats["dropped_banner_image"] += 1
                 continue
+            pill = _pill_label(kept, x0, y0, x1, y1, split_x)
+            if pill is not None:
+                # 발문 앞 알약 모양 번호 그림("예제1"): 글자 자리표로 두고, 이름은 문서를 다 읽은 뒤 붙인다
+                n = pill_order.setdefault(digest, len(pill_order) + 1)
+                g = Glyph(PILL_MARK, x0, pill.y0, x1, pill.y1, pill.size, True, color=_pill_color(doc[pno - 1], (x0, y0, x1, y1)))
+                pill_glyphs.append((g, n))
+                kept.append(_Frag([g], x0, pill.y0, x1, pill.y1, pill.size))
+                stats["pill_labels"] += 1
+                continue
             if 4 <= w <= 16 and 4 <= h <= 16 and 0.75 <= w / h <= 1.33:
                 ch = icon_digests.setdefault(digest, chr(ICON_PUA_BASE + len(icon_digests)))
                 kept.append(_Frag([Glyph(ch, x0, y0, x1, y1, h * 1.08, False, icon=digest)], x0, y0, x1, y1, h * 1.08))
@@ -837,6 +862,7 @@ def extract(pdf_path: str) -> Extraction:
             col = 0 if (x0 + x1) / 2 < split_x else 1
             boxes.append(Box(id=pno * 1000 + i, page=pno, col=col, x0=x0, y0=y0, x1=x1, y1=y1))
         nested_rects = [box_rects[i] for i in nested_in if i not in inset]
+        outer_rect = {b.id: (b.x0, b.y0, b.x1, b.y1) for b in boxes}  # 테두리 색은 바깥 틀에서 읽는다
         for i in inset:  # 안쪽 틀이 있으면 글 줄의 좌우 경계는 안쪽 틀(줄이 꽉 찼는지 판단)
             outer = next((b for b in boxes if b.id == pno * 1000 + nested_in[i]), None)
             if outer is not None:
@@ -848,9 +874,10 @@ def extract(pdf_path: str) -> Extraction:
                 if b.x0 - 2 <= rect.x0 and rect.x1 <= b.x1 + 2 and b.y0 - 2 <= rect.y0 and rect.y1 <= b.y1 + 2 \
                         and rect.width * rect.height >= 0.7 * area:
                     b.fill = color
+            ox0, oy0, ox1, oy1 = outer_rect.get(b.id, (b.x0, b.y0, b.x1, b.y1))
             edge = Counter(s.color for s in segs if s.color and (
-                (s.vertical and min(abs(s.x0 - b.x0), abs(s.x0 - b.x1)) < 1.5 and s.y0 < b.y1 and s.y1 > b.y0)
-                or (s.horizontal and min(abs(s.y0 - b.y0), abs(s.y0 - b.y1)) < 1.5 and s.x0 < b.x1 and s.x1 > b.x0)))
+                (s.vertical and min(abs(s.x0 - ox0), abs(s.x0 - ox1)) < 1.5 and s.y0 < oy1 and s.y1 > oy0)
+                or (s.horizontal and min(abs(s.y0 - oy0), abs(s.y0 - oy1)) < 1.5 and s.x0 < ox1 and s.x1 > ox0)))
             if edge:
                 b.border_color = edge.most_common(1)[0][0]
         # 선 없이 색만 칠한 넓은 영역(회색 지문 바탕 등)도 상자: 좌우로 맞붙은 조각은 하나로
@@ -1155,6 +1182,11 @@ def extract(pdf_path: str) -> Extraction:
                     continue
             flow.append(it)
 
+    if pill_glyphs:
+        word = _pill_word(pages)
+        for g, n in pill_glyphs:
+            g.c = f"{word}{n} " if word else f"{n}. "
+
     for it in flow:
         if isinstance(it, ImageEl):
             it.png = None
@@ -1163,6 +1195,55 @@ def extract(pdf_path: str) -> Extraction:
     ex = Extraction(pdf_path, pages, flow, icon_digests, body_size, doc, dict(stats), wide_ids=wide_ids)
     ex.header_texts = header_texts
     return ex
+
+
+PILL_MARK = "\ue0ff"  # 알약 번호 그림 자리표(문서를 다 읽은 뒤 "예제1 " 같은 글자로 바뀐다)
+PILL_WORD_RE = re.compile(r"\[\s*([가-힣]{1,4})\s?(\d{1,2})\s*\]")
+
+
+def _pill_label(kept: list, x0: float, y0: float, x1: float, y1: float, split_x: float) -> Optional["_Frag"]:
+    """줄 맨 앞의 납작한 작은 그림(높이 9~20pt, 가로 1.5~3.5배)이고 바로 오른쪽에 글이 이어지면 그 글 조각.
+    글 앞에 이미 숫자 번호("3.")가 있으면 번호 그림이 아니다."""
+    w, h = x1 - x0, y1 - y0
+    if not (9 <= h <= 20 and 1.5 <= w / h <= 3.5):
+        return None
+    side = (x0 + x1) / 2 < split_x
+    band = [f for f in kept if min(f.y1, y1) - max(f.y0, y0) > 0.5 * min(h, f.y1 - f.y0)
+            and ((f.x0 + f.x1) / 2 < split_x) == side]
+    right = sorted([f for f in band if -1 <= f.x0 - x1 <= 2 * h], key=lambda f: f.x0)
+    if not right or any(f.x1 <= x0 + 1 for f in band):
+        return None
+    first = "".join(g.c for g in right[0].glyphs).lstrip()
+    if not first or re.match(r"\d{1,3}\s*[.)]", first):
+        return None
+    return right[0]
+
+
+def _pill_color(page, rect) -> Optional[str]:
+    """알약 그림의 바탕색(가장 진한 유채색 화소)."""
+    try:
+        pix = page.get_pixmap(clip=fitz.Rect(*rect), dpi=72, alpha=False)
+    except Exception:
+        return None
+    best, best_s = None, 0.25
+    data, n = pix.samples, pix.n
+    for i in range(0, len(data) - n + 1, n):
+        r, g, b = data[i], data[i + 1], data[i + 2]
+        mx, mn = max(r, g, b), min(r, g, b)
+        sat = (mx - mn) / mx if mx else 0.0
+        if sat > best_s and mx > 60:
+            best, best_s = (r, g, b), sat
+    return "#%02X%02X%02X" % best if best else None
+
+
+def _pill_word(pages: list) -> str:
+    """알약 번호의 이름: 본문에서 "[예제1]"처럼 대괄호로 가리킨 낱말 중 가장 많은 것(없으면 번호만)."""
+    cnt: Counter = Counter()
+    for pm in pages:
+        for ln in pm.lines:
+            for m in PILL_WORD_RE.finditer(ln.text):
+                cnt[m.group(1)] += 1
+    return cnt.most_common(1)[0][0] if cnt else ""
 
 
 TITLE_RE = re.compile(r"^\s*[<〈＜《]\s*[^<>〈〉＜＞]{1,14}\s*[>〉＞》]\s*$")

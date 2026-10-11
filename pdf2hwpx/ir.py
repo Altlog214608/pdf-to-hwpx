@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import dataclasses
 import re
 import statistics
 from collections import Counter, defaultdict
@@ -58,6 +59,59 @@ def _runs_from_glyphs(glyphs: list[Glyph], bold: bool = False) -> list[Run]:
         else:
             runs.append(r)
     return runs
+
+
+_NARROW = {" ": 0.26, ".": 0.25, ",": 0.25, "‘": 0.25, "’": 0.25, "'": 0.22, "·": 0.25, "(": 0.346, ")": 0.346,
+           "[": 0.36, "]": 0.36, ":": 0.286, ";": 0.286, "-": 0.31, "!": 0.33, "?": 0.47, '"': 0.41, "“": 0.41, "”": 0.41}
+
+
+def _natural_em(c: str) -> float:
+    """함초롬 계열 글꼴의 글자 폭(em) 어림값: 한글·한자·전각은 1, 숫자·로마자 약 0.56, 문장 부호는 좁게."""
+    if len(c) != 1:  # 글자 여러 개를 담은 자리(알약 번호 "예제1 ")
+        return sum(_natural_em(x) for x in c)
+    if c in _NARROW:
+        return _NARROW[c]
+    o = ord(c)
+    if 0x1100 <= o <= 0x11FF or 0x2E80 <= o <= 0x9FFF or 0xAC00 <= o <= 0xD7A3 or 0xE000 <= o <= 0xFAFF \
+            or 0xFF00 <= o <= 0xFF60:
+        return 1.0
+    if c.isascii():
+        return 0.56
+    return 0.8
+
+
+def _hangul_spacing(lines: list[Line]) -> int:
+    """원문 자간(%): 줄 폭(첫 글자 ~ 마지막 글자)과 같은 글자를 자간 0으로 늘어놓은 폭의 차이를 글자 수로 나눈 값.
+    원문이 장평·자간을 좁혀 찍었으면 같은 글꼴로도 줄이 길어져 넘어가므로 그만큼 좁힌다.
+    양쪽 정렬로 벌어진 줄은 크게 나오므로 줄들 중 가장 좁은 값, 좁힐 때만(-2% 이하) 쓴다."""
+    vals = []
+    for seg in [sg for ln in lines for sg in _segments(ln)]:  # 넓게 띄운 간격은 따로(간격이 자간으로 잡히지 않게)
+        gs = [g for g in seg if g.c != "\u2003" and not g.icon]
+        while gs and gs[-1].is_space:
+            gs.pop()
+        if len(gs) < 8 or not gs[0].size:
+            continue
+        size = statistics.median(g.size for g in gs)
+        if any(abs(g.size - size) > 0.15 * size for g in gs):
+            continue
+        if any(b.x0 - a.x0 < 0.5 * size for a, b in zip(gs, gs[1:]) if _natural_em(a.c) >= 1.0):
+            continue  # 글자가 겹쳐 찍힌 줄(두 줄이 포개짐 등)은 재지 않는다
+        actual = gs[-1].x0 - gs[0].x0 + _natural_em(gs[-1].c) * size
+        natural = sum(_natural_em(g.c) for g in gs) * size
+        vals.append((actual - natural) / (len(gs) * size))
+    if not vals:
+        return 0
+    v = round(min(vals) * 100)
+    return max(-20, v) if v <= -2 else 0
+
+
+def _same_row(prev: Line, ln: Line) -> bool:
+    """ln 이 prev 와 같은 줄 오른쪽에 떨어져 놓인 조각인가."""
+    return (ln.page, ln.col) == (prev.page, prev.col) and abs(ln.y0 - prev.y0) < 0.4 * prev.size and ln.x0 > prev.x1
+
+
+def _row_starts(lines: list[Line]) -> list[Line]:
+    return [ln for i, ln in enumerate(lines) if i == 0 or not _same_row(lines[i - 1], ln)]
 
 
 def _append_runs(dst: list[Run], src: list[Run]) -> None:
@@ -195,6 +249,11 @@ class Builder:
             brk = False
             blank = False
             same_area = (prev.page, prev.col) == (e.page, e.col)
+            if _same_row(prev, e) and re.fullmatch(r"\(.{0,6}\)", e.text.strip()):
+                # 같은 줄 오른쪽 끝에 떨어져 놓인 "( ✕ )" 같은 표시: 그 줄 문단 끝에 붙인다
+                cur.append(e)
+                prev_line = e
+                continue
             if same_area:
                 dy = e.y0 - prev.y0
                 if dy > 1.3 * pitch:
@@ -208,11 +267,16 @@ class Builder:
             first = cur[0]
             if MARKER_RE.match(e.text) and self.rx(e) <= self.rx(first) + 0.4 * e.size:
                 brk = True
+            if MARKER_RE.match(e.text.lstrip(" ✓✔√")) and prev.text.rstrip().endswith(("?", "？")):  # 발문 다음 선택지(정답 표시 ✓ 포함)
+                brk = True
             if LABEL_RE.match(e.text) or LABEL_RE.match(prev.text):
                 brk = True
             if e.frame != prev.frame:  # 띠 테두리 줄(낱말 띠)은 따로 한 문단
                 brk = True
-            if len(cur) >= 2 and self.rx(e) > self.rx(cur[1]) + 0.4 * e.size:
+            if abs(e.size - prev.size) > 0.15 * max(e.size, prev.size):  # 글자 크기가 바뀌면(본문 -> 작은 해설) 새 문단
+                brk = True
+            # (단이 바뀌면 단 왼쪽 경계가 몇 pt 다를 수 있어 여유를 더 둔다)
+            if len(cur) >= 2 and self.rx(e) > self.rx(cur[1]) + (0.4 if same_area else 1.0) * e.size:
                 brk = True  # 새 문단의 첫 줄 들여쓰기
             if brk:
                 flush()
@@ -285,11 +349,16 @@ class Builder:
         for i, ln in enumerate(lines):
             if i > 0:
                 prev = lines[i - 1]
-                if prev.trailing_space or not self.trailing_space_reliable or self._emphasis_boundary(prev, ln):
+                if _same_row(prev, ln):  # 같은 줄에 떨어진 조각
+                    last = runs[-1] if runs else None
+                    _append_runs(runs, [Run(" ", False, bold, last.color if last else None, last.size if last else 0.0)])
+                elif prev.trailing_space or not self.trailing_space_reliable or self._emphasis_boundary(prev, ln):
                     last = runs[-1] if runs else None
                     _append_runs(runs, [Run(" ", False, bold, last.color if last else None, last.size if last else 0.0)])
             _append_runs(runs, _runs_from_glyphs(ln.glyphs, bold))
-        p = Para(runs=_clean_runs(runs), frame=lines[0].frame)
+        p = Para(runs=_clean_runs(runs), frame=lines[0].frame, spacing=_hangul_spacing(lines))
+        whole = lines
+        lines = _row_starts(lines)  # 같은 줄 오른쪽에 붙인 조각("( ✕ )")은 들여쓰기·정렬 판단에서 뺀다
         left, right = self.bounds(lines[0])
         width = max(1.0, right - left)
         first = lines[0]
@@ -299,12 +368,13 @@ class Builder:
             p.indent_pt = round(r0 - self.rx(lines[1]), 1)
         else:
             p.indent_pt = round(r0 - base_left, 1) if r0 - base_left > 0.4 * first.size else 0.0
-        if len(lines) <= 2 and all(l.x1 >= right - tol for l in lines) and first.x0 > left + 0.3 * width:
+        if len(lines) <= 2 and all(l.x1 >= right - tol for l in lines) and first.x0 > left + 0.3 * width \
+                and len(whole) == len(lines):
             p.align = "RIGHT"
             p.indent_pt = 0.0
             if re.match(r"^\s*[-–—]", p.text):
                 p.role = "credit"
-        elif len(lines) == 1 and abs((first.x0 - left) - (right - first.x1)) < 0.04 * width \
+        elif len(whole) == 1 and abs((first.x0 - left) - (right - first.x1)) < 0.04 * width \
                 and first.x0 > left + 0.15 * width:  # 좌우 여백이 같을 때만 가운데 정렬
             p.align = "CENTER"
             p.indent_pt = 0.0
@@ -316,7 +386,8 @@ class Builder:
         """문제 발문/선택지처럼 한 문단으로 묶이는 줄들."""
         p = self._para_from_lines(lines, bold, self.rx(lines[0]))
         p.align = "LEFT"
-        p.indent_pt = round(self.rx(lines[0]) - self.rx(lines[1]), 1) if len(lines) >= 2 else 0.0
+        rows = _row_starts(lines)
+        p.indent_pt = round(self.rx(rows[0]) - self.rx(rows[1]), 1) if len(rows) >= 2 else 0.0
         p.role = ""
         return p
 
@@ -382,12 +453,25 @@ class Builder:
         return blk
 
     def _bracket_layout(self, box: Box, blk: AuxBlock, items: list) -> Optional[AuxBlock]:
-        """시 풀이(구절 위아래로 파란 풀이, 오른쪽 "]" 괄호 뒤에 장마다 요약): 괄호마다 한 행인 두 칸 표.
-        왼쪽 칸은 줄마다 한 문단(원문 위치만큼 왼쪽 여백), 왼쪽 칸 오른쪽 변이 괄호, 오른쪽 칸은 요약."""
+        """시 풀이(구절 위아래로 파란 풀이, 오른쪽 "]" 괄호 뒤에 장마다 요약): 괄호마다 한 행인 세 칸 표
+        [구절과 풀이 | 괄호(위·오른쪽·아래 변) | 요약]. 괄호 사이 빈 간격은 선 없는 빈 행.
+        왼쪽 칸은 줄마다 한 문단(원문 위치만큼 왼쪽 여백, 줄 안의 넓은 간격은 전각 공백으로)이고,
+        글자 크기는 상자 안 본문(검은 구절) 크기 대비로 맞춘다(작은 풀이 글자가 원문 비율대로 작게)."""
         lines = [x for x in items if isinstance(x, Line)]
         if len(lines) != len(items):
             return None
         bx = statistics.median(x for x, _, _ in box.brackets)
+        tick = 13.0  # 괄호 위·아래 짧은 가로선 길이(pt)
+        split = []  # 괄호를 가로지르는 줄(같은 높이의 풀이와 요약이 한 줄로 묶인 것)은 괄호에서 나눈다
+        for ln in lines:
+            gs = ln.glyphs
+            if ln.x0 < bx - tick < bx < ln.x1 and any(g.x0 >= bx for g in gs if not g.is_space):
+                a = [g for g in gs if g.x0 < bx]
+                b = [g for g in gs if g.x0 >= bx]
+                split += [_sub_line(ln, a), _sub_line(ln, b)] if any(not g.is_space for g in a) else [ln]
+            else:
+                split.append(ln)
+        lines = [ln for ln in split if ln.glyphs]
         groups = [(y0, y1) for _, y0, y1 in box.brackets]
         head = [ln for ln in lines if (ln.y0 + ln.y1) / 2 < groups[0][0] - 2]
         rows: list[list[Line]] = [[] for _ in groups]
@@ -398,26 +482,39 @@ class Builder:
             k = min(range(len(groups)), key=lambda i: 0 if groups[i][0] - 2 <= cy <= groups[i][1] + 2
                     else min(abs(cy - groups[i][0]), abs(cy - groups[i][1])))
             rows[k].append(ln)
+        # 상자 안 본문 크기: 검은(색 없는) 글자 중 가장 많은 크기
+        sizes = Counter(round(g.size, 1) for ln in lines for g in ln.glyphs
+                                    if not g.is_space and not g.color)
+        main = sizes.most_common(1)[0][0] if sizes else 0.0
         x0, x1 = box.x0 + 4, box.x1 - 4
-        ys = [min([groups[0][0]] + [ln.y0 for ln in rows[0]])]
-        for k in range(len(groups) - 1):
-            ys.append((max([groups[k][1]] + [ln.y1 for ln in rows[k]]) + min([groups[k + 1][0]] + [ln.y0 for ln in rows[k + 1]])) / 2)
-        ys.append(max([groups[-1][1]] + [ln.y1 for ln in rows[-1]]))
+        tx = max(x0 + 20, bx - tick)
+        tops = [min([g0] + [ln.y0 for ln in rl]) for (g0, _), rl in zip(groups, rows)]
+        bots = [max([g1] + [ln.y1 for ln in rl]) for (_, g1), rl in zip(groups, rows)]
+        ys = [tops[0]]
+        for k in range(len(groups)):
+            ys.append(bots[k])
+            if k + 1 < len(groups):
+                ys.append(max(bots[k] + 1, tops[k + 1]))
         cells = []
         for k, rl in enumerate(rows):
+            r = 2 * k
+            if k:  # 괄호 사이 빈 행
+                cells.append(Cell(r - 1, 0, 1, 3, x0, ys[r - 1], x1, ys[r]))
             left = sorted([ln for ln in rl if ln.x0 < bx], key=lambda ln: (ln.y0, ln.x0))
             right = sorted([ln for ln in rl if ln.x0 >= bx], key=lambda ln: (ln.y0, ln.x0))
-            lc = Cell(k, 0, 1, 1, x0, ys[k], bx, ys[k + 1], sides=("right",))
-            rc = Cell(k, 1, 1, 1, bx, ys[k], x1, ys[k + 1])
+            lc = Cell(r, 0, 1, 1, x0, ys[r], tx, ys[r + 1])
+            mc = Cell(r, 1, 1, 1, tx, ys[r], bx, ys[r + 1], sides=("top", "right", "bottom"))
+            rc = Cell(r, 2, 1, 1, bx, ys[r], x1, ys[r + 1], valign="CENTER")
             for ln in left:
-                p = self.single_para([ln])
+                p = self._spaced_para(ln)
                 p.align, p.indent_pt, p.left_pt = "LEFT", 0.0, round(max(0.0, ln.x0 - x0), 1)
                 lc.paras.append(p)
-            rc.paras = self.paragraphs(right, stanza=False) if right else []
+            rc.paras = [self.single_para(right)] if right else []  # 요약은 한 문단(둘째 줄 내어쓰기)
             for p in rc.paras:
-                p.indent_pt = 0.0
-            cells += [lc, rc]
-        t = TableEl(box.page, 0, [x0, bx, x1], ys, cells, lines=False)
+                if not -60 <= p.indent_pt <= 0:  # 오른쪽 끝에 붙은 "(근경)" 같은 줄은 내어쓰기가 아니다
+                    p.indent_pt = 0.0
+            cells += [lc, mc, rc]
+        t = TableEl(box.page, 0, [x0, tx, bx, x1], ys, cells, lines=False, text_pt=main)
         paras = []
         for ln in sorted(head, key=lambda ln: (ln.y0, ln.x0)):
             p = self.single_para([ln])
@@ -427,9 +524,33 @@ class Builder:
             p.indent_pt = 0.0
             paras.append(p)
         paras.append(Para(kind="table", table=t, align="CENTER"))
+        if main and self.ex.body_size:  # 표 안 글자 크기 비율은 본문(검은 구절) 기준: 전체 rel 계산 때 size/main 이 되게
+            for cl in cells:
+                for p in cl.paras:
+                    for run in p.runs:
+                        if run.size:
+                            run.size = round(run.size * self.ex.body_size / main, 2)
         blk.paras = paras
         self.stats_bracket_layouts = getattr(self, "stats_bracket_layouts", 0) + 1
         return blk
+
+    def _spaced_para(self, ln: Line) -> Para:
+        """한 줄 문단. 줄 안의 넓은 간격(풀이 두 개를 한 줄에 띄어 놓은 것)은 원래 폭만큼 전각 공백으로 띄운다."""
+        segs = _segments(ln)
+        p = self.single_para([ln])
+        if len(segs) < 2:
+            return p
+        runs: list[Run] = []
+        prev_x1 = None
+        for seg in segs:
+            solid = [g for g in seg if not g.is_space]
+            if prev_x1 is not None and runs:
+                n = max(1, round((solid[0].x0 - prev_x1) / max(1.0, solid[0].size)) - 1)
+                runs.append(dataclasses.replace(runs[-1], text="\u2003" * n + " ", underline=False, boxed=False))
+            runs.extend(_seg_runs([g for g in seg if g.c != "\u2003"]))
+            prev_x1 = solid[-1].x1
+        p.runs = [r for r in runs if r.text]
+        return p
 
     def passage_paras(self, items: list) -> tuple[list[Para], bool]:
         entries: list[Union[Line, ImageEl]] = []

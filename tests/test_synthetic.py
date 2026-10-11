@@ -786,3 +786,67 @@ def test_wide_passage_on_top_of_two_column_page(tmp_path):
     assert items[0]["type"] in ("loose", "aux") and items[0]["wide"] and "(가)" in str(items[0])
     cols = _column_defs(res["hwpx"])
     assert [(n, pb) for n, pb, _ in cols] == [(1, False), (2, False)], cols
+
+
+def test_annotated_poem_bracket_rows(tmp_path):
+    """실사용([시대별 문학] 시 풀이 쪽): 장마다 구절 위아래 작은 파란 풀이, 오른쪽 "]" 괄호 뒤 요약. 한글에서 줄이 뒤섞이고
+    괄호가 가운데 세로선 하나로 나왔다. 장마다 한 행인 세 칸 표 [구절·풀이 | 괄호(위·오른쪽·아래 변) | 요약], 장 사이 빈 행,
+    괄호를 가로지르는 줄(풀이와 요약이 같은 높이)은 괄호에서 나누고, 풀이 글자는 원문 비율대로 작게, 원문 자간대로 좁게."""
+    import zipfile
+
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.ir import build_document
+    from pdf2hwpx.model import AuxBlock
+    from tests.synth_pdf import build_poem
+
+    pdf = tmp_path / "poem.pdf"
+    build_poem(str(pdf))
+    doc = build_document(extract(str(pdf)))
+    t = next(p.table for it in doc.items if isinstance(it, AuxBlock) for p in it.paras if p.kind == "table")
+    assert len(t.xs) == 4 and len(t.ys) - 1 == 5  # 장 3개 + 사이 빈 행 2개
+    assert [c.row for c in t.cells if c.sides == ("top", "right", "bottom")] == [0, 2, 4]
+    text = lambda c: " ".join(p.text for p in c.paras)  # noqa: E731
+    left = [text(c) for c in t.cells if c.col == 0 and c.colspan == 1]
+    right = [text(c) for c in t.cells if c.col == 2]
+    assert all("▶" not in s for s in left) and [s[:4] for s in right] == ["▶ 초장", "▶ 중장", "▶ 종장"]
+    assert "청풍 한 간 맡겨 두고" in left[1]
+    first = t.cells[0].paras
+    assert first[1].left_pt < 10 < first[0].left_pt  # 풀이는 원문 위치만큼 들여(구절보다 오른쪽)
+    assert all(p.spacing < 0 for p in first)  # 원문이 좁게 찍힌 만큼 자간을 좁힌다
+
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    with zipfile.ZipFile(res["hwpx"]) as z:
+        head = z.read("Contents/header.xml").decode("utf-8")
+        sec = z.read("Contents/section0.xml").decode("utf-8")
+    blue = [int(h) for h in re.findall(r'<hh:charPr id="\d+" height="(\d+)" textColor="#29458F"', head)]
+    assert blue and max(blue) < 1000  # 파란 풀이는 본문(10pt)보다 작게
+    assert re.search(r'<hh:spacing hangul="-\d+"', head)
+    # 한글 기본 빈칸(글꼴 빈칸보다 넓음)이면 원문 위치에 맞춘 줄이 넘어가므로 글꼴 빈칸으로
+    assert re.search(r'<hh:charPr id="\d+" height="\d+" textColor="#29458F"[^>]*useFontSpace="1"', head)
+    assert all(len(c.paras) == 1 for c in t.cells if c.col == 2)  # 요약은 줄마다 끊지 않고 한 문단
+    assert sec.count('<hp:cellMargin left="0" right="0"') >= 6  # 구절·괄호 칸은 좌우 여백 없이(줄이 넘어가지 않게)
+
+
+def test_example_labels_tip_boxes_and_explanations(tmp_path):
+    """실사용([풀이완성]): ① 발문 앞 '예제1/예제2' 꼬리표 그림을 글자 번호로(그림 종류가 나온 차례, 이름은 본문의 [예제1] 표기),
+    ② 진한 테두리 안에 몇 pt 들여 칠한 Tip 상자가 상자 두 개(하나는 빈 띠)나 세 칸 표로 갈리지 않고 상자 하나(테두리 색은
+    바깥 틀), ③ 줄 오른쪽 끝 "( ✕ )"는 그 선택지 끝에, 작은 파란 해설은 둘째 줄을 들여 써도 한 문단."""
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.ir import build_document
+    from pdf2hwpx.model import AuxBlock, Box, Para, TableEl
+    from tests.synth_pdf import build_examples
+
+    pdf = tmp_path / "examples.pdf"
+    build_examples(str(pdf))
+    ex = extract(str(pdf))
+    boxes = [it for it in ex.flow if isinstance(it, Box)]
+    assert len(boxes) == 4 and not any(isinstance(it, TableEl) for it in ex.flow)
+    assert all(b.fill and b.border_color and b.border_color != b.fill and b.all_items() for b in boxes)
+    doc = build_document(ex)
+    texts = [it.text for it in doc.items if isinstance(it, Para) and it.kind == "text"]
+    labels = [t.split(" ")[0] for t in texts if t.startswith("예제")]
+    assert labels == ["예제1", "예제2", "예제1", "예제2", "예제1"], labels
+    assert sum(isinstance(it, AuxBlock) for it in doc.items) == 4
+    assert sum(t.startswith("둘째 줄에서 끝나는 선택지.") and t.endswith("( X )") for t in texts) == 3
+    expl = [t for t in texts if t.startswith("- 해설 첫 줄")]
+    assert len(expl) == 3 and all(t.endswith("둘째 줄은 들여 써서 이어진다.") for t in expl)
