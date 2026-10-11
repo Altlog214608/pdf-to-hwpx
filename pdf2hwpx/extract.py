@@ -49,6 +49,7 @@ class _Seg:
     x1: float
     y1: float
     width: float
+    color: Optional[str] = None  # 선 색(검정이 아니면)
 
     @property
     def horizontal(self) -> bool:
@@ -262,24 +263,26 @@ def _page_segments(page: fitz.Page) -> tuple[list[_Seg], int]:
         if _invisible(d):  # 선 없이 흰색으로만 칠한 사각형(한글이 문단 배경으로 내보냄)은 보이지 않으므로 테두리가 아니다
             continue
         w = float(d.get("width") or 0.0)
+        sc = d.get("color")
+        scol = None if not sc or max(sc[:3]) < 0.16 else "#%02X%02X%02X" % tuple(round(float(v) * 255) for v in sc[:3])
         for it in d.get("items", []):
             op = it[0]
             if op == "l":
                 p1, p2 = it[1], it[2]
-                segs.append(_Seg(min(p1.x, p2.x), min(p1.y, p2.y), max(p1.x, p2.x), max(p1.y, p2.y), w))
+                segs.append(_Seg(min(p1.x, p2.x), min(p1.y, p2.y), max(p1.x, p2.x), max(p1.y, p2.y), w, scol))
             elif op == "re":
                 r = it[1]
                 if r.width < 1.5 or r.height < 1.5:  # 얇은 사각형 = 선
-                    segs.append(_Seg(r.x0, r.y0, r.x1, r.y1, w))
+                    segs.append(_Seg(r.x0, r.y0, r.x1, r.y1, w, scol))
                 else:
                     for a, b in ((r.tl, r.tr), (r.bl, r.br), (r.tl, r.bl), (r.tr, r.br)):
-                        segs.append(_Seg(min(a.x, b.x), min(a.y, b.y), max(a.x, b.x), max(a.y, b.y), w))
+                        segs.append(_Seg(min(a.x, b.x), min(a.y, b.y), max(a.x, b.x), max(a.y, b.y), w, scol))
                     others.append(r)
             elif op == "qu":
                 q = it[1]
                 r = q.rect
                 for a, b in ((r.tl, r.tr), (r.bl, r.br), (r.tl, r.bl), (r.tr, r.br)):
-                    segs.append(_Seg(min(a.x, b.x), min(a.y, b.y), max(a.x, b.x), max(a.y, b.y), w))
+                    segs.append(_Seg(min(a.x, b.x), min(a.y, b.y), max(a.x, b.x), max(a.y, b.y), w, scol))
             elif op == "c":
                 pts = it[1:]
                 xs = [p.x for p in pts]
@@ -792,13 +795,50 @@ def extract(pdf_path: str) -> Extraction:
                         and (x1 - x0) * (y1 - y0) < (X1 - X0) * (Y1 - Y0):
                     nested_in[i] = j
                     break
+        # 바깥 테두리 안쪽에 조금 들여 그린 두 번째 테두리(연두 바탕 상자의 안쪽 틀)는 도형이 아니라 상자 모양이다
+        def _inset(a, b) -> bool:
+            return all(0 <= d <= 12 for d in (a[0] - b[0], a[1] - b[1], b[2] - a[2], b[3] - a[3]))
+        inset = {i for i, j in nested_in.items() if _inset(box_rects[i], box_rects[j])}
         boxes: list[Box] = []
         for i, (x0, y0, x1, y1) in enumerate(box_rects):
             if i in nested_in:
                 continue
             col = 0 if (x0 + x1) / 2 < split_x else 1
             boxes.append(Box(id=pno * 1000 + i, page=pno, col=col, x0=x0, y0=y0, x1=x1, y1=y1))
-        nested_rects = [box_rects[i] for i in nested_in]
+        nested_rects = [box_rects[i] for i in nested_in if i not in inset]
+        # 상자 바탕색·테두리 색
+        for b in boxes:
+            area = (b.x1 - b.x0) * (b.y1 - b.y0)
+            for rect, color in fills:  # 나중에 칠한 것이 이긴다
+                if b.x0 - 2 <= rect.x0 and rect.x1 <= b.x1 + 2 and b.y0 - 2 <= rect.y0 and rect.y1 <= b.y1 + 2 \
+                        and rect.width * rect.height >= 0.7 * area:
+                    b.fill = color
+            edge = Counter(s.color for s in segs if s.color and (
+                (s.vertical and min(abs(s.x0 - b.x0), abs(s.x0 - b.x1)) < 1.5 and s.y0 < b.y1 and s.y1 > b.y0)
+                or (s.horizontal and min(abs(s.y0 - b.y0), abs(s.y0 - b.y1)) < 1.5 and s.x0 < b.x1 and s.x1 > b.x0)))
+            if edge:
+                b.border_color = edge.most_common(1)[0][0]
+        # 선 없이 색만 칠한 넓은 영역(회색 지문 바탕 등)도 상자: 좌우로 맞붙은 조각은 하나로
+        areas = []
+        for rect, color in fills:
+            if not color or rect.width < 80 or rect.height < 40 or rect.y1 <= top or rect.y0 >= bottom:
+                continue
+            if any(t.x0 - 3 <= rect.x0 and rect.x1 <= t.x1 + 3 and t.y0 - 3 <= rect.y0 and rect.y1 <= t.y1 + 3 for t in tables):
+                continue
+            if any(b.x0 - 14 <= rect.x0 and rect.x1 <= b.x1 + 14 and b.y0 - 14 <= rect.y0 and rect.y1 <= b.y1 + 14
+                   for b in boxes):
+                continue
+            prev = areas[-1] if areas else None
+            if prev and prev[4] == color and abs(prev[1] - rect.y0) < 2 and abs(prev[3] - rect.y1) < 2 \
+                    and abs(prev[2] - rect.x0) < 3:
+                areas[-1] = (prev[0], prev[1], rect.x1, prev[3], color)
+            else:
+                areas.append((rect.x0, rect.y0, rect.x1, rect.y1, color))
+        for k, (x0, y0, x1, y1, color) in enumerate(areas):
+            col = 0 if (x0 + x1) / 2 < split_x else 1
+            boxes.append(Box(id=pno * 1000 + 500 + k, page=pno, col=col, x0=x0, y0=y0, x1=x1, y1=y1,
+                             fill=color, border=False))
+            stats["fill_boxes"] += 1
 
         def _box_of(cx: float, cy: float) -> Optional[Box]:
             best = None
@@ -842,6 +882,16 @@ def extract(pdf_path: str) -> Extraction:
                 if gs[i].is_space and gs[i - 1].underline and gs[i + 1].underline:
                     gs[i].underline = True
 
+        # ---- 형광펜: 한 줄 높이로 색을 칠한 띠 위의 글자는 음영 ----
+        for rect, color in fills:
+            if color and rect.height < 18 and rect.width > 8 and not any(
+                    t.x0 - 2 <= rect.x0 and rect.x1 <= t.x1 + 2 and t.y0 - 2 <= rect.y0 and rect.y1 <= t.y1 + 2 for t in tables):
+                for ln in lines:
+                    if ln.cell is None and ln.y0 < rect.y1 and ln.y1 > rect.y0:
+                        for g in ln.glyphs:
+                            if rect.x0 - 1 <= (g.x0 + g.x1) / 2 <= rect.x1 + 1 and rect.y0 - 2 <= (g.y0 + g.y1) / 2 <= rect.y1 + 2:
+                                g.shade = color
+
         # ---- 박스 소속 + 내부 도형 수 ----
         def _box_of_line(ln: Line) -> Optional[Box]:
             """줄이 가로로 다 들어가는 가장 작은 박스. 가운데 점만 보면 발문 속 낱말 하나를 둘러싼 작은 네모
@@ -877,6 +927,11 @@ def extract(pdf_path: str) -> Extraction:
                 b.items.append(im)
         # 낱말 몇 개만 둘러싼 낮은 네모(강조 표시)는 줄을 담지 못해 비어 있다: 박스가 아니다
         word_boxes = [b for b in boxes if not b.items and b.y1 - b.y0 < 18]
+        # 색을 칠한 한 줄 높이 띠(정답 선지의 노란 형광펜)는 박스가 아니라 글자 음영
+        for b in boxes:
+            if b.fill and b.y1 - b.y0 < 18 and len(b.items) == 1 and isinstance(b.items[0], Line):
+                b.items[0].box = None
+                word_boxes.append(b)
         if word_boxes:
             stats["inline_word_boxes"] += len(word_boxes)
             boxes = [b for b in boxes if b not in word_boxes]
@@ -895,21 +950,34 @@ def extract(pdf_path: str) -> Extraction:
                        or (s.horizontal and abs(s.x0 - bk.x) <= 2 and (abs(s.y0 - bk.y0) <= 2 or abs(s.y0 - bk.y1) <= 2))
                        for bk in brackets)
 
+        frames = [box_rects[i] for i in inset]
+
+        def _on_frame(s: _Seg) -> bool:  # 안쪽 틀(상자 모양)의 변
+            return any(abs(s.x0 - fx) < 1.5 and s.y0 >= fy0 - 1.5 and s.y1 <= fy1 + 1.5
+                       for fx0, fy0, fx1, fy1 in frames for fx in (fx0, fx1))
+
         for b in boxes:
             n = 0
             for s in segs:
                 if s.vertical and b.x0 + 3 < s.x0 < b.x1 - 3 and b.y0 - 1 <= s.y0 and s.y1 <= b.y1 + 1 \
-                        and not _in_table(s.x0, s.y0, s.x1, s.y1) and not _bracket_seg(s):
+                        and not _in_table(s.x0, s.y0, s.x1, s.y1) and not _bracket_seg(s) and not _on_frame(s):
                     n += 1
             for r in others:
                 if b.x0 + 2 < r.x0 and r.x1 < b.x1 - 2 and b.y0 + 2 < r.y0 and r.y1 < b.y1 - 2 \
-                        and not _in_table(r.x0, r.y0, r.x1, r.y1):
+                        and not _in_table(r.x0, r.y0, r.x1, r.y1) and not _inset((r.x0, r.y0, r.x1, r.y1), (b.x0, b.y0, b.x1, b.y1)):
                     n += 1
             inner = []
             for (x0, y0, x1, y1) in nested_rects:
                 if b.x0 - 1 <= x0 and x1 <= b.x1 + 1 and b.y0 - 1 <= y0 and y1 <= b.y1 + 1:
                     n += 4
                     inner.append((x0, y0, x1, y1))
+            # 낱말 띠: 박스 안 사각형이 줄 하나만 둘러싸면 그 줄의 띠 테두리(거의 겹친 사각형 두 개면 이중선)
+            for r in inner:
+                inside = [ln for ln in b.items if isinstance(ln, Line)
+                          and r[0] - 1 <= (ln.x0 + ln.x1) / 2 <= r[2] + 1 and r[1] - 1 <= (ln.y0 + ln.y1) / 2 <= r[3] + 1]
+                if len(inside) == 1 and r[3] - r[1] < 3 * inside[0].size:
+                    twin = any(q is not r and all(abs(u - v) < 3 for u, v in zip(q, r)) for q in inner)
+                    inside[0].frame = "DOUBLE_SLIM" if twin else (inside[0].frame or "SOLID")
             inner += [(r.x0, r.y0, r.x1, r.y1) for r in others if b.x0 + 2 < r.x0 and r.x1 < b.x1 - 2
                       and b.y0 + 2 < r.y0 and r.y1 < b.y1 - 2]
             b.inner_drawings = n

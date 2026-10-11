@@ -26,6 +26,7 @@ class Glyph:
     underline: bool = False
     icon: Optional[str] = None  # 아이콘 이미지 해시(원문자)
     color: Optional[str] = None  # 검정이 아닌 글자 색("#28448E" 등)
+    shade: Optional[str] = None  # 글자 뒤 형광펜 색
 
     @property
     def is_space(self) -> bool:
@@ -48,6 +49,7 @@ class Line:
     cell: Optional[tuple[float, float]] = None  # 표 칸 안의 줄이면 그 칸의 (왼쪽, 오른쪽)
     bracket: Optional[int] = None  # [A] 묶음 괄호 안의 줄이면 괄호 id
     bracket_label: bool = False    # 묶음 괄호 옆의 [A] 표시 줄
+    frame: Optional[str] = None    # 박스 안에서 이 줄만 둘러싼 띠 테두리: "SOLID" | "DOUBLE_SLIM"
 
     @property
     def text(self) -> str:
@@ -92,6 +94,9 @@ class Box:
     y1: float
     inner_drawings: int = 0
     framed_lines: int = 0  # 박스 안 작은 사각형(도식의 칸) 속에 든 줄 수
+    fill: Optional[str] = None  # 바탕색(문제 공략 Tip 의 연두, 지문의 회색 등)
+    border_color: Optional[str] = None  # 테두리 색(검정이 아니면)
+    border: bool = True  # False: 선 없이 바탕색만 칠한 영역
     items: list[Union[Line, ImageEl]] = field(default_factory=list)
     # 단/페이지를 넘어 이어지는 박스 조각
     parts: list["Box"] = field(default_factory=list)
@@ -183,6 +188,7 @@ class Run:
     color: Optional[str] = None  # 검정이 아닌 글자 색
     size: float = 0.0  # 원문 글자 크기(pt). 본문 크기 대비 비율은 rel
     rel: float = 1.0  # 원문 본문 글자 크기 대비 비율(문제 밖 내용에서 작은 설명 글 등을 줄여 쓸 때)
+    shade: Optional[str] = None  # 글자 뒤 형광펜 색
 
 
 @dataclass
@@ -197,6 +203,7 @@ class Para:
     table: Optional["TableEl"] = None    # kind == "table"
     label: str = ""                      # kind == "bracket": "[A]"
     children: list = field(default_factory=list)  # kind == "bracket": 괄호 안 문단들
+    frame: Optional[str] = None  # 이 문단만 둘러싼 띠 테두리("SOLID" | "DOUBLE_SLIM", 낱말 띠 등)
     wide: bool = False  # 전폭 쪽(PageInfo.single)의 문제 밖 내용: 새 쪽에 한 단(가운데 선 없음)으로
 
     @property
@@ -211,6 +218,9 @@ class AuxBlock:
     paras: list[Para] = field(default_factory=list)
     diagram: Optional[ImageEl] = None  # 도식 박스는 영역 이미지로 대체
     wide: bool = False  # Para.wide 와 같음
+    fill: Optional[str] = None  # 바탕색
+    border_color: Optional[str] = None  # 테두리 색
+    border: bool = True  # False: 선 없이 바탕색만
 
 
 @dataclass

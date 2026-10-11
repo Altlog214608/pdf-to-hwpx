@@ -202,14 +202,15 @@ class Styles:
         return cid
 
     def add_border_fill(self, width: str = "0.12 mm", fill: Optional[str] = None,
-                        sides_on: tuple[str, ...] = ("left", "right", "top", "bottom")) -> int:
-        key = ("bf", width, fill, sides_on)
+                        sides_on: tuple[str, ...] = ("left", "right", "top", "bottom"),
+                        color: str = "#000000", line: str = "SOLID") -> int:
+        key = ("bf", width, fill, sides_on) if (color, line) == ("#000000", "SOLID") else ("bf", width, fill, sides_on, color, line)
         if key in self.cache:
             return self.cache[key]
         bid = max(self.bf_ids) + 1
         self.bf_ids.append(bid)
         self.cache[key] = bid
-        sides = "".join(f'<hh:{s}Border type="{"SOLID" if s in sides_on else "NONE"}" width="{width}" color="#000000"/>'
+        sides = "".join(f'<hh:{s}Border type="{line if s in sides_on else "NONE"}" width="{width}" color="{color}"/>'
                         for s in ("left", "right", "top", "bottom"))
         brush = (f'<hc:fillBrush><hc:winBrush faceColor="{fill}" hatchColor="#999999" alpha="0"/></hc:fillBrush>'
                  if fill else "")
@@ -443,9 +444,9 @@ class HwpxWriter:
         if r.size and abs(r.rel - 1.0) >= 0.08:
             height = int(round(self.style.body_size * r.rel * 2) / 2 * 100)
             height = max(500, min(height, 3000))
-        if not r.color and not height:
+        if not r.color and not height and not r.shade:
             return cp
-        return self.styles.derive_char(cp, color=r.color, height=height)
+        return self.styles.derive_char(cp, color=r.color, height=height, shade=r.shade)
 
     def _runs_xml(self, runs: list[Run], base_bold: bool = False) -> str:
         out = []
@@ -661,12 +662,29 @@ class HwpxWriter:
             out.append(self._p(pp, self._runs_xml(p.runs)))
         return out
 
+    def _framed(self, p: Para, width: int) -> str:
+        """낱말 띠(이 문단만 둘러싼 테두리, 이중선 포함): 한 칸 표로."""
+        S = self.styles
+        bf = S.add_border_fill(width="0.4 mm" if p.frame == "DOUBLE_SLIM" else "0.12 mm", line=p.frame or "SOLID")
+        h = int(round(self.style.body_size * 100 * 1.8))
+        body = self._note_p(S.derive(0, align="CENTER" if p.align == "CENTER" else "LEFT"), self._runs_xml(p.runs))
+        return self._tbl([[self._tc(0, 0, 1, 1, width, h, bf, body)]], 1, width, h, bf)
+
+    def _aux_border(self, blk: AuxBlock, top: int, bottom: int) -> Optional[tuple]:
+        """문제 밖 상자: 원문의 바탕색·테두리 색(선 없는 색 영역 포함)."""
+        if not self._styled or not (blk.fill or blk.border_color or not blk.border):
+            return None
+        sides = ("left", "right", "top", "bottom") if blk.border else ()
+        bf = self.styles.add_border_fill(width="0.2 mm", fill=blk.fill, sides_on=sides, color=blk.border_color or "#000000")
+        return (bf, 300, 300, top, bottom, 1)
+
     def _aux(self, blk: AuxBlock, last_in_question: bool) -> list[str]:
         S = self.styles
         out = []
         self.stats["aux_boxes"] += 1
         if blk.title:
-            out.append(self._p(PP["aux_title"], self._runs_xml([Run(blk.title)])))
+            tb = self._aux_border(blk, 120, 40)
+            out.append(self._p(S.derive(PP["aux_title"], border=tb) if tb else PP["aux_title"], self._runs_xml([Run(blk.title)])))
         body = [p for p in blk.paras]
         while body and body[-1].kind == "blank":
             body.pop()
@@ -676,6 +694,9 @@ class HwpxWriter:
             last = i == len(body) - 1
             base = PP["aux_last"] if last else PP["aux_mid"]
             ov: dict = {}
+            bd = self._aux_border(blk, 120 if i == 0 and not blk.title else 40, 120 if last else 40)
+            if bd:
+                ov["border"] = bd
             if i == 0 and not blk.title:
                 ov.update(prev=280, offset_top=120)
             if p.kind == "image":
@@ -689,6 +710,9 @@ class HwpxWriter:
                 continue
             if p.kind == "blank":
                 out.append(self._empty(S.derive(base, **ov)))
+                continue
+            if p.frame and self._styled:
+                out.append(self._p(S.derive(base, align="CENTER", intent=0, **ov), self._framed(p, self.col_w - 2000)))
                 continue
             if p.align in ("RIGHT", "CENTER"):
                 ov["align"] = p.align
@@ -883,6 +907,8 @@ class HwpxWriter:
                 return [self._p(S0.derive(PP["plain"], align="CENTER"), self._table(it.table, self.col_w - 300))]
             if it.kind == "bracket":
                 return [self._p(PP["plain"], self._bracket(it, self.col_w - 200, 0, {}))]
+            if it.kind == "text" and it.frame:
+                return [self._p(S0.derive(PP["plain"], align="CENTER"), self._framed(it, self.col_w - 1000))]
             if it.kind == "text":
                 ov = {"align": it.align} if it.align in ("RIGHT", "CENTER") else {"intent": _indent_hwp(it.indent_pt)}
                 return [self._p(S0.derive(PP["plain"], **ov) if it.wide else PP["plain"], self._runs_xml(it.runs))]

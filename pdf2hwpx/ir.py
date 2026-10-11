@@ -39,17 +39,18 @@ class _BracketGroup:
 # ------------------------------------------------------------- helpers ----
 
 def _same_look(a: Run, b: Run) -> bool:
-    return a.underline == b.underline and a.bold == b.bold and a.color == b.color and a.size == b.size
+    return a.underline == b.underline and a.bold == b.bold and a.color == b.color and a.size == b.size \
+        and a.shade == b.shade
 
 
 def _runs_from_glyphs(glyphs: list[Glyph], bold: bool = False) -> list[Run]:
     """글자 -> 런. 원문의 밑줄과 굵게(지문 속 강조 시어 등), 글자 색과 크기(0.5pt 단위)를 보존한다."""
     runs: list[Run] = []
     for g in glyphs:
-        r = Run(g.c, g.underline, bold or g.bold, g.color, round(g.size * 2) / 2 if not g.icon else 0.0)
+        r = Run(g.c, g.underline, bold or g.bold, g.color, round(g.size * 2) / 2 if not g.icon else 0.0, shade=g.shade)
         if g.is_space and runs:  # 공백은 앞 런의 모양을 따라가 런이 잘게 쪼개지지 않게
             p = runs[-1]
-            r = Run(g.c, p.underline and r.underline, p.bold, p.color, p.size)
+            r = Run(g.c, p.underline and r.underline, p.bold, p.color, p.size, shade=p.shade if g.shade else None)
         if runs and _same_look(runs[-1], r):
             runs[-1].text += g.c
         else:
@@ -62,7 +63,7 @@ def _append_runs(dst: list[Run], src: list[Run]) -> None:
         if dst and _same_look(dst[-1], r):
             dst[-1].text += r.text
         else:
-            dst.append(Run(r.text, r.underline, r.bold, r.color, r.size))
+            dst.append(Run(r.text, r.underline, r.bold, r.color, r.size, shade=r.shade))
 
 
 def _clean_runs(runs: list[Run]) -> list[Run]:
@@ -70,7 +71,7 @@ def _clean_runs(runs: list[Run]) -> list[Run]:
     for r in runs:
         t = re.sub(r"[ \t]{2,}", " ", r.text)
         if t:
-            _append_runs(out, [Run(t, r.underline, r.bold, r.color, r.size)])
+            _append_runs(out, [Run(t, r.underline, r.bold, r.color, r.size, shade=r.shade)])
     if out:
         out[0].text = out[0].text.lstrip()
         out[-1].text = out[-1].text.rstrip()
@@ -197,6 +198,8 @@ class Builder:
                 brk = True
             if LABEL_RE.match(e.text) or LABEL_RE.match(prev.text):
                 brk = True
+            if e.frame != prev.frame:  # 띠 테두리 줄(낱말 띠)은 따로 한 문단
+                brk = True
             if len(cur) >= 2 and self.rx(e) > self.rx(cur[1]) + 0.4 * e.size:
                 brk = True  # 새 문단의 첫 줄 들여쓰기
             if brk:
@@ -274,7 +277,7 @@ class Builder:
                     last = runs[-1] if runs else None
                     _append_runs(runs, [Run(" ", False, bold, last.color if last else None, last.size if last else 0.0)])
             _append_runs(runs, _runs_from_glyphs(ln.glyphs, bold))
-        p = Para(runs=_clean_runs(runs))
+        p = Para(runs=_clean_runs(runs), frame=lines[0].frame)
         left, right = self.bounds(lines[0])
         width = max(1.0, right - left)
         first = lines[0]
@@ -315,7 +318,7 @@ class Builder:
             title = re.sub(r"\s*[>〉＞》]$", ">", title)
             items = items[1:]
         kind = "조건" if "조건" in title else ("보기" if "보기" in title or not title else "기타")
-        blk = AuxBlock(title=title, kind=kind)
+        blk = AuxBlock(title=title, kind=kind, fill=box.fill, border_color=box.border_color, border=box.border)
         drawings = box.inner_drawings + sum(p.inner_drawings for p in box.parts)
         diagram = drawings >= 4
         if diagram and wide:
