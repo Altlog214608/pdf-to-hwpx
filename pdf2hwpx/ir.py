@@ -301,7 +301,7 @@ class Builder:
         return p
 
     # ---- aux box ----
-    def aux_from_box(self, box: Box) -> AuxBlock:
+    def aux_from_box(self, box: Box, wide: bool = False) -> AuxBlock:
         items = box.all_items()
         title = ""
         if items and isinstance(items[0], Line) and TITLE_RE.match(items[0].text):
@@ -312,7 +312,14 @@ class Builder:
         kind = "조건" if "조건" in title else ("보기" if "보기" in title or not title else "기타")
         blk = AuxBlock(title=title, kind=kind)
         drawings = box.inner_drawings + sum(p.inner_drawings for p in box.parts)
-        if drawings >= 4:
+        diagram = drawings >= 4
+        if diagram and wide:
+            # 전폭 쪽의 큰 글 상자(시대 특징 설명 + 낱말 띠 하나)는 글로 둔다. 도형이 줄 수의 두 배를 넘거나
+            # 줄의 30% 이상이 작은 칸 안에 든 것(화살표 풀이·구조도)만 그림으로
+            n = sum(1 for x in items if isinstance(x, Line))
+            framed = box.framed_lines + sum(p.framed_lines for p in box.parts)
+            diagram = drawings >= 2 * n or framed >= max(2, 0.3 * n)
+        if diagram:
             # 화살표/칸 등 도형이 그려진 박스: 텍스트로 풀면 순서가 깨지므로 영역을 그림으로 보존
             parts = [box] + box.parts
             imgs = []
@@ -507,6 +514,7 @@ def build_document(ex: Extraction) -> Document:
         doc.warnings.append(f"판별하지 못한 원문자 아이콘 {unresolved}개를 ○로 표시함")
 
     header_set = set(headers)
+    single_pages = {pm.info.number for pm in ex.pages if pm.info.single}
     i = 0
     current_passage: Optional[Passage] = None
     passage_id = 0
@@ -537,6 +545,20 @@ def build_document(ex: Extraction) -> Document:
             i = j
             continue
         # 문제/지문 밖의 내용도 버리지 않는다
+        if it.page in single_pages:
+            # 전폭 쪽(작품 개관·표·구조도): 한 단으로 읽었으므로 이어지는 줄은 문단으로 잇고, 출력은 새 쪽에 한 단으로
+            j = i + 1
+            if not isinstance(it, Box):
+                while j < answer_idx and j not in header_set and flow[j].page in single_pages \
+                        and not isinstance(flow[j], Box) and not (isinstance(flow[j], Line) and GUIDE_RE.match(flow[j].text)):
+                    j += 1
+            out = [b.aux_from_box(it, wide=True)] if isinstance(it, Box) else b.paragraphs(flow[i:j])
+            for x in out:
+                x.wide = True
+            doc.items.extend(out)
+            doc.loose_notes.extend(f"p{x.page}: {getattr(x, 'text', '[그림/박스]')[:30]}" for x in flow[i:j])
+            i = j
+            continue
         if isinstance(it, Box):
             doc.items.append(b.aux_from_box(it))
         else:

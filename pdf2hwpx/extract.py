@@ -201,6 +201,41 @@ def _notice_items(lines: list, imgs: list, boxes: list, tables: list) -> set[int
     return ids
 
 
+def _full_width_page(frags: list, segs: list, grids: list, imgs: list, W: float, top: float, bottom: float) -> bool:
+    """가운데 단 구분선이 없는 쪽에서, 쪽 가운데를 가로지르는 글 조각·박스·표·그림이 내용 높이의 30% 이상을 차지하면
+    두 단이 아니라 쪽 전체 폭을 쓰는 쪽(시대별 문학의 작품 개관·표·구조도 등)이다. 두 단 문제 쪽은 모두 구분선이 있고
+    가운데를 가로지르는 것이 거의 없다(실제 PDF 34개에서 4% 이하).
+    다만 큰 상자 하나가 쪽을 가로지를 뿐 그 안의 글은 좌우 두 칸으로 나뉜 쪽(해설서의 '핵심 개념' 상자)은 두 단으로 읽어야
+    순서가 맞으므로, 가운데를 가로지르는 글 줄(전체 글자의 10% 이상)이나 표가 있어야 한다."""
+    mid = W / 2
+    n_all = sum(len(f.glyphs) for f in frags)
+    n_cross = sum(len(f.glyphs) for f in frags if f.x0 < mid - 10 and f.x1 > mid + 10)
+    table_cross = any(xs[0] < mid - 10 and xs[-1] > mid + 10 for xs, _, _ in grids)
+    if not table_cross and n_cross < 0.1 * max(1, n_all):
+        return False
+    rects = [(f.x0, f.y0, f.x1, f.y1) for f in frags]
+    rects += _detect_boxes(segs, top, bottom)
+    rects += [(xs[0], ys[0], xs[-1], ys[-1]) for xs, ys, _ in grids]
+    rects += [(x0, y0, x1, y1) for x0, y0, x1, y1, *_ in imgs if x1 - x0 < 0.95 * W and top < (y0 + y1) / 2 < bottom]
+    rects = [r for r in rects if r[3] > top and r[1] < bottom]
+
+    def covered(ivs: list[tuple[float, float]]) -> float:
+        tot, cur = 0.0, None
+        for a, b in sorted(ivs):
+            if cur is None or a > cur[1]:
+                tot += cur[1] - cur[0] if cur else 0.0
+                cur = [a, b]
+            else:
+                cur[1] = max(cur[1], b)
+        return tot + (cur[1] - cur[0] if cur else 0.0)
+
+    content = covered([(max(top, r[1]), min(bottom, r[3])) for r in rects])
+    if content < 0.15 * (bottom - top):  # 거의 빈 쪽
+        return False
+    cross = covered([(max(top, r[1]), min(bottom, r[3])) for r in rects if r[0] < mid - 10 and r[2] > mid + 10])
+    return cross >= 0.3 * content
+
+
 def _invisible(d: dict) -> bool:
     """선(stroke)이 없고 칠한 색이 흰색이거나 거의 투명한 그림 명령: 화면에 보이지 않는다."""
     if d.get("type") != "f":
@@ -317,10 +352,11 @@ def _cluster(values: list[float], tol: float = 2.0) -> list[float]:
 
 
 def _detect_tables(segs: list[_Seg], fills: list[tuple[fitz.Rect, Optional[str]]], top: float, bottom: float, W: float,
-                   skip_vertical_x: Optional[float]) -> list[tuple[list[float], list[float], list[Cell]]]:
+                   skip_vertical_x: Optional[float], wide: bool = False) -> list[tuple[list[float], list[float], list[Cell]]]:
     """가로/세로 선분이 서로 맞물려 격자를 이루면 표로 본다.
-    박스(사각형 하나)는 가로 2 + 세로 2라서 표가 아니고, 칸이 2개 이상 생기는 격자만 표다."""
-    hs = [(s.y0, s.x0, s.x1) for s in segs if s.horizontal and s.x1 - s.x0 < 0.6 * W and top - 1 <= s.y0 <= bottom + 1]
+    박스(사각형 하나)는 가로 2 + 세로 2라서 표가 아니고, 칸이 2개 이상 생기는 격자만 표다.
+    wide: 전폭 쪽이면 쪽 폭의 60%가 넘는 가로선도 표의 행 선으로 본다(두 단 쪽에서는 쪽 구분선)."""
+    hs = [(s.y0, s.x0, s.x1) for s in segs if s.horizontal and (wide or s.x1 - s.x0 < 0.6 * W) and top - 1 <= s.y0 <= bottom + 1]
     vs = [(s.x0, s.y0, s.y1) for s in segs if s.vertical and top - 1 <= s.y0 and s.y1 <= bottom + 1
           and not (skip_vertical_x is not None and abs(s.x0 - skip_vertical_x) < 1.0)]
     H = [r for r in _merge_runs(hs, tol=1.5) if r[2] - r[1] >= 4]
@@ -601,8 +637,21 @@ def extract(pdf_path: str) -> Extraction:
 
         # ---- 표: 격자를 칸으로 복원하고 칸 안의 글자는 칸별로 따로 줄을 만든다 ----
         colsep = split_x if best_len else None
+        grids = _detect_tables(segs, fills, top, bottom, W, colsep)
+        # ---- 전폭 쪽: 가운데 단 구분선이 없고 글·박스·표·그림이 가운데를 가로지르는 쪽은 한 단으로 읽는다 ----
+        single = False
+        if not best_len:
+            wide_grids = _detect_tables(segs, fills, top, bottom, W, None, wide=True)
+            single = _full_width_page(kept, segs, wide_grids, imgs, W, top, bottom)
+        if single:
+            # 큰 표 칸 안에 든 작은 표(구성 칸의 초장/중장/종장 상자 등)는 따로 두지 않는다: 글은 바깥 표의 칸에 들어간다
+            grids = [g for g in wide_grids if not any(
+                h is not g and h[0][0] - 1 <= g[0][0] and g[0][-1] <= h[0][-1] + 1 and h[1][0] - 1 <= g[1][0]
+                and g[1][-1] <= h[1][-1] + 1 for h in wide_grids)]
+            split_x = W + 1.0  # 모든 내용이 단 0
+            stats["single_column_pages"] += 1
         tables: list[TableEl] = []
-        for xs, ys, cells in _detect_tables(segs, fills, top, bottom, W, colsep):
+        for xs, ys, cells in grids:
             col = 0 if (xs[0] + xs[-1]) / 2 < split_x else 1
             tables.append(TableEl(pno, col, xs, ys, cells))
 
@@ -845,10 +894,16 @@ def extract(pdf_path: str) -> Extraction:
                 if b.x0 + 2 < r.x0 and r.x1 < b.x1 - 2 and b.y0 + 2 < r.y0 and r.y1 < b.y1 - 2 \
                         and not _in_table(r.x0, r.y0, r.x1, r.y1):
                     n += 1
+            inner = []
             for (x0, y0, x1, y1) in nested_rects:
                 if b.x0 - 1 <= x0 and x1 <= b.x1 + 1 and b.y0 - 1 <= y0 and y1 <= b.y1 + 1:
                     n += 4
+                    inner.append((x0, y0, x1, y1))
+            inner += [(r.x0, r.y0, r.x1, r.y1) for r in others if b.x0 + 2 < r.x0 and r.x1 < b.x1 - 2
+                      and b.y0 + 2 < r.y0 and r.y1 < b.y1 - 2]
             b.inner_drawings = n
+            b.framed_lines = sum(1 for ln in b.items if isinstance(ln, Line) and any(
+                x0 - 1 <= (ln.x0 + ln.x1) / 2 <= x1 + 1 and y0 - 1 <= (ln.y0 + ln.y1) / 2 <= y1 + 1 for x0, y0, x1, y1 in inner))
             b.items.sort(key=lambda it: (it.y0, it.x0))
 
         # ---- 출판사 저작권·콘텐츠 보호 고지문(© 마크 포함)은 문제 내용이 아니다 ----
@@ -864,12 +919,12 @@ def extract(pdf_path: str) -> Extraction:
         def _col_bounds(col: int) -> tuple[float, float]:
             ls = [ln for ln in lines if ln.col == col and len(ln.glyphs) >= 12]
             if not ls:
-                return ((36.0, split_x - 14) if col == 0 else (split_x + 14, W - 36))
+                return ((36.0, min(split_x, W) - 14) if col == 0 else (split_x + 14, W - 36))
             xs0 = sorted(ln.x0 for ln in ls)
             xs1 = sorted(ln.x1 for ln in ls)
             return xs0[0], xs1[int(0.9 * (len(xs1) - 1))]
 
-        info = PageInfo(pno, W, H, split_x, top, bottom, _col_bounds(0), _col_bounds(1))
+        info = PageInfo(pno, W, H, split_x, top, bottom, _col_bounds(0), _col_bounds(1), single=single)
 
         # ---- 읽기 순서 ----
         flow: list[FlowItem] = []
@@ -894,7 +949,7 @@ def extract(pdf_path: str) -> Extraction:
             if isinstance(it, Box) and isinstance(prev, Box):
                 last = prev.parts[-1] if prev.parts else prev
                 pinfo, cinfo = info_by_page[last.page], info_by_page[it.page]
-                if (last.page, last.col) != (it.page, it.col) \
+                if (last.page, last.col) != (it.page, it.col) and pinfo.single == cinfo.single \
                         and last.y1 >= pinfo.content_bottom - 4 * body_size \
                         and it.y0 <= cinfo.content_top + 4 * body_size \
                         and not _starts_with_title(it):

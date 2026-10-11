@@ -47,14 +47,15 @@ class Writer:
         self.first_page_pad = 0.0  # 첫 쪽 맨 위를 차지한 고지문 높이(두 단 모두 그 아래부터)
         self.new_page()
 
-    def new_page(self):
+    def new_page(self, divider: bool = True):
         self.page = self.doc.new_page(width=595.2, height=841.9)
         banner = _picture_png(400, 10, (0.5, 0.5, 0.5))
         self.page.insert_image(fitz.Rect(56.6, 58, 538.6, 61), stream=banner, keep_proportion=False)
         self.page.insert_image(fitz.Rect(56.6, 784, 538.6, 787), stream=banner, keep_proportion=False)
         self.page.insert_text((333, 50), "[시험에 꼭 나오는 문제] 합성 테스트", fontname=FONT, fontsize=7.9)
         self.page.insert_text((516, 800), f"- {self.doc.page_count} -", fontname=FONT, fontsize=9.1)
-        self.page.draw_line(fitz.Point(297.6, 72), fitz.Point(297.6, 772), width=0.24)
+        if divider:
+            self.page.draw_line(fitz.Point(297.6, 72), fitz.Point(297.6, 772), width=0.24)
         self.col, self.y = 0, TOP + 10
 
     def next_col(self):
@@ -189,9 +190,45 @@ def _notice(w: "Writer") -> None:
     w.y += 76.0
 
 
+INTRO_PROSE = ("고려 후기에 발생한 시조 갈래는 조선 후기로 올수록 작자층이 확대되었고 그동안 양반들의 정서를 절제된 형식과 "
+               "언어로 표현하던 흐름에서 벗어나 생동하는 현실과 욕망의 세계를 자유롭고 발랄한 언어로 담아내면서 시조의 형식과 "
+               "언어에 변화가 일어났다 사설시조는 현실을 그대로 드러내는 작품이 많다")
+INTRO_ROWS = [("갈래", "사설시조"), ("성격", "이별가, 수심가"), ("주제", "임과 이별한 절망적 슬픔")]
+
+
+def _intro(w: "Writer") -> None:
+    """가운데 선 없는 전폭 쪽: 전폭 글 상자(산문 4줄 남짓) + 머리 줄 + 전폭 표(행 선이 쪽 폭의 80%)."""
+    x0, x1 = 56.6, 538.6
+    # 첫 쪽은 Writer()가 가운데 선을 그어 만들었으므로 지우고 선 없이 다시 만든다
+    w.doc.delete_page(0)
+    w.new_page(divider=False)
+    y = w.y
+    w.text(x0 + 5, y + 10, "• 작자 미상")
+    y += 16
+    lines = w.wrap(INTRO_PROSE, x1 - x0 - 12, first_indent=8.0)
+    top = y
+    for k, (words, at_space, ind) in enumerate(lines):
+        last = k == len(lines) - 1
+        w.justified([*words[:-1], words[-1] + (" " if at_space and not last else "")], x0 + 6 + ind, x1 - 6, y + 10, last)
+        y += 14
+    w.page.draw_rect(fitz.Rect(x0, top - 22, x1, y + 6), width=0.5)
+    y += 26
+    w.text(x0, y, "• 개관 정리")
+    y += 8
+    ys = [y + 20 * k for k in range(len(INTRO_ROWS) + 1)]
+    for yy in ys:
+        w.page.draw_line(fitz.Point(x0, yy), fitz.Point(x1, yy), width=0.5)
+    for xx in (x0, x0 + 70, x1):
+        w.page.draw_line(fitz.Point(xx, ys[0]), fitz.Point(xx, ys[-1]), width=0.5)
+    for k, (a, b) in enumerate(INTRO_ROWS):
+        w.text(x0 + 35 - tl(a) / 2, ys[k] + 14, a)
+        w.text(x0 + 78, ys[k] + 14, b)
+
+
 def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tuple[int, ...] = (),
           notice: bool = False, word_box: tuple[int, ...] = (), narrow_pairs: bool | str = False,
-          bare_numbers: bool = False, credit_nospace: bool = False, written_parts: bool = False) -> dict:
+          bare_numbers: bool = False, credit_nospace: bool = False, written_parts: bool = False,
+          intro_page: bool = False) -> dict:
     """answer_style: 'bracket' = '1) [정답] ③ / [해설] …', 'plain' = '1) 정답 ③ / 오답 point / …'(최다오답·최상위 공략형)
     start: 첫 문제 번호(단원 중간부터 시작하는 문제집 일부, 예: 13번부터)
     white_bg: 발문 줄 뒤에 선 없는 흰 사각형(한글이 내보내는 문단 배경, 보이지 않음)이 깔린 문제(몇 번째, 1부터)
@@ -201,8 +238,12 @@ def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tu
         "wide_label"이면 원문자와 글 사이를 넓게(4.6pt), 글 속 띄어쓰기는 좁게(2.9pt), 두 선택지 사이는 글자 0.7개
     bare_numbers: 문제 번호를 마침표 없이 큰 회색 숫자만 찍고 옆에 흰색 아주 작은 숨은 글자 "zb1)"(시대별 문학형)
     credit_nospace: 3번 선택지 아래 출전을 대시 뒤 띄어쓰기 없이("-작가1, 「작품1」")
-    written_parts: 4번을 "① …쓰시오. / (a) : / ② …쓰시오. / (b) :" 하위 물음 + 그 아래 <조건> 박스로"""
+    written_parts: 4번을 "① …쓰시오. / (a) : / ② …쓰시오. / (b) :" 하위 물음 + 그 아래 <조건> 박스로
+    intro_page: 맨 앞에 가운데 선 없이 쪽 전체 폭을 쓰는 '작품 개관' 쪽(전폭 산문 + 전폭 표 + 전폭 글 상자, 시대별 문학형)"""
     w = Writer()
+    if intro_page:
+        _intro(w)
+        w.new_page()
     if notice:
         _notice(w)
     # ---------- 지문 1: (가) 산문 + (나) 시, 단을 넘어가는 박스 ----------
