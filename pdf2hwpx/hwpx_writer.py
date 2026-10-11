@@ -18,7 +18,7 @@ from typing import Optional
 from xml.sax.saxutils import escape
 
 from .master_template import apply_template
-from .masterpage import MARGINS_WITH_MASTER, NS as MASTER_NS, PAPER_W, Logo, MasterIds, build_masterpage
+from .masterpage import MARGINS_WITH_MASTER, NS as MASTER_NS, PAPER_H, PAPER_W, Logo, MasterIds, build_masterpage
 from .model import BLANK_BOX, AnswerEntry, AuxBlock, Document, ImageEl, Para, Passage, Question, Run, TableEl
 from .style import DocStyle
 
@@ -57,6 +57,25 @@ def _strip_prefix(runs: list[Run], pat: re.Pattern) -> list[Run]:
         out.append(Run(r.text[cut:], bold=r.bold, underline=r.underline) if cut else r)
         cut = 0
     return out
+
+
+COLPR_RE = re.compile(r"<hp:colPr [^>]*?(?:/>|>.*?</hp:colPr>)", re.S)
+
+
+def _colpr(cols: int) -> str:
+    """단 정의. 두 단은 템플릿과 같은 간격·가운데 선."""
+    if cols == 1:
+        return '<hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/>'
+    return COLPR_RE.search(_tpl("secpr.xml")).group(0)
+
+
+def _new_columns(p_xml: str, cols: int, page_break: bool) -> str:
+    """문단 앞에 새 단 정의를 넣고(필요하면 쪽 나눔) 그 문단부터 단 수를 바꾼다."""
+    m = re.match(r"<hp:p [^>]*>", p_xml)
+    head = m.group(0)
+    if page_break:
+        head = head.replace('pageBreak="0"', 'pageBreak="1"', 1)
+    return head + f'<hp:run charPrIDRef="0"><hp:ctrl>{_colpr(cols)}</hp:ctrl></hp:run>' + p_xml[m.end():]
 
 
 def _tpl(name: str) -> str:
@@ -257,7 +276,7 @@ class HwpxWriter:
         self.images: list[tuple[str, bytes]] = []
         self.preview_png = preview_png
         self._rng = random.Random(20260)
-        self.stats = {"aux_boxes": 0, "passage_boxes": 0, "spacers": 0, "pictures": 0, "paragraphs": 0}
+        self.stats = {"aux_boxes": 0, "passage_boxes": 0, "spacers": 0, "pictures": 0, "paragraphs": 0, "column_switches": 0}
         st = self.style
         # 글꼴/크기: 본문 글자 모양(0, 7, 8, 9, 10)은 모두 글꼴 1을 쓴다
         self.styles.set_fonts(st.body_font, st.title_font)
@@ -273,6 +292,8 @@ class HwpxWriter:
         self.col_w = col_w
         self.img_max_in_box = col_w - 3000
         self.img_max_free = col_w - 600
+        m = self.margins  # 그림이 한 쪽 본문 높이를 넘지 않게(전폭 쪽의 큰 도식 그림)
+        self.img_max_h = PAPER_H - m["top"] - m["bottom"] - m["header"] - m["footer"] - 3000
         self.master_ids: Optional[MasterIds] = None
         self.logo: Optional[Logo] = None
         self.master_tpl: Optional[tuple[str, str]] = None  # 가져온 바탕쪽 (masterPage 속성, 안쪽 XML)
@@ -438,6 +459,9 @@ class HwpxWriter:
         if w > max_w:
             h = int(h * max_w / w)
             w = max_w
+        if h > self.img_max_h:
+            w = int(w * self.img_max_h / h)
+            h = self.img_max_h
         w, h = max(w, 200), max(h, 200)
         pid = self._rng.randint(10 ** 9, 2 * 10 ** 9)
         inst = self._rng.randint(10 ** 8, 9 * 10 ** 8)
@@ -775,9 +799,11 @@ class HwpxWriter:
         return out
 
     # ---------------------------------------------------------- build ----
-    def section_xml(self, paras: list[str], master_id: Optional[str] = None) -> str:
+    def section_xml(self, paras: list[str], master_id: Optional[str] = None, cols: int = 2) -> str:
         open_tag = _tpl("section_open.xml")
         secpr = _tpl("secpr.xml")
+        if cols == 1:  # 문서가 전폭 내용(작품 개관 등)으로 시작하면 처음부터 한 단
+            secpr = COLPR_RE.sub(_colpr(1), secpr, count=1)
         m = self.margins
         secpr = re.sub(r'<hp:margin header="\d+" footer="\d+" gutter="0" left="\d+" right="\d+" top="\d+" bottom="\d+"/>',
                        f'<hp:margin header="{m["header"]}" footer="{m["footer"]}" gutter="0" left="{m["left"]}" '
@@ -798,31 +824,58 @@ class HwpxWriter:
         paras = [head + sec_run + first[len(head):]] + paras[1:]
         return open_tag + "".join(paras) + "</hs:sec>"
 
-    def build_sections(self) -> list[str]:
+    def _item(self, it, prev_passage: bool) -> list[str]:
         S0 = self.styles
+        if isinstance(it, Passage):
+            return self._passage(it)
+        if isinstance(it, Question):
+            return self._question(it, prev_passage)
+        if isinstance(it, AuxBlock):
+            return self._aux(it, True)
+        if isinstance(it, Para):
+            if it.kind == "image":
+                return [self._p(PP["plain"], self._pic(it.image, self.img_max_free))]
+            if it.kind == "table":
+                return [self._p(S0.derive(PP["plain"], align="CENTER"), self._table(it.table, self.col_w - 300))]
+            if it.kind == "bracket":
+                return [self._p(PP["plain"], self._bracket(it, self.col_w - 200, 0, {}))]
+            if it.kind == "text":
+                ov = {"align": it.align} if it.align in ("RIGHT", "CENTER") else {"intent": _indent_hwp(it.indent_pt)}
+                return [self._p(S0.derive(PP["plain"], **ov) if it.wide else PP["plain"], self._runs_xml(it.runs))]
+            if it.kind == "blank" and it.wide:
+                return [self._empty(PP["plain"])]
+        return []
+
+    def _set_width(self, wide: bool) -> None:
+        """전폭 내용은 쪽 본문 폭 전체, 나머지는 한 단 폭으로 표·그림 크기를 맞춘다."""
+        full = PAPER_W - self.margins["left"] - self.margins["right"]
+        self.col_w = full if wide else (full - COL_GAP) // 2
+        self.img_max_in_box = self.col_w - 3000
+        self.img_max_free = self.col_w - 600
+
+    def build_sections(self) -> list[str]:
         body: list[str] = []
         prev_passage = False
-        for it in self.doc.items:
-            if isinstance(it, Passage):
-                body.extend(self._passage(it))
-                prev_passage = True
-            elif isinstance(it, Question):
-                body.extend(self._question(it, prev_passage))
-                prev_passage = False
-            elif isinstance(it, AuxBlock):
-                body.extend(self._aux(it, True))
-                prev_passage = False
-            elif isinstance(it, Para):
-                if it.kind == "image":
-                    body.append(self._p(PP["plain"], self._pic(it.image, self.img_max_free)))
-                elif it.kind == "table":
-                    body.append(self._p(S0.derive(PP["plain"], align="CENTER"), self._table(it.table, self.col_w - 300)))
-                elif it.kind == "bracket":
-                    body.append(self._p(PP["plain"], self._bracket(it, self.col_w - 200, 0, {})))
-                elif it.kind == "text":
-                    body.append(self._p(PP["plain"], self._runs_xml(it.runs)))
+        items = self.doc.items
+        first_wide = bool(items) and getattr(items[0], "wide", False)
+        wide_mode = first_wide
+        for it in items:
+            wide = getattr(it, "wide", False)
+            self._set_width(wide)
+            paras = self._item(it, prev_passage)
+            prev_passage = isinstance(it, Passage)
+            if not paras:
+                continue
+            if wide != wide_mode:
+                # 전폭 내용(작품 개관·표·구조도)은 새 쪽에서 한 단(가운데 선 없음)으로, 문제·지문이 다시 시작되면
+                # 새 쪽에서 원래 두 단(가운데 선)으로. 같은 구역 안에서 단 정의만 바꾸므로 미주 번호는 그대로 이어진다
+                paras[0] = _new_columns(paras[0], 1 if wide else 2, page_break=bool(body))
+                wide_mode = wide
+                self.stats["column_switches"] += 1
+            body.extend(paras)
+        self._set_width(False)
         mp = self.master_ids is not None or self.master_tpl is not None
-        sections = [self.section_xml(body, "masterpage0" if mp else None)]
+        sections = [self.section_xml(body, "masterpage0" if mp else None, cols=1 if first_wide else 2)]
         if self.leftover_answers:
             sections.append(self.section_xml(self._answers(), "masterpage1" if mp else None))
         return sections

@@ -249,7 +249,13 @@ def validate(ex: "Extraction | list[Extraction]", doc: Document, hwpx_path: str)
         if k < len(qs) and re.match(rf"^\s*{shown[k]}\s*\.", p["text"]):
             k += 1
     checks["question_order_status"] = "PASS" if seq_ok and k == len(qs) and qs else "FAIL"
-    if not qs:  # 내용은 옮겼지만 문제 머리를 하나도 못 찾음: 번호를 그림으로 넣은 해설서 같은 다른 양식
+    if not qs and not doc.answers:
+        # 문제 머리도 정답부도 없는 자료(예제 번호가 그림이고 풀이가 본문에 있는 해설서 등): 내용은 다 옮겼으므로
+        # '문제 있음'이 아니라 확인 필요. 정답부가 있는데 문제를 못 찾으면 정답 수 검사에서 실패로 잡힌다
+        checks["question_order_status"] = "WARN"
+        warns.append("문제·정답을 찾지 못한 자료(문제 번호가 그림이거나 문제집과 다른 양식) — 내용만 옮겼고 "
+                     "자동 번호·정답 미주는 없음")
+    elif not qs:
         causes.append("문제를 하나도 찾지 못함 (문제 번호가 그림이거나 문제집과 다른 양식) — 내용은 줄 단위로 옮겼고, "
                       "자동 번호·정답 미주는 넣지 못함")
     elif checks["question_order_status"] == "FAIL":

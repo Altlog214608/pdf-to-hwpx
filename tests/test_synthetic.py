@@ -709,7 +709,66 @@ def test_example_sheet_without_question_numbers(tmp_path):
     build_examples(str(pdf))
     res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
     v = res["validation"]
-    assert any("문제를 하나도 찾지 못함" in c for c in v["root_causes"]), v["root_causes"]
+    # 문제도 정답부도 없는 자료는 '문제 있음'이 아니라 '확인 필요'(내용은 다 옮김)
+    assert v["status"] == "WARN" and v["root_causes"] == [], v["root_causes"]
+    assert any("문제·정답을 찾지 못한 자료" in w for w in v["warnings"]), v["warnings"]
     assert not any("원문자 아이콘" in w for w in res["document"]["warnings"])
     text = " ".join(p["text"] for p in read_hwpx(res["hwpx"])["paragraphs"])
     assert "① 선택지 1-1" in text and "⑤ 선택지 4-5" in text and "○" not in text
+
+
+def _column_defs(hwpx: str) -> list[tuple[int, bool, str]]:
+    """section0 의 단 정의 차례: (단 수, 그 문단에서 쪽을 나누는지, 뒤따르는 글 앞부분)."""
+    import zipfile
+
+    with zipfile.ZipFile(hwpx) as z:
+        x = z.read("Contents/section0.xml").decode("utf-8")
+    out = []
+    for m in re.finditer(r'<hp:colPr [^>]*colCount="(\d)"', x):
+        head = re.match(r"<hp:p [^>]*>", x[x.rfind("<hp:p ", 0, m.start()):]).group(0)
+        rest = x[x.index(">", m.end()) + 1:][:4000]
+        out.append((int(m.group(1)), 'pageBreak="1"' in head, re.sub(r"<[^>]+>", "", rest)[:20]))
+    return out
+
+
+def test_full_width_intro_page_is_single_column(tmp_path):
+    """실사용([시대별 문학]): 앞쪽 '작품 개관' 쪽은 가운데 선 없이 쪽 전체 폭을 쓰는데, 두 단으로 나눠 읽어 줄 순서가 섞이고
+    전폭 표(행 선이 쪽 폭의 60%를 넘음)도 표로 못 읽었다. 가운데 선이 없고 내용이 가운데를 가로지르는 쪽은 한 단으로 읽고,
+    한글 파일에서도 한 단(가운데 선 없음)으로 넣은 뒤 지문·문제가 시작되면 새 쪽에서 원래 두 단으로. 미주는 그대로."""
+    pdf = tmp_path / "intro.pdf"
+    build(str(pdf), intro_page=True)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=DocStyle(answers_as_endnotes=True))
+    v = res["validation"]
+    assert v["status"] == "PASS", (v["root_causes"], v["warnings"])
+    assert v["checks"]["question_count"] == v["checks"]["endnotes"] == 5
+    items = res["document"]["items"]
+    first_q = next(k for k, x in enumerate(items) if x["type"] in ("passage", "question"))
+    intro = items[:first_q]
+    assert intro and all(x.get("wide") for x in intro)
+    box = next(x for x in intro if x["type"] == "aux")  # 문제 밖 박스(_block 이 type 을 aux 로 씀)
+    prose = " ".join(p["text"] for p in box["paras"])
+    assert "자작층" not in prose and "변화가 일어났다 사설시조는 현실을" in prose  # 줄 순서 그대로 한 문단
+    table = next(x for x in intro if x.get("kind") == "table")["table"]
+    assert (table["rows"], table["cols"]) == (3, 2)
+    assert [c["paras"][0]["text"] for c in table["cells"] if c["c"] == 0] == ["갈래", "성격", "주제"]
+    cols = _column_defs(res["hwpx"])
+    assert [(n, pb) for n, pb, _ in cols] == [(1, False), (2, True)], cols
+    assert cols[1][2].startswith("※ 다음 글을")
+
+
+def test_merge_with_full_width_pages_in_the_middle(tmp_path):
+    """통합본 중간에 전폭 쪽이 든 파일이 끼어도: 그 앞에서 쪽을 나눠 한 단, 다음 파일 지문부터 다시 쪽을 나눠 두 단.
+    한 구역 안에서 단 정의만 바꾸므로 문제 번호·미주 번호는 끊기지 않는다."""
+    from pdf2hwpx.convert import convert_many
+
+    a, b = tmp_path / "a.pdf", tmp_path / "b.pdf"
+    build(str(a))
+    build(str(b), intro_page=True)
+    out = tmp_path / "merged.hwpx"
+    res = convert_many([str(a), str(b), str(a)], str(out), style=DocStyle(answers_as_endnotes=True))
+    v = res["validation"]
+    assert v["status"] == "PASS", (v["root_causes"], v["warnings"])
+    assert v["checks"]["question_count"] == v["checks"]["endnotes"] == 15
+    cols = _column_defs(str(out))
+    assert [(n, pb) for n, pb, _ in cols] == [(2, False), (1, True), (2, True)], cols
+    assert cols[1][2].startswith("• 작자 미상") and cols[2][2].startswith("※ 다음 글을")

@@ -90,6 +90,7 @@ class Box:
     x1: float
     y1: float
     inner_drawings: int = 0
+    framed_lines: int = 0  # 박스 안 작은 사각형(도식의 칸) 속에 든 줄 수
     items: list[Union[Line, ImageEl]] = field(default_factory=list)
     # 단/페이지를 넘어 이어지는 박스 조각
     parts: list["Box"] = field(default_factory=list)
@@ -111,6 +112,7 @@ class PageInfo:
     content_bottom: float
     col_left: tuple[float, float]  # (left, right) of column 0
     col_right: tuple[float, float]  # (left, right) of column 1
+    single: bool = False  # 단 구분 없이 쪽 전체 폭을 쓰는 쪽(작품 개관·표·구조도 등). 모든 내용이 단 0
 
 
 @dataclass
@@ -191,6 +193,7 @@ class Para:
     table: Optional["TableEl"] = None    # kind == "table"
     label: str = ""                      # kind == "bracket": "[A]"
     children: list = field(default_factory=list)  # kind == "bracket": 괄호 안 문단들
+    wide: bool = False  # 전폭 쪽(PageInfo.single)의 문제 밖 내용: 새 쪽에 한 단(가운데 선 없음)으로
 
     @property
     def text(self) -> str:
@@ -203,6 +206,7 @@ class AuxBlock:
     kind: str  # 보기 | 조건 | 기타
     paras: list[Para] = field(default_factory=list)
     diagram: Optional[ImageEl] = None  # 도식 박스는 영역 이미지로 대체
+    wide: bool = False  # Para.wide 와 같음
 
 
 @dataclass

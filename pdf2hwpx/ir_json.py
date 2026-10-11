@@ -61,7 +61,7 @@ def document_to_json(doc: Document) -> dict:
                                        "rows": [[lab] + ["".join(r.text for r in c) for c in cells]
                                                 for lab, cells in it.grid.rows]}} if it.grid else {})})
         elif isinstance(it, AuxBlock):
-            items.append({"type": "loose_box", **_block(it)})
+            items.append({"type": "loose_box", "wide": it.wide, **_block(it)})
         elif isinstance(it, Para):
-            items.append({"type": "loose", **_para(it)})
+            items.append({"type": "loose", "wide": it.wide, **_para(it)})
     return {"items": items, "warnings": doc.warnings, "loose_items": doc.loose_notes}
