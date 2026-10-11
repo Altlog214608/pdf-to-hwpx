@@ -163,6 +163,14 @@ class Builder:
                 continue
             if isinstance(e, TableEl):
                 flush()
+                prev_t = paras[-1] if paras and paras[-1].kind in ("table", "tablerow") else None
+                last_t = (prev_t.children[-1] if prev_t and prev_t.kind == "tablerow" else prev_t).table if prev_t else None
+                if last_t is not None and e.y0 < last_t.y1 - 2 and e.y1 > last_t.y0 + 2 and e.x0 >= last_t.x1 - 2:
+                    # 같은 높이에 나란히 놓인 표(초장 | 중장 | 종장)는 한 줄에 나란히
+                    if prev_t.kind == "table":
+                        paras[-1] = prev_t = Para(kind="tablerow", children=[prev_t], align="CENTER")
+                    prev_t.children.append(Para(kind="table", table=self.table(e), align="CENTER"))
+                    continue
                 paras.append(Para(kind="table", table=self.table(e), align="CENTER"))
                 continue
             if isinstance(e, _BracketGroup):
@@ -919,7 +927,7 @@ def _iter_images(doc: Document):
             elif p.kind == "table" and p.table is not None:
                 for cl in p.table.cells:
                     yield from from_paras(cl.paras)
-            elif p.kind == "bracket":
+            elif p.kind in ("bracket", "tablerow"):
                 yield from from_paras(p.children)
     for it in doc.items:
         if isinstance(it, Passage):

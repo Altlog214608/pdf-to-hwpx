@@ -677,16 +677,25 @@ def extract(pdf_path: str) -> Extraction:
             wide_grids = _detect_tables(segs, fills, top, bottom, W, None, wide=True)
             single = _full_width_page(kept, segs, wide_grids, imgs, W, top, bottom)
         if single:
-            # 큰 표 칸 안에 든 작은 표(구성 칸의 초장/중장/종장 상자 등)는 따로 두지 않는다: 글은 바깥 표의 칸에 들어간다
-            grids = [g for g in wide_grids if not any(
-                h is not g and h[0][0] - 1 <= g[0][0] and g[0][-1] <= h[0][-1] + 1 and h[1][0] - 1 <= g[1][0]
-                and g[1][-1] <= h[1][-1] + 1 for h in wide_grids)]
+            grids = wide_grids  # 큰 표 칸 안의 작은 표(구성 칸의 초장/중장/종장 상자)는 그 칸 안의 표로(아래)
             split_x = W + 1.0  # 모든 내용이 단 0
             stats["single_column_pages"] += 1
         tables: list[TableEl] = []
         for xs, ys, cells in grids:
             col = 0 if (xs[0] + xs[-1]) / 2 < split_x else 1
             tables.append(TableEl(pno, col, xs, ys, cells))
+        # 표 칸 안에 든 표: 바깥 표의 그 칸에 넣는다(글자는 가장 안쪽 칸으로)
+        tables.sort(key=lambda t: (t.x1 - t.x0) * (t.y1 - t.y0))
+        for k, t in enumerate(tables):
+            for o in tables[k + 1:]:
+                if o.x0 - 1 <= t.x0 and t.x1 <= o.x1 + 1 and o.y0 - 1 <= t.y0 and t.y1 <= o.y1 + 1:
+                    cx, cy = (t.x0 + t.x1) / 2, (t.y0 + t.y1) / 2
+                    host = next((cl for cl in o.cells if cl.x0 <= cx <= cl.x1 and cl.y0 <= cy <= cl.y1), None)
+                    if host is not None:
+                        t.nested, t.col = True, o.col
+                        host.items.append(t)
+                        stats["nested_tables"] += 1
+                    break
 
         def _cell_at(x: float, y: float) -> Optional[Cell]:
             for t in tables:
@@ -935,6 +944,8 @@ def extract(pdf_path: str) -> Extraction:
                 ln.box = b.id
                 b.items.append(ln)
         for t in tables:
+            if t.nested:
+                continue
             b = _box_of((t.x0 + t.x1) / 2, (t.y0 + t.y1) / 2)
             if b and (b.x1 - b.x0) * (b.y1 - b.y0) > (t.x1 - t.x0) * (t.y1 - t.y0) * 1.02:
                 t.box = b.id
@@ -1035,7 +1046,7 @@ def extract(pdf_path: str) -> Extraction:
         free: list = [b for b in boxes]
         free += [ln for ln in lines if ln.box is None and ln.cell is None]
         free += [im for im in content_imgs if im.box is None]
-        free += [t for t in tables if t.box is None]
+        free += [t for t in tables if t.box is None and not t.nested]
         # 두 단 쪽이라도 단 구분선 위/아래에 가운데를 가로지르는 지문·상자·표가 있으면 그 구간은 전폭:
         # 위 구간 → 왼쪽 단 → 오른쪽 단 → 아래 구간 순서로 읽는다(해설서의 회색 지문, 맨 아래 '핵심 개념' 상자)
         above, below = [], []

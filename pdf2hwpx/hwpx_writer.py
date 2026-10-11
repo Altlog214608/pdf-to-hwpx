@@ -563,6 +563,8 @@ class HwpxWriter:
                 out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER"}), self._pic(p.image, inner_w)))
             elif p.kind == "table" and p.table is not None:
                 out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER"}), self._table(p.table, inner_w)))
+            elif p.kind == "tablerow":
+                out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER"}), self._tablerow(p, inner_w)))
             elif p.kind == "text":
                 o = dict(ov)
                 if p.align in ("RIGHT", "CENTER"):
@@ -592,6 +594,13 @@ class HwpxWriter:
                                          valign="CENTER" if t.lines else "TOP"))
         rows = [r for r in rows if r] or [[]]
         return self._tbl(rows, len(t.xs) - 1, xs[-1], max(600, ys[-1]), plain)
+
+    def _tablerow(self, p: Para, width: int) -> str:
+        """나란히 놓인 표들(초장 | 중장 | 종장): 한 문단에 글자처럼 이어 붙인다(원본 폭 비율)."""
+        tw = sum(c.table.x1 - c.table.x0 for c in p.children) or 1.0
+        gap = '<hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run>'
+        avail = width - 600 * len(p.children)
+        return gap.join(self._table(c.table, int(avail * (c.table.x1 - c.table.x0) / tw)) for c in p.children)
 
     def _bracket(self, p: Para, width: int, base: int, ov: dict) -> str:
         """[A] 묶음 괄호: [표시 | 괄호 선( [ 모양 ) | 글] 3칸 표. 글 문단마다 한 줄이라 쪽/단이 바뀌면 나뉜다."""
@@ -707,6 +716,9 @@ class HwpxWriter:
                 continue
             if p.kind == "table":
                 out.append(self._p(S.derive(base, align="CENTER", intent=0, **ov), self._table(p.table, self.col_w - 1300)))
+                continue
+            if p.kind == "tablerow":
+                out.append(self._p(S.derive(base, align="CENTER", intent=0, **ov), self._tablerow(p, self.col_w - 1300)))
                 continue
             if p.kind == "bracket":
                 out.append(self._p(S.derive(base, intent=0, **ov), self._bracket(p, self.col_w - 1200, 0, {})))
@@ -908,6 +920,8 @@ class HwpxWriter:
                 return [self._p(PP["plain"], self._pic(it.image, self.img_max_free))]
             if it.kind == "table":
                 return [self._p(S0.derive(PP["plain"], align="CENTER"), self._table(it.table, self.col_w - 300))]
+            if it.kind == "tablerow":
+                return [self._p(S0.derive(PP["plain"], align="CENTER"), self._tablerow(it, self.col_w - 300))]
             if it.kind == "bracket":
                 return [self._p(PP["plain"], self._bracket(it, self.col_w - 200, 0, {}))]
             if it.kind == "text" and it.frame:

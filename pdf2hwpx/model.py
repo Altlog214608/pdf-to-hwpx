@@ -146,6 +146,7 @@ class TableEl:
     cells: list[Cell] = field(default_factory=list)
     box: Optional[int] = None
     lines: bool = True  # False: 선 없는 배치용 표(전폭 상자 안 좌우 두 칸)
+    nested: bool = False  # 다른 표의 칸 안에 든 표(그 칸의 items 에 들어 있다)
 
     @property
     def x0(self) -> float:
