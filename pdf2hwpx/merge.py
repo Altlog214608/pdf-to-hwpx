@@ -84,7 +84,10 @@ def merge_documents(docs: list[Document], names: list[str] | None = None) -> Doc
             _shift_para(a.head, ANSWER_NO_RE, shift)
             out.answers.append(a)
         out.warnings.extend(f"{name}: {w}" for w in d.warnings)
+        if not any(isinstance(it, Question) for it in d.items):
+            out.warnings.append(f"{name}: 문제를 찾지 못해 내용만 옮겼습니다(자동 번호·정답 미주 없음)")
         out.image_only_lines.extend(d.image_only_lines)
+        out.source_fixes.update(d.source_fixes)
         out.loose_notes.extend(f"{name} {x}" for x in d.loose_notes)
         for k, v in d.stats.items():
             if isinstance(v, (int, float)) and not isinstance(v, bool):

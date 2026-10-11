@@ -17,7 +17,7 @@ from typing import Callable, Optional, Union
 
 from .extract import Extraction, TITLE_RE
 from .model import (CIRCLED_DIGITS, AnswerEntry, AuxBlock, Box, Choice, ChoiceGrid, Document, Glyph, ImageEl, Line,
-                    Para, Passage, Question, Run, TableEl)
+                    Para, Passage, Question, Run, TableEl, WRITE_RE)
 
 GUIDE_RE = re.compile(r"^\s*(※|\[\s*\d+\s*[~∼～\-–]\s*\d+\s*\])")
 ANSWER_HEAD_RE = re.compile(r"^\s*(\d{1,3})\s*\)\s*\[?\s*정답\s*\]?")  # "1) [정답] ④" / "1) 정답 ④"
@@ -96,6 +96,7 @@ class Builder:
                     self.box_by_id[p.id] = p
         self.warnings: list[str] = []
         self.image_only_lines: list[Line] = []
+        self.source_fixes: dict[int, str] = {}  # 원문 대조용으로 글자를 고친 줄(id -> 고친 글)
         self.dropped: list[str] = []  # 문제와 관계없어 버린 것(정답 표지/저작권 안내 등)
         full = [ln for pm in ex.pages for ln in pm.lines if self._is_full(ln)]
         ts = sum(1 for ln in full if ln.trailing_space)
@@ -365,6 +366,25 @@ def _label_icons(ex: Extraction, headers: list[int], answer_idx: int) -> dict[st
                     seq.append(g.icon)
         for k, d in enumerate(seq[:10]):
             votes[d][k] += 1
+    if not headers:
+        # 문제 머리를 못 찾은 자료(예제 번호가 그림인 해설서 등): 같은 단·같은 x에서 줄머리 아이콘이 겹치지 않고
+        # 이어지는 묶음을 선택지 한 벌로 보고 그 순서로 투표한다
+        runs: list[list[str]] = []
+        key = None
+        for it in flow[:answer_idx]:
+            if not isinstance(it, Line) or not it.glyphs or not it.glyphs[0].icon:
+                continue
+            g = it.glyphs[0]
+            k = (it.page, it.col, round(g.x0 / 3))
+            if runs and k == key and g.icon not in runs[-1]:
+                runs[-1].append(g.icon)
+            else:
+                runs.append([g.icon])
+                key = k
+        for seq in runs:
+            if len(seq) >= 3:
+                for k, d in enumerate(seq[:10]):
+                    votes[d][k] += 1
     labels: dict[str, str] = {}
     for d, cnt in votes.items():
         k, _ = cnt.most_common(1)[0]
@@ -391,16 +411,29 @@ def _label_icons(ex: Extraction, headers: list[int], answer_idx: int) -> dict[st
 
 # ------------------------------------------------------------- build ------
 
+QNUM_RE = re.compile(r"^\s*(\d{1,3})\s*\.\s*(?=\S)")  # "1. 위 작품의…"
+QNUM_BARE_RE = re.compile(r"^\s*(\d{1,3})\s+(?=\S)")  # "1  위 작품의…" (마침표 없이 큰 숫자만)
+
+
+def _question_number(ln: Line, body: float) -> Optional[int]:
+    """문제 머리줄 모양이면 그 번호. 박스 안 줄, 큰 글씨도 굵은 글씨도 아닌 번호는 문제 머리가 아니다."""
+    if ln.box is not None:
+        return None
+    if m := QNUM_RE.match(ln.text):
+        big = ln.lead_size >= 1.15 * body
+        bold = any(g.bold for g in ln.glyphs[:3])
+        return int(m.group(1)) if big or bold else None
+    if m := QNUM_BARE_RE.match(ln.text):
+        # 마침표가 없으면 본문 속 숫자와 헷갈리기 쉬우므로, 번호 글자가 본문과 바로 뒤 글자보다 확실히 클 때만
+        solid = [g for g in ln.glyphs if not g.is_space]
+        k = len(m.group(1))
+        if len(solid) > k and ln.lead_size >= 1.15 * body and min(g.size for g in solid[:k]) >= 1.15 * solid[k].size:
+            return int(m.group(1))
+    return None
+
+
 def _is_question_header(ln: Line, expected: int, body: float) -> bool:
-    m = re.match(r"^\s*(\d{1,3})\s*\.\s*(?=\S)", ln.text)
-    if not m or ln.box is not None:
-        return False
-    n = int(m.group(1))
-    if n != expected:
-        return False
-    big = ln.lead_size >= 1.15 * body
-    bold = any(g.bold for g in ln.glyphs[:3])
-    return big or bold
+    return _question_number(ln, body) == expected
 
 
 def build_document(ex: Extraction) -> Document:
@@ -444,11 +477,9 @@ def build_document(ex: Extraction) -> Document:
     # 첫 문제 번호 후보: 정답부의 첫 번호, 1, 그리고 문제 머리 모양(큰 글씨/굵게, 박스 밖)인 첫 줄의 번호
     starts: list[int] = ([first_answer_no] if first_answer_no else []) + [1]
     for it in flow[:answer_idx]:
-        if isinstance(it, Line):
-            m = re.match(r"^\s*(\d{1,3})\s*\.\s*(?=\S)", it.text)
-            if m and _is_question_header(it, int(m.group(1)), body):
-                starts.append(int(m.group(1)))
-                break
+        if isinstance(it, Line) and (n := _question_number(it, body)) is not None:
+            starts.append(n)
+            break
     best = None
     for st in dict.fromkeys(starts):  # 순서 유지, 중복 제거
         found = find_headers(st)
@@ -470,7 +501,8 @@ def build_document(ex: Extraction) -> Document:
                         unresolved += 1
 
     b = Builder(ex)
-    doc = Document(source=ex.path, warnings=b.warnings, image_only_lines=b.image_only_lines)
+    doc = Document(source=ex.path, warnings=b.warnings, image_only_lines=b.image_only_lines,
+                   source_fixes=b.source_fixes)
     if unresolved:
         doc.warnings.append(f"판별하지 못한 원문자 아이콘 {unresolved}개를 ○로 표시함")
 
@@ -551,7 +583,7 @@ def build_document(ex: Extraction) -> Document:
     for q in doc.questions:
         if q.choices and [c.label for c in q.choices] != list(CIRCLED_DIGITS[:len(q.choices)]):
             doc.warnings.append(f"{q.number}번 선택지 순서 이상: {''.join(c.label for c in q.choices)}")
-        if q.choices and len(q.choices) not in (4, 5):
+        if q.choices and len(q.choices) not in (4, 5) and not q.written_parts:
             doc.warnings.append(f"{q.number}번 선택지 수 {len(q.choices)}개")
     return doc
 
@@ -564,8 +596,11 @@ def _choice_split(ln: Line) -> list[Line]:
       "② 와" 같은 경우는 보통 띄어쓰기라 나누지 않는다."""
     gs = ln.glyphs
     nonsp = [i for i, g in enumerate(gs) if not g.is_space]
-    gaps = {b: gs[b].x0 - gs[a].x1 for a, b in zip(nonsp, nonsp[1:]) if b - a > 1}  # 공백 뒤 글자 -> 앞 글자와 간격
-    plain = max((v for i, v in gaps.items() if gs[i].c not in CIRCLED_DIGITS), default=0.0)
+    pairs = [(a, b) for a, b in zip(nonsp, nonsp[1:]) if b - a > 1]
+    gaps = {b: gs[b].x0 - gs[a].x1 for a, b in pairs}  # 공백 뒤 글자 -> 앞 글자와 간격
+    # 보통 띄어쓰기 폭: 원문자 앞뒤 간격(번호와 글 사이는 문제집마다 넓게 띄우기도 한다)은 빼고 잰다
+    plain = max((gaps[b] for a, b in pairs if gs[a].c not in CIRCLED_DIGITS and gs[b].c not in CIRCLED_DIGITS),
+                default=0.0)
     nxt = CIRCLED_DIGITS.index(gs[nonsp[0]].c) + 1 if nonsp and gs[nonsp[0]].c in CIRCLED_DIGITS else None
     cuts = [0]
     for i in sorted(gaps):
@@ -679,8 +714,9 @@ def _build_question(b: Builder, number: int, items: list, passage: Optional[Pass
             b.dropped.append(f"p{it.page}: {getattr(it, 'text', '[그림/박스/표]')[:30]}")
             continue
         if isinstance(it, (Box, ImageEl, TableEl)):
-            if state == "choices" and len(choice_lines) >= 5:
-                state = "after"  # 선택지가 끝난 뒤의 박스/그림은 선택지 앞으로 끌어오지 않는다
+            if state == "choices" and (len(choice_lines) >= 5
+                                       or all(any(WRITE_RE.search(ln.text) for ln in cl) for cl in choice_lines)):
+                state = "after"  # 선택지(또는 '…쓰시오' 하위 물음)가 끝난 뒤의 박스/그림은 선택지 앞으로 끌어오지 않는다
             flush()
             if state in ("stem", "choices"):
                 state = "blocks" if state == "stem" else state
@@ -723,21 +759,32 @@ def _build_question(b: Builder, number: int, items: list, passage: Optional[Pass
     if head_line is not None and (grid is None or not any(grid.header)):
         blocks.extend(b.paragraphs([head_line]))
     stem = b.single_para(stem_lines, bold=True)
+    if not QNUM_RE.match(stem.text) and QNUM_BARE_RE.match(stem.text):
+        # 마침표 없이 숫자만 있던 번호("1  위 작품의…")는 다른 양식과 같게 "1. 위 작품의…"로
+        r = next(r for r in stem.runs if r.text.strip())
+        r.text = re.sub(r"^(\s*\d{1,3})", r"\1.", r.text, count=1)
+        b.source_fixes[id(header)] = re.sub(r"^(\s*\d{1,3})", r"\1.", header.text, count=1)
     choices = []
     for k, cl in enumerate(choice_lines):
-        p = b.single_para(cl)
+        # "① …쓰시오. / (a) : / (b) :"처럼 앞 줄이 일찍 끝나고 표지로 시작하는 줄은 선택지 글에 잇지 않고 따로 둔다
+        cut = next((m for m in range(1, len(cl)) if MARKER_RE.match(cl[m].text)
+                    and (not b._is_full(cl[m - 1]) or WRITE_RE.search(cl[m - 1].text))), len(cl))
+        p = b.single_para(cl[:cut])
+        subs = [b.single_para([ln]) for ln in cl[cut:]]
+        for x in subs:
+            x.align, x.role, x.indent_pt = "LEFT", "subline", 0.0
         extra = b.paragraphs(credit_lines[k]) if k in credit_lines else []
         for x in extra:
             x.align, x.role, x.indent_pt = "RIGHT", "credit", 0.0
-        choices.append(Choice(p.text.lstrip()[:1], p, extra))
+        choices.append(Choice(p.text.lstrip()[:1], p, subs + extra))
     return Question(number=number, stem=stem, passage_id=passage.id if passage else None,
                     blocks=blocks, choices=choices, after=after, page=header.page, grid=grid)
 
 
 def _is_credit_line(b: Builder, ln: Line) -> bool:
-    """'- 작가, <작품>'처럼 오른쪽에 붙은 출전 줄."""
+    """'- 작가, <작품>'(또는 '-작가, 「작품」')처럼 오른쪽에 붙은 출전 줄."""
     left, right = b.bounds(ln)
-    return bool(re.match(r"^\s*[-–—]\s", ln.text)) and ln.x1 >= right - max(1.2 * ln.size, 6.0) \
+    return bool(re.match(r"^\s*[-–—]\s*[^\s\d\-–—]", ln.text)) and ln.x1 >= right - max(1.2 * ln.size, 6.0) \
         and ln.x0 > left + 0.3 * (right - left)
 
 

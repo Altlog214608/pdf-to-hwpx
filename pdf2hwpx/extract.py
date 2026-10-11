@@ -121,6 +121,11 @@ def _is_bold(font: str, flags: int) -> bool:
     return "bold" in font.lower() or bool(flags & 16)
 
 
+# Wingdings 글꼴은 일반 글자 자리에 기호를 그린다(예: 'ü'가 체크 표시). 문제집에 자주 나오는 것만 같은 모양의 유니코드로.
+WINGDINGS = {"ü": "✓", "û": "✗", "ý": "☒", "þ": "☑", "è": "→", "ç": "←", "é": "↑", "ê": "↓",
+             "ð": "⇨", "ï": "⇦", "ñ": "⇧", "ò": "⇩", "l": "●", "n": "■", "u": "◆", "§": "▪", "o": "□", "¡": "○"}
+
+
 def _page_fragments(page: fitz.Page) -> list[_Frag]:
     frags: list[_Frag] = []
     raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
@@ -134,10 +139,13 @@ def _page_fragments(page: fitz.Page) -> list[_Frag]:
                 if size < HIDDEN_TEXT_MAX_SIZE:
                     continue
                 bold = _is_bold(span.get("font", ""), int(span.get("flags") or 0))
+                wingdings = "wingdings" in span.get("font", "").lower()
                 for ch in span.get("chars", []):
                     c = ch.get("c") or ""
                     if not c:
                         continue
+                    if wingdings:
+                        c = WINGDINGS.get(c, c)
                     x0, y0, x1, y1 = ch["bbox"]
                     if c == " ":
                         c = " "

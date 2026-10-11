@@ -190,13 +190,18 @@ def _notice(w: "Writer") -> None:
 
 
 def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tuple[int, ...] = (),
-          notice: bool = False, word_box: tuple[int, ...] = (), narrow_pairs: bool = False) -> dict:
+          notice: bool = False, word_box: tuple[int, ...] = (), narrow_pairs: bool | str = False,
+          bare_numbers: bool = False, credit_nospace: bool = False, written_parts: bool = False) -> dict:
     """answer_style: 'bracket' = '1) [정답] ③ / [해설] …', 'plain' = '1) 정답 ③ / 오답 point / …'(최다오답·최상위 공략형)
     start: 첫 문제 번호(단원 중간부터 시작하는 문제집 일부, 예: 13번부터)
     white_bg: 발문 줄 뒤에 선 없는 흰 사각형(한글이 내보내는 문단 배경, 보이지 않음)이 깔린 문제(몇 번째, 1부터)
     notice: 첫 쪽 맨 위에 출판사 저작권·콘텐츠 보호 고지문(© 마크 포함)
     word_box: 발문 속 낱말 몇 개를 작은 네모로 둘러 강조한 문제(몇 번째, 1부터)
-    narrow_pairs: 한 줄 두 선택지(1번) 사이를 글자 0.9개만 띄움(그 줄 띄어쓰기의 약 1.8배)"""
+    narrow_pairs: 한 줄 두 선택지(1번) 사이를 글자 0.9개만 띄움(그 줄 띄어쓰기의 약 1.8배).
+        "wide_label"이면 원문자와 글 사이를 넓게(4.6pt), 글 속 띄어쓰기는 좁게(2.9pt), 두 선택지 사이는 글자 0.7개
+    bare_numbers: 문제 번호를 마침표 없이 큰 회색 숫자만 찍고 옆에 흰색 아주 작은 숨은 글자 "zb1)"(시대별 문학형)
+    credit_nospace: 3번 선택지 아래 출전을 대시 뒤 띄어쓰기 없이("-작가1, 「작품1」")
+    written_parts: 4번을 "① …쓰시오. / (a) : / ② …쓰시오. / (b) :" 하위 물음 + 그 아래 <조건> 박스로"""
     w = Writer()
     if notice:
         _notice(w)
@@ -241,6 +246,12 @@ def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tu
             x0 = w.left + 24 + tl(stem[:4]) - 1
             w.page.draw_rect(fitz.Rect(x0, w.y + 5, x0 + tl(stem[4:9]) + 2, w.y + 15), width=0.24)
         n = n + start - 1
+        if bare_numbers:  # 큰 회색 숫자(마침표 없음) + 흰색 1pt 숨은 글자 + 내어 쓴 발문
+            w.page.insert_text((w.left, w.y + 14), str(n), fontname=FONT, fontsize=12.0, color=(0.36, 0.36, 0.36))
+            w.page.insert_text((w.left + 10, w.y + 12), f"zb{n})", fontname=FONT, fontsize=1.0, color=(1, 1, 1))
+            w.text(w.left + 10 + tl(str(n), 12.0), w.y + 13, stem)
+            w.y += 24
+            return
         w.text(w.left, w.y + 14, f"{n}.", 13.7)
         w.text(w.left + (24 if n < 10 else 30 if n < 100 else tl(f"{n}.", 13.7) + 6), w.y + 13, stem)  # 세 자리는 더 넓게
         w.y += 24
@@ -254,8 +265,15 @@ def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tu
                 for k, idx in enumerate(range(a, min(a + 2, len(items)))):
                     if k and not narrow_pairs:
                         x = w.left + 120
-                    text = items[idx].replace(" ", "") if narrow_pairs else items[idx]
                     w.icon("①②③④⑤"[idx], x, w.y + 9)
+                    if narrow_pairs == "wide_label":  # 낱말마다 따로 찍어 띄어쓰기를 2.9pt로 좁힌다
+                        xx = x + 13
+                        for word in items[idx].split(" "):
+                            w.text(xx, w.y + 9, word + " ")
+                            xx += tl(word) + 2.9
+                        x = xx - 2.9 + 0.7 * SIZE
+                        continue
+                    text = items[idx].replace(" ", "") if narrow_pairs else items[idx]
                     w.text(x + 13, w.y + 9, text + " ")
                     # 좁은 두 열(실제 PDF): 앞 선택지 끝에서 글자 0.9개 = 그 줄 띄어쓰기의 약 1.8배
                     x += 13 + tl(text) + 0.9 * SIZE
@@ -300,20 +318,35 @@ def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tu
                 w.text(x + 52, y + 13, "→")
     rows = [((lambda y: w.text((w.left + w.right) / 2 - tl(title) / 2, y + 9, title)), 19.0), (draw_diagram, 26.0)]
     boxed_lines(w, rows)
-    choices(["현저동", "서울역", "부산", "인천", "평양"], credits=[f"- 작가{k}, <작품{k}>" for k in range(1, 6)])
+    choices(["현저동", "서울역", "부산", "인천", "평양"],
+            credits=[f"-작가{k}, 「작품{k}」" if credit_nospace else f"- 작가{k}, <작품{k}>" for k in range(1, 6)])
 
     # ---------- 4번: 서술형 + <조건> '-' 항목 ----------
-    question(4, "마지막 장면을 <조건>에 맞게 쓰시오.")
     t2 = "<조건>"
-    rows = [((lambda y: w.text((w.left + w.right) / 2 - tl(t2) / 2, y + 9, t2)), 19.0),
-            ((lambda y: w.text(w.left + 5, y + 9, "- 작품의 주제를 먼저 언급할 것.")), 13.4),
-            ((lambda y: w.text(w.left + 5, y + 9, "- 인물의 행동을 근거로 들 것.")), 13.4)]
-    boxed_lines(w, rows)
-    sub = "(2) 위에서 답한 장면이 작품 전체의 주제를 드러내는 데 어떤 역할을 하는지 구체적인 근거를 들어 서술하시오."
-    for words, at_space, ind in w.wrap(sub, 226.8 - 20, cont_indent=12.0):
-        w.justified([*words[:-1], words[-1] + (" " if at_space else "")], w.left + 8 + ind, w.right - 2.3, w.y + 9, last=not at_space)
-        w.y += 13.4
-    w.y += 12
+    if written_parts:  # ① ② 하위 물음(각각 '…쓰시오.' + 답 쓸 줄 "(a) :") 다음에 <조건> 박스
+        question(4, "다음 물음에 답하시오.")
+        for idx, (ask, slot) in enumerate([("윗글에서 (a)에 해당하는 말을 찾아 쓰시오.", "(a) :"),
+                                           ("윗글에서 (b)의 의미를 찾아 쓰시오.", "(b) :")]):
+            w.icon("①②"[idx], w.left + 10, w.y + 9)
+            w.text(w.left + 23, w.y + 9, ask)
+            w.text(w.left + 23, w.y + 25, slot)
+            w.y += 32
+        rows = [((lambda y: w.text((w.left + w.right) / 2 - tl(t2) / 2, y + 9, t2)), 19.0),
+                ((lambda y: w.text(w.left + 5, y + 9, "- 작품의 주제를 먼저 언급할 것.")), 13.4)]
+        boxed_lines(w, rows)
+        w.y += 12
+    else:
+        question(4, "마지막 장면을 <조건>에 맞게 쓰시오.")
+        rows = [((lambda y: w.text((w.left + w.right) / 2 - tl(t2) / 2, y + 9, t2)), 19.0),
+                ((lambda y: w.text(w.left + 5, y + 9, "- 작품의 주제를 먼저 언급할 것.")), 13.4),
+                ((lambda y: w.text(w.left + 5, y + 9, "- 인물의 행동을 근거로 들 것.")), 13.4)]
+        boxed_lines(w, rows)
+        sub = "(2) 위에서 답한 장면이 작품 전체의 주제를 드러내는 데 어떤 역할을 하는지 구체적인 근거를 들어 서술하시오."
+        for words, at_space, ind in w.wrap(sub, 226.8 - 20, cont_indent=12.0):
+            w.justified([*words[:-1], words[-1] + (" " if at_space else "")], w.left + 8 + ind, w.right - 2.3, w.y + 9,
+                        last=not at_space)
+            w.y += 13.4
+        w.y += 12
 
     # ---------- 지문 2: 그림만 있는 지문 ----------
     if w.y > BOTTOM - 260:
@@ -447,6 +480,31 @@ def build_tables(path: str) -> dict:
     w.icon("①", w.left + 10 + tl("1) [정답] "), w.y + 9)
     w.doc.save(path)
     return {"questions": 1}
+
+
+def build_examples(path: str) -> dict:
+    """문제 번호가 그림('예제' 꼬리표)뿐이고 정답부도 없는 해설서형(풀이완성): 발문은 번호 없이, 선택지는 원문자 아이콘."""
+    w = Writer()
+    tag = _picture_png(56, 26, (0.3, 0.5, 0.8))
+    stems = ["윗글의 서술자에 대한 설명으로 가장 적절한 것은?", "윗글에 대한 설명으로 적절하지 않은 것은?",
+             "윗글의 인물에 대한 이해로 가장 적절한 것은?", "윗글의 표현 방식으로 가장 적절한 것은?"]
+    for k, stem in enumerate(stems):
+        if k and k % 2 == 0:
+            w.new_page()
+        elif k:
+            w.next_col()
+        w.page.insert_image(fitz.Rect(w.left, w.y, w.left + 28, w.y + 13), stream=tag, keep_proportion=False)
+        w.text(w.left + 32, w.y + 10, stem)
+        w.y += 22
+        for idx in range(5):
+            w.icon("①②③④⑤"[idx], w.left + 10, w.y + 9)
+            w.text(w.left + 23, w.y + 9, f"선택지 {k + 1}-{idx + 1}의 내용입니다.")
+            w.y += 16
+        w.y += 12
+        w.text(w.left + 10, w.y + 9, f"[예제{k % 2 + 1}]은 서술자를 파악하는 문제야.")
+        w.y += 20
+    w.doc.save(path)
+    return {"questions": 0}
 
 
 if __name__ == "__main__":

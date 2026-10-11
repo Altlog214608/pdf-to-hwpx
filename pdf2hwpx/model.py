@@ -1,6 +1,7 @@
 """공통 데이터 모델 (페이지 모델 + IR)."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional, Union
 
@@ -9,6 +10,8 @@ ICON_PUA_BASE = 0xE000
 CIRCLED_DIGITS = "①②③④⑤⑥⑦⑧⑨⑩"
 # 줄 안의 빈칸 네모(예: "주제 : [      ]"). 글자 크기 1em마다 한 글자씩 넣어 너비를 전한다.
 BLANK_BOX = "\uF8F0"
+# "① 윗글의 (a)와 (b)에 해당하는 의미를 찾아 쓰시오."처럼 원문자가 선택지가 아니라 서술형 하위 물음일 때의 끝말
+WRITE_RE = re.compile(r"(쓰시오|쓰라|적으시오|서술하시오|설명하시오|고치시오|채우시오)\s*[.)]?\s*$")
 
 
 @dataclass
@@ -233,8 +236,13 @@ class Question:
     grid: Optional[ChoiceGrid] = None
 
     @property
+    def written_parts(self) -> bool:
+        """원문자 ①②…가 고르는 선택지가 아니라 '…쓰시오'로 끝나는 서술형 하위 물음인 문제."""
+        return bool(self.choices) and all(WRITE_RE.search(c.para.text) for c in self.choices)
+
+    @property
     def qtype(self) -> str:
-        return "objective" if self.choices else "subjective"
+        return "objective" if self.choices and not self.written_parts else "subjective"
 
 
 @dataclass
@@ -261,6 +269,8 @@ class Document:
     warnings: list[str] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
     image_only_lines: list = field(default_factory=list)
+    # 원문 대조용으로 글자를 고친 줄: id(Line) -> 고친 글. 예) 마침표 없던 문제 번호 "1 위 작품의…" -> "1. 위 작품의…"
+    source_fixes: dict = field(default_factory=dict)
     loose_notes: list[str] = field(default_factory=list)  # 문제/지문 밖 내용(단원 제목 등) 기록  # 도식 박스처럼 그림으로 대체된 원문 줄
 
     @property
