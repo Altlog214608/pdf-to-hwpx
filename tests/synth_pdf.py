@@ -228,7 +228,7 @@ def _intro(w: "Writer") -> None:
 def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tuple[int, ...] = (),
           notice: bool = False, word_box: tuple[int, ...] = (), narrow_pairs: bool | str = False,
           bare_numbers: bool = False, credit_nospace: bool = False, written_parts: bool = False,
-          intro_page: bool = False) -> dict:
+          intro_page: bool = False, wide_top: bool = False) -> dict:
     """answer_style: 'bracket' = '1) [정답] ③ / [해설] …', 'plain' = '1) 정답 ③ / 오답 point / …'(최다오답·최상위 공략형)
     start: 첫 문제 번호(단원 중간부터 시작하는 문제집 일부, 예: 13번부터)
     white_bg: 발문 줄 뒤에 선 없는 흰 사각형(한글이 내보내는 문단 배경, 보이지 않음)이 깔린 문제(몇 번째, 1부터)
@@ -244,6 +244,16 @@ def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tu
     if intro_page:
         _intro(w)
         w.new_page()
+    if wide_top:  # 해설서형: 쪽 맨 위 가로로 긴 회색 지문((가) | (나) 두 칸), 그 아래부터 단 구분선
+        w.doc.delete_page(-1)
+        w.new_page(divider=False)
+        x0, xm, x1, y0, y1 = 56.6, 297.6, 538.6, w.y, w.y + 60
+        for a, b in ((x0, xm), (xm, x1)):  # 실제 PDF처럼 반쪽마다 테두리 있는 회색 사각형
+            w.page.draw_rect(fitz.Rect(a, y0, b, y1), color=(0, 0, 0), fill=(0.9, 0.9, 0.9), width=0.5)
+        w.text(x0 + 6, y0 + 16, "(가) 왼쪽 시의 첫 줄입니다")
+        w.text(xm + 6, y0 + 16, "(나) 오른쪽 시의 첫 줄입니다")
+        w.page.draw_line(fitz.Point(297.6, y1 + 10), fitz.Point(297.6, 772), width=0.24)
+        w.y = y1 + 20
     if notice:
         _notice(w)
     # ---------- 지문 1: (가) 산문 + (나) 시, 단을 넘어가는 박스 ----------

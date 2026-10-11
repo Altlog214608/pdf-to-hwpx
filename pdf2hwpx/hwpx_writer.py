@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import dataclasses
 import io
 import random
 import re
@@ -54,7 +55,7 @@ def _strip_prefix(runs: list[Run], pat: re.Pattern) -> list[Run]:
         if cut >= len(r.text):
             cut -= len(r.text)
             continue
-        out.append(Run(r.text[cut:], bold=r.bold, underline=r.underline) if cut else r)
+        out.append(dataclasses.replace(r, text=r.text[cut:]) if cut else r)
         cut = 0
     return out
 
@@ -178,15 +179,38 @@ class Styles:
         self.new_chars.append(x)
         return cid
 
+    def derive_char(self, base: int, color: Optional[str] = None, height: Optional[int] = None,
+                    border_fill: Optional[int] = None, shade: Optional[str] = None) -> int:
+        """글자 모양 base를 복제해 색·크기·글자 테두리·음영만 바꾼다(문제 밖 내용의 원문 모양)."""
+        key = ("char", base, color, height, border_fill, shade)
+        if key in self.cache:
+            return self.cache[key]
+        x = self.char_xml[base]
+        cid = max(self.char_xml) + 1
+        x = re.sub(r'<hh:charPr id="\d+"', f'<hh:charPr id="{cid}"', x, count=1)
+        if color:
+            x = re.sub(r'textColor="#[0-9A-Fa-f]{6}"', f'textColor="{color}"', x, count=1)
+        if height:
+            x = re.sub(r' height="\d+"', f' height="{int(height)}"', x, count=1)
+        if border_fill is not None:
+            x = re.sub(r'borderFillIDRef="\d+"', f'borderFillIDRef="{border_fill}"', x, count=1)
+        if shade:
+            x = re.sub(r'shadeColor="[^"]*"', f'shadeColor="{shade}"', x, count=1)
+        self.char_xml[cid] = x
+        self.new_chars.append(x)
+        self.cache[key] = cid
+        return cid
+
     def add_border_fill(self, width: str = "0.12 mm", fill: Optional[str] = None,
-                        sides_on: tuple[str, ...] = ("left", "right", "top", "bottom")) -> int:
-        key = ("bf", width, fill, sides_on)
+                        sides_on: tuple[str, ...] = ("left", "right", "top", "bottom"),
+                        color: str = "#000000", line: str = "SOLID") -> int:
+        key = ("bf", width, fill, sides_on) if (color, line) == ("#000000", "SOLID") else ("bf", width, fill, sides_on, color, line)
         if key in self.cache:
             return self.cache[key]
         bid = max(self.bf_ids) + 1
         self.bf_ids.append(bid)
         self.cache[key] = bid
-        sides = "".join(f'<hh:{s}Border type="{"SOLID" if s in sides_on else "NONE"}" width="{width}" color="#000000"/>'
+        sides = "".join(f'<hh:{s}Border type="{line if s in sides_on else "NONE"}" width="{width}" color="{color}"/>'
                         for s in ("left", "right", "top", "bottom"))
         brush = (f'<hc:fillBrush><hc:winBrush faceColor="{fill}" hatchColor="#999999" alpha="0"/></hc:fillBrush>'
                  if fill else "")
@@ -276,6 +300,8 @@ class HwpxWriter:
         self.images: list[tuple[str, bytes]] = []
         self.preview_png = preview_png
         self._rng = random.Random(20260)
+        self._keep_next = False  # 전폭 머리글을 다음 표·상자와 함께
+        self._styled = False  # 문제 밖 내용(작품 개관·해설서 등)을 쓰는 동안 원문의 글자 색·크기를 살린다
         self.stats = {"aux_boxes": 0, "passage_boxes": 0, "spacers": 0, "pictures": 0, "paragraphs": 0, "column_switches": 0}
         st = self.style
         # 글꼴/크기: 본문 글자 모양(0, 7, 8, 9, 10)은 모두 글꼴 1을 쓴다
@@ -413,14 +439,35 @@ class HwpxWriter:
         return int(round(v * self.scale / 10.0)) * 10
 
     # ------------------------------------------------------------ xml ----
+    def _char_look(self, cp: int, r: Run) -> int:
+        """문제 밖 내용: 원문의 글자 색과 크기(본문 대비 8% 넘게 다를 때, 0.5pt 단위)."""
+        height = None
+        if r.size and abs(r.rel - 1.0) >= 0.08:
+            height = int(round(self.style.body_size * r.rel * 2) / 2 * 100)
+            height = max(500, min(height, 3000))
+        if not r.color and not height and not r.shade and not r.boxed:
+            return cp
+        bf = self.styles.add_border_fill() if r.boxed else None  # 낱말 네모: 글자 테두리
+        return self.styles.derive_char(cp, color=r.color, height=height, shade=r.shade, border_fill=bf)
+
     def _runs_xml(self, runs: list[Run], base_bold: bool = False) -> str:
         out = []
+        if not self._styled:  # 문제·지문은 굵게/밑줄만(색·크기는 문서 설정을 따른다)
+            merged: list[Run] = []
+            for r in runs:
+                if merged and merged[-1].bold == r.bold and merged[-1].underline == r.underline:
+                    merged[-1] = dataclasses.replace(merged[-1], text=merged[-1].text + r.text)
+                else:
+                    merged.append(r)
+            runs = merged
         for r in runs:
             bold = r.bold or base_bold
             if bold:
                 cp = CP["bold_ul"] if r.underline else CP["bold"]
             else:
                 cp = CP["body_ul"] if r.underline else CP["body"]
+            if self._styled:
+                cp = self._char_look(cp, r)
             for part in re.split(f"({BLANK_BOX}+)", r.text):
                 if part.startswith(BLANK_BOX):
                     out.append(self._blank_box(len(part)))
@@ -517,12 +564,16 @@ class HwpxWriter:
                 out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER"}), self._pic(p.image, inner_w)))
             elif p.kind == "table" and p.table is not None:
                 out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER"}), self._table(p.table, inner_w)))
+            elif p.kind == "tablerow":
+                out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER"}), self._tablerow(p, inner_w)))
             elif p.kind == "text":
                 o = dict(ov)
                 if p.align in ("RIGHT", "CENTER"):
                     o["align"] = p.align
                 elif p.indent_pt:
                     o["intent"] = _indent_hwp(p.indent_pt)
+                if p.left_pt:  # 원문 위치만큼 왼쪽 여백(칸 폭을 넘지 않게)
+                    o["left"] = min(int(p.left_pt * 90), max(0, inner_w - 3000))
                 out.append(self._note_p(S.derive(base, **o), self._runs_xml(p.runs, base_bold=p.role == "heading")))
         return "".join(out) or self._note_p(base, '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>')
 
@@ -533,17 +584,26 @@ class HwpxWriter:
         k = min(PT_TO_HWP, max_w / max(1.0, t.x1 - t.x0))
         xs = [int(round((x - t.x0) * k)) for x in t.xs]
         ys = [int(round((y - t.y0) * PT_TO_HWP)) for y in t.ys]
-        plain = S.add_border_fill()
+        plain = S.add_border_fill() if t.lines else S.add_border_fill(sides_on=())
         rows: list[list[str]] = [[] for _ in range(len(t.ys) - 1)]
         for cl in sorted(t.cells, key=lambda c: (c.row, c.col)):
             w = xs[cl.col + cl.colspan] - xs[cl.col]
             h = max(600, ys[cl.row + cl.rowspan] - ys[cl.row])
-            bf = S.add_border_fill(fill=cl.fill) if cl.fill else plain
+            bf = S.add_border_fill(fill=cl.fill, sides_on=("left", "right", "top", "bottom") if t.lines else cl.sides) \
+                if cl.fill or (not t.lines and cl.sides) else plain
             # 칸 정렬은 IR에서 칸 단위로 정한 문단 정렬을 따른다
             rows[cl.row].append(self._tc(cl.col, cl.row, cl.colspan, cl.rowspan, w, h, bf,
-                                         self._cell_paras(cl.paras, max(600, w - 700), 0, {})))
+                                         self._cell_paras(cl.paras, max(600, w - 700), 0, {}),
+                                         valign="CENTER" if t.lines else "TOP"))
         rows = [r for r in rows if r] or [[]]
         return self._tbl(rows, len(t.xs) - 1, xs[-1], max(600, ys[-1]), plain)
+
+    def _tablerow(self, p: Para, width: int) -> str:
+        """나란히 놓인 표들(초장 | 중장 | 종장): 한 문단에 글자처럼 이어 붙인다(원본 폭 비율)."""
+        tw = sum(c.table.x1 - c.table.x0 for c in p.children) or 1.0
+        gap = '<hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run>'
+        avail = width - 600 * len(p.children)
+        return gap.join(self._table(c.table, int(avail * (c.table.x1 - c.table.x0) / tw)) for c in p.children)
 
     def _bracket(self, p: Para, width: int, base: int, ov: dict) -> str:
         """[A] 묶음 괄호: [표시 | 괄호 선( [ 모양 ) | 글] 3칸 표. 글 문단마다 한 줄이라 쪽/단이 바뀌면 나뉜다."""
@@ -617,12 +677,29 @@ class HwpxWriter:
             out.append(self._p(pp, self._runs_xml(p.runs)))
         return out
 
+    def _framed(self, p: Para, width: int) -> str:
+        """낱말 띠(이 문단만 둘러싼 테두리, 이중선 포함): 한 칸 표로."""
+        S = self.styles
+        bf = S.add_border_fill(width="0.4 mm" if p.frame == "DOUBLE_SLIM" else "0.12 mm", line=p.frame or "SOLID")
+        h = int(round(self.style.body_size * 100 * 1.8))
+        body = self._note_p(S.derive(0, align="CENTER" if p.align == "CENTER" else "LEFT"), self._runs_xml(p.runs))
+        return self._tbl([[self._tc(0, 0, 1, 1, width, h, bf, body)]], 1, width, h, bf)
+
+    def _aux_border(self, blk: AuxBlock, top: int, bottom: int) -> Optional[tuple]:
+        """문제 밖 상자: 원문의 바탕색·테두리 색(선 없는 색 영역 포함)."""
+        if not self._styled or not (blk.fill or blk.border_color or not blk.border):
+            return None
+        sides = ("left", "right", "top", "bottom") if blk.border else ()
+        bf = self.styles.add_border_fill(width="0.2 mm", fill=blk.fill, sides_on=sides, color=blk.border_color or "#000000")
+        return (bf, 300, 300, top, bottom, 1)
+
     def _aux(self, blk: AuxBlock, last_in_question: bool) -> list[str]:
         S = self.styles
         out = []
         self.stats["aux_boxes"] += 1
         if blk.title:
-            out.append(self._p(PP["aux_title"], self._runs_xml([Run(blk.title)])))
+            tb = self._aux_border(blk, 120, 40)
+            out.append(self._p(S.derive(PP["aux_title"], border=tb) if tb else PP["aux_title"], self._runs_xml([Run(blk.title)])))
         body = [p for p in blk.paras]
         while body and body[-1].kind == "blank":
             body.pop()
@@ -632,6 +709,9 @@ class HwpxWriter:
             last = i == len(body) - 1
             base = PP["aux_last"] if last else PP["aux_mid"]
             ov: dict = {}
+            bd = self._aux_border(blk, 120 if i == 0 and not blk.title else 40, 120 if last else 40)
+            if bd:
+                ov["border"] = bd
             if i == 0 and not blk.title:
                 ov.update(prev=280, offset_top=120)
             if p.kind == "image":
@@ -640,11 +720,17 @@ class HwpxWriter:
             if p.kind == "table":
                 out.append(self._p(S.derive(base, align="CENTER", intent=0, **ov), self._table(p.table, self.col_w - 1300)))
                 continue
+            if p.kind == "tablerow":
+                out.append(self._p(S.derive(base, align="CENTER", intent=0, **ov), self._tablerow(p, self.col_w - 1300)))
+                continue
             if p.kind == "bracket":
                 out.append(self._p(S.derive(base, intent=0, **ov), self._bracket(p, self.col_w - 1200, 0, {})))
                 continue
             if p.kind == "blank":
                 out.append(self._empty(S.derive(base, **ov)))
+                continue
+            if p.frame and self._styled:
+                out.append(self._p(S.derive(base, align="CENTER", intent=0, **ov), self._framed(p, self.col_w - 2000)))
                 continue
             if p.align in ("RIGHT", "CENTER"):
                 ov["align"] = p.align
@@ -837,10 +923,16 @@ class HwpxWriter:
                 return [self._p(PP["plain"], self._pic(it.image, self.img_max_free))]
             if it.kind == "table":
                 return [self._p(S0.derive(PP["plain"], align="CENTER"), self._table(it.table, self.col_w - 300))]
+            if it.kind == "tablerow":
+                return [self._p(S0.derive(PP["plain"], align="CENTER"), self._tablerow(it, self.col_w - 300))]
             if it.kind == "bracket":
                 return [self._p(PP["plain"], self._bracket(it, self.col_w - 200, 0, {}))]
+            if it.kind == "text" and it.frame:
+                return [self._p(S0.derive(PP["plain"], align="CENTER"), self._framed(it, self.col_w - 1000))]
             if it.kind == "text":
                 ov = {"align": it.align} if it.align in ("RIGHT", "CENTER") else {"intent": _indent_hwp(it.indent_pt)}
+                if self._keep_next:
+                    ov["keep_next"] = 1
                 return [self._p(S0.derive(PP["plain"], **ov) if it.wide else PP["plain"], self._runs_xml(it.runs))]
             if it.kind == "blank" and it.wide:
                 return [self._empty(PP["plain"])]
@@ -859,19 +951,30 @@ class HwpxWriter:
         items = self.doc.items
         first_wide = bool(items) and getattr(items[0], "wide", False)
         wide_mode = first_wide
-        for it in items:
+        for k, it in enumerate(items):
             wide = getattr(it, "wide", False)
             self._set_width(wide)
+            self._styled = not isinstance(it, (Passage, Question))
+            nxt = items[k + 1] if k + 1 < len(items) else None
+            # 전폭 부분의 짧은 머리글(• 개관 정리)은 바로 뒤 표·상자와 같은 쪽에
+            self._keep_next = bool(wide and isinstance(it, Para) and it.kind == "text" and len(it.text) <= 40
+                                   and getattr(nxt, "wide", False) and (isinstance(nxt, AuxBlock)
+                                                                         or getattr(nxt, "kind", "") in ("table", "image")))
             paras = self._item(it, prev_passage)
+            self._styled = self._keep_next = False
             prev_passage = isinstance(it, Passage)
             if not paras:
                 continue
+            top = bool(body) and getattr(it, "top", False)
             if wide != wide_mode:
-                # 전폭 내용(작품 개관·표·구조도)은 새 쪽에서 한 단(가운데 선 없음)으로, 문제·지문이 다시 시작되면
-                # 새 쪽에서 원래 두 단(가운데 선)으로. 같은 구역 안에서 단 정의만 바꾸므로 미주 번호는 그대로 이어진다
-                paras[0] = _new_columns(paras[0], 1 if wide else 2, page_break=bool(body))
+                # 전폭 내용(작품 개관·표·구조도·가로로 긴 지문)은 한 단(가운데 선 없음), 문제·지문은 원래 두 단(가운데 선).
+                # 원문 쪽 맨 위에서 바뀌면 쪽을 나누고, 쪽 중간(지문 아래 문제, 문제 아래 '핵심 개념' 상자)이면 그 자리에서
+                # 단 정의만 바꾼다. 같은 구역 안이므로 미주 번호는 그대로 이어진다
+                paras[0] = _new_columns(paras[0], 1 if wide else 2, page_break=top)
                 wide_mode = wide
                 self.stats["column_switches"] += 1
+            elif wide and top:  # 전폭 부분은 원문 쪽마다 새 쪽(작품 미리보기 / 출제 포인트 / 작품 정리)
+                paras[0] = paras[0].replace('pageBreak="0"', 'pageBreak="1"', 1)
             body.extend(paras)
         self._set_width(False)
         mp = self.master_ids is not None or self.master_tpl is not None

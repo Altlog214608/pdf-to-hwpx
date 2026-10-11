@@ -49,6 +49,7 @@ class _Seg:
     x1: float
     y1: float
     width: float
+    color: Optional[str] = None  # 선 색(검정이 아니면)
 
     @property
     def horizontal(self) -> bool:
@@ -78,11 +79,13 @@ class Extraction:
     doc: fitz.Document
     stats: dict = field(default_factory=dict)
     header_texts: list = field(default_factory=list)
+    wide_ids: set = field(default_factory=set)  # 두 단 쪽 위/아래의 전폭 구간에 든 흐름 항목(id)
 
-    def render(self, page: int, rect: tuple[float, float, float, float]) -> bytes:
+    def render(self, page: int, rect: tuple[float, float, float, float], sharp: bool = False) -> bytes:
+        """원문 영역을 그림으로. sharp: 쪽 폭 가까이 크게 들어가는 도식(구조도 등)은 더 높은 해상도(약 290dpi)."""
         p = self.doc[page - 1]
         clip = fitz.Rect(*rect) & p.rect
-        zoom = min(RENDER_ZOOM, RENDER_MAX_PX / max(1.0, clip.width, clip.height))
+        zoom = min(4.0 if sharp else RENDER_ZOOM, (3200 if sharp else RENDER_MAX_PX) / max(1.0, clip.width, clip.height))
         pix = p.get_pixmap(clip=clip, matrix=fitz.Matrix(zoom, zoom), alpha=False)
         return pix.tobytes("png")
 
@@ -117,8 +120,18 @@ def _resample(pix: fitz.Pixmap, n: int) -> list[int]:
 
 # --------------------------------------------------------------------------
 
-def _is_bold(font: str, flags: int) -> bool:
-    return "bold" in font.lower() or bool(flags & 16)
+def _is_bold(font: str, flags: int, char_flags: int = 0) -> bool:
+    """굵은 글꼴 이름(…Bold, 나눔스퀘어 B/EB 등)이거나, 글자를 칠하고 테두리까지 그린 가짜 굵게(한글이 내보내는 진하게)."""
+    return ("bold" in font.lower() or bool(flags & 16) or bool(re.search(r"[a-z](?:EB|XB|B)$", font))
+            or (char_flags & 48) == 48)
+
+
+def _color(c: int) -> Optional[str]:
+    """글자 색. 검정(또는 거의 검정)과 흰색(색 배경 위 글자: 한글에선 배경이 없어 보이지 않음)은 None."""
+    r, g, b = (c >> 16) & 255, (c >> 8) & 255, c & 255
+    if max(r, g, b) < 40 or min(r, g, b) > 235:
+        return None
+    return "#%02X%02X%02X" % (r, g, b)
 
 
 # Wingdings 글꼴은 일반 글자 자리에 기호를 그린다(예: 'ü'가 체크 표시). 문제집에 자주 나오는 것만 같은 모양의 유니코드로.
@@ -128,7 +141,7 @@ WINGDINGS = {"ü": "✓", "û": "✗", "ý": "☒", "þ": "☑", "è": "→", "�
 
 def _page_fragments(page: fitz.Page) -> list[_Frag]:
     frags: list[_Frag] = []
-    raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+    raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_COLLECT_STYLES)
     for block in raw.get("blocks", []):
         if block.get("type") != 0:
             continue
@@ -138,7 +151,8 @@ def _page_fragments(page: fitz.Page) -> list[_Frag]:
                 size = float(span.get("size") or 0)
                 if size < HIDDEN_TEXT_MAX_SIZE:
                     continue
-                bold = _is_bold(span.get("font", ""), int(span.get("flags") or 0))
+                bold = _is_bold(span.get("font", ""), int(span.get("flags") or 0), int(span.get("char_flags") or 0))
+                color = _color(int(span.get("color") or 0))
                 wingdings = "wingdings" in span.get("font", "").lower()
                 for ch in span.get("chars", []):
                     c = ch.get("c") or ""
@@ -149,7 +163,7 @@ def _page_fragments(page: fitz.Page) -> list[_Frag]:
                     x0, y0, x1, y1 = ch["bbox"]
                     if c == " ":
                         c = " "
-                    glyphs.append(Glyph(c, x0, y0, x1, y1, size, bold))
+                    glyphs.append(Glyph(c, x0, y0, x1, y1, size, bold, color=color))
             if not glyphs or all(g.is_space for g in glyphs):
                 continue
             solid = [g for g in glyphs if not g.is_space]
@@ -167,19 +181,33 @@ def _table_lines(t) -> list:
     return [x for cl in t.cells for x in cl.items if isinstance(x, Line)]
 
 
-def _notice_items(lines: list, imgs: list, boxes: list, tables: list) -> set[int]:
+def _notice_items(lines: list, imgs: list, boxes: list, tables: list, segs: Optional[list] = None) -> set[int]:
     """고지문 줄에서 시작해 위아래·옆으로 맞붙은 줄과 그림(© 마크)까지 넓힌 덩어리의 id.
     지문·표 안에 법 이름이 나오는 경우처럼 덩어리가 본문 박스나 표의 일부에만 걸치거나, 고지문이라기엔
     너무 길면 아무것도 빼지 않는다."""
     seeds = [ln for ln in lines if NOTICE_RE.search(ln.text)]
     if not seeds:
         return set()
+    # 고지문이 표(© 칸 | 표시 | 경고)에 들어 있으면 그 표만: 표 밖으로 넓히면 바로 아래 문제 줄까지 붙는다
+    for t in tables:
+        tl = _table_lines(t)
+        if tl and all(any(ln is x for x in tl) for ln in seeds) and len(tl) <= 15:
+            ids = {id(x) for x in tl}
+            ids |= {id(im) for im in imgs if t.x0 - 2 <= im.x0 and im.x1 <= t.x1 + 2 and t.y0 - 2 <= im.y0 and im.y1 <= t.y1 + 2}
+            return ids
 
     def near(a, b) -> bool:
         h = max(4.0, min(a.y1 - a.y0, b.y1 - b.y0))
         xo = min(a.x1, b.x1) - max(a.x0, b.x0)  # 가로로 겹친 길이(음수면 떨어진 거리)
         yo = min(a.y1, b.y1) - max(a.y0, b.y0)
-        return (xo > 0 and -yo <= 0.9 * h) or (yo > 0.5 * h and -xo <= 20)
+        if xo > 0 and -yo <= 0.9 * h:
+            # 사이에 가로선(고지문 틀의 아래 변)이 있으면 바로 아래 문제 줄과는 이어지지 않는다
+            lo, hi = sorted((a.y1, b.y1))[0], sorted((a.y0, b.y0))[1]
+            if any(s.horizontal and lo - 1 <= s.y0 <= hi + 1 and s.x0 <= max(a.x0, b.x0) + 2
+                   and s.x1 >= min(a.x1, b.x1) - 2 for s in segs or ()):
+                return False
+            return True
+        return yo > 0.5 * h and -xo <= 20
 
     pool = list(lines) + list(imgs)
     group = list(seeds)
@@ -251,24 +279,26 @@ def _page_segments(page: fitz.Page) -> tuple[list[_Seg], int]:
         if _invisible(d):  # 선 없이 흰색으로만 칠한 사각형(한글이 문단 배경으로 내보냄)은 보이지 않으므로 테두리가 아니다
             continue
         w = float(d.get("width") or 0.0)
+        sc = d.get("color")
+        scol = None if not sc or max(sc[:3]) < 0.16 else "#%02X%02X%02X" % tuple(round(float(v) * 255) for v in sc[:3])
         for it in d.get("items", []):
             op = it[0]
             if op == "l":
                 p1, p2 = it[1], it[2]
-                segs.append(_Seg(min(p1.x, p2.x), min(p1.y, p2.y), max(p1.x, p2.x), max(p1.y, p2.y), w))
+                segs.append(_Seg(min(p1.x, p2.x), min(p1.y, p2.y), max(p1.x, p2.x), max(p1.y, p2.y), w, scol))
             elif op == "re":
                 r = it[1]
                 if r.width < 1.5 or r.height < 1.5:  # 얇은 사각형 = 선
-                    segs.append(_Seg(r.x0, r.y0, r.x1, r.y1, w))
+                    segs.append(_Seg(r.x0, r.y0, r.x1, r.y1, w, scol))
                 else:
                     for a, b in ((r.tl, r.tr), (r.bl, r.br), (r.tl, r.bl), (r.tr, r.br)):
-                        segs.append(_Seg(min(a.x, b.x), min(a.y, b.y), max(a.x, b.x), max(a.y, b.y), w))
+                        segs.append(_Seg(min(a.x, b.x), min(a.y, b.y), max(a.x, b.x), max(a.y, b.y), w, scol))
                     others.append(r)
             elif op == "qu":
                 q = it[1]
                 r = q.rect
                 for a, b in ((r.tl, r.tr), (r.bl, r.br), (r.tl, r.bl), (r.tr, r.br)):
-                    segs.append(_Seg(min(a.x, b.x), min(a.y, b.y), max(a.x, b.x), max(a.y, b.y), w))
+                    segs.append(_Seg(min(a.x, b.x), min(a.y, b.y), max(a.x, b.x), max(a.y, b.y), w, scol))
             elif op == "c":
                 pts = it[1:]
                 xs = [p.x for p in pts]
@@ -533,8 +563,8 @@ def _group_lines(frags: list[_Frag]) -> list[list[_Frag]]:
     for f in frags:
         target = None
         for g in reversed(groups[-4:]):
-            gy0 = min(x.y0 for x in g)
-            gy1 = max(x.y1 for x in g)
+            # 줄의 첫 조각 높이와 비교한다(조각마다 넓히면 사이에 걸친 조각을 타고 위·아래 줄까지 한 줄이 된다)
+            gy0, gy1 = g[0].y0, g[0].y1
             ov = min(gy1, f.y1) - max(gy0, f.y0)
             if ov >= 0.5 * min(f.y1 - f.y0, gy1 - gy0):
                 target = g
@@ -610,6 +640,7 @@ def extract(pdf_path: str) -> Extraction:
     stats = Counter()
 
     bracket_id = 0
+    wide_ids: set[int] = set()
     for pno, W, H, frags, segs, others, imgs, top, bottom, fills in raw_pages:
         # ---- 단 분리선 ----
         content_h = max(1.0, bottom - top)
@@ -620,6 +651,11 @@ def extract(pdf_path: str) -> Extraction:
                 ln = min(s.y1, bottom) - max(s.y0, top)
                 if ln >= 0.4 * content_h and ln > best_len:
                     best_len, split_x = ln, s.x0
+        # 단 구분선이 그어진 세로 범위(위·아래로 전폭 지문/상자가 있으면 그 범위 밖)
+        # (구분선 위에서 맞붙은 상자의 짧은 경계선은 빼고, 길게 이어진 구분선만)
+        div = [s for s in segs if s.vertical and abs(s.x0 - split_x) < 1.0 and s.y1 - s.y0 >= 0.25 * content_h]
+        div_y0 = min((s.y0 for s in div), default=top) if best_len else top
+        div_y1 = max((s.y1 for s in div), default=bottom) if best_len else bottom
 
         # ---- 글자 조각 필터 ----
         kept: list[_Frag] = []
@@ -644,16 +680,25 @@ def extract(pdf_path: str) -> Extraction:
             wide_grids = _detect_tables(segs, fills, top, bottom, W, None, wide=True)
             single = _full_width_page(kept, segs, wide_grids, imgs, W, top, bottom)
         if single:
-            # 큰 표 칸 안에 든 작은 표(구성 칸의 초장/중장/종장 상자 등)는 따로 두지 않는다: 글은 바깥 표의 칸에 들어간다
-            grids = [g for g in wide_grids if not any(
-                h is not g and h[0][0] - 1 <= g[0][0] and g[0][-1] <= h[0][-1] + 1 and h[1][0] - 1 <= g[1][0]
-                and g[1][-1] <= h[1][-1] + 1 for h in wide_grids)]
+            grids = wide_grids  # 큰 표 칸 안의 작은 표(구성 칸의 초장/중장/종장 상자)는 그 칸 안의 표로(아래)
             split_x = W + 1.0  # 모든 내용이 단 0
             stats["single_column_pages"] += 1
         tables: list[TableEl] = []
         for xs, ys, cells in grids:
             col = 0 if (xs[0] + xs[-1]) / 2 < split_x else 1
             tables.append(TableEl(pno, col, xs, ys, cells))
+        # 표 칸 안에 든 표: 바깥 표의 그 칸에 넣는다(글자는 가장 안쪽 칸으로)
+        tables.sort(key=lambda t: (t.x1 - t.x0) * (t.y1 - t.y0))
+        for k, t in enumerate(tables):
+            for o in tables[k + 1:]:
+                if o.x0 - 1 <= t.x0 and t.x1 <= o.x1 + 1 and o.y0 - 1 <= t.y0 and t.y1 <= o.y1 + 1:
+                    cx, cy = (t.x0 + t.x1) / 2, (t.y0 + t.y1) / 2
+                    host = next((cl for cl in o.cells if cl.x0 <= cx <= cl.x1 and cl.y0 <= cy <= cl.y1), None)
+                    if host is not None:
+                        t.nested, t.col = True, o.col
+                        host.items.append(t)
+                        stats["nested_tables"] += 1
+                    break
 
         def _cell_at(x: float, y: float) -> Optional[Cell]:
             for t in tables:
@@ -781,13 +826,54 @@ def extract(pdf_path: str) -> Extraction:
                         and (x1 - x0) * (y1 - y0) < (X1 - X0) * (Y1 - Y0):
                     nested_in[i] = j
                     break
+        # 바깥 테두리 안쪽에 조금 들여 그린 두 번째 테두리(연두 바탕 상자의 안쪽 틀)는 도형이 아니라 상자 모양이다
+        def _inset(a, b) -> bool:
+            return all(0 <= d <= 12 for d in (a[0] - b[0], a[1] - b[1], b[2] - a[2], b[3] - a[3]))
+        inset = {i for i, j in nested_in.items() if _inset(box_rects[i], box_rects[j])}
         boxes: list[Box] = []
         for i, (x0, y0, x1, y1) in enumerate(box_rects):
             if i in nested_in:
                 continue
             col = 0 if (x0 + x1) / 2 < split_x else 1
             boxes.append(Box(id=pno * 1000 + i, page=pno, col=col, x0=x0, y0=y0, x1=x1, y1=y1))
-        nested_rects = [box_rects[i] for i in nested_in]
+        nested_rects = [box_rects[i] for i in nested_in if i not in inset]
+        for i in inset:  # 안쪽 틀이 있으면 글 줄의 좌우 경계는 안쪽 틀(줄이 꽉 찼는지 판단)
+            outer = next((b for b in boxes if b.id == pno * 1000 + nested_in[i]), None)
+            if outer is not None:
+                outer.x0, outer.x1 = max(outer.x0, box_rects[i][0]), min(outer.x1, box_rects[i][2])
+        # 상자 바탕색·테두리 색
+        for b in boxes:
+            area = (b.x1 - b.x0) * (b.y1 - b.y0)
+            for rect, color in fills:  # 나중에 칠한 것이 이긴다
+                if b.x0 - 2 <= rect.x0 and rect.x1 <= b.x1 + 2 and b.y0 - 2 <= rect.y0 and rect.y1 <= b.y1 + 2 \
+                        and rect.width * rect.height >= 0.7 * area:
+                    b.fill = color
+            edge = Counter(s.color for s in segs if s.color and (
+                (s.vertical and min(abs(s.x0 - b.x0), abs(s.x0 - b.x1)) < 1.5 and s.y0 < b.y1 and s.y1 > b.y0)
+                or (s.horizontal and min(abs(s.y0 - b.y0), abs(s.y0 - b.y1)) < 1.5 and s.x0 < b.x1 and s.x1 > b.x0)))
+            if edge:
+                b.border_color = edge.most_common(1)[0][0]
+        # 선 없이 색만 칠한 넓은 영역(회색 지문 바탕 등)도 상자: 좌우로 맞붙은 조각은 하나로
+        areas = []
+        for rect, color in fills:
+            if not color or rect.width < 80 or rect.height < 40 or rect.y1 <= top or rect.y0 >= bottom:
+                continue
+            if any(t.x0 - 3 <= rect.x0 and rect.x1 <= t.x1 + 3 and t.y0 - 3 <= rect.y0 and rect.y1 <= t.y1 + 3 for t in tables):
+                continue
+            if any(b.x0 - 14 <= rect.x0 and rect.x1 <= b.x1 + 14 and b.y0 - 14 <= rect.y0 and rect.y1 <= b.y1 + 14
+                   for b in boxes):
+                continue
+            prev = areas[-1] if areas else None
+            if prev and prev[4] == color and abs(prev[1] - rect.y0) < 2 and abs(prev[3] - rect.y1) < 2 \
+                    and abs(prev[2] - rect.x0) < 3:
+                areas[-1] = (prev[0], prev[1], rect.x1, prev[3], color)
+            else:
+                areas.append((rect.x0, rect.y0, rect.x1, rect.y1, color))
+        for k, (x0, y0, x1, y1, color) in enumerate(areas):
+            col = 0 if (x0 + x1) / 2 < split_x else 1
+            boxes.append(Box(id=pno * 1000 + 500 + k, page=pno, col=col, x0=x0, y0=y0, x1=x1, y1=y1,
+                             fill=color, border=False))
+            stats["fill_boxes"] += 1
 
         def _box_of(cx: float, cy: float) -> Optional[Box]:
             best = None
@@ -816,12 +902,28 @@ def extract(pdf_path: str) -> Extraction:
         used_underlines = set()
         for ln in lines:
             for k, s in enumerate(underline_segs):
-                if ln.y1 - 0.45 * ln.size <= s.y0 <= ln.y1 + 0.35 * ln.size and s.x1 > ln.x0 and s.x0 < ln.x1:
+                if ln.y1 - 0.45 * ln.size <= s.y0 <= ln.y1 + 0.35 * ln.size and s.x1 > ln.x0 \
+                        and s.x0 < ln.x1 + 4 * ln.size and k not in used_underlines:
                     hit = False
                     for gl in ln.glyphs:
                         cx = (gl.x0 + gl.x1) / 2
                         if not gl.is_space and s.x0 - 0.5 <= cx <= s.x1 + 0.5:
                             gl.underline = True
+                            hit = True
+                    if not hit:  # 빈칸 밑줄("㉠ : ______"): 글자 없이 공백 위에만 그은 선
+                        blank = [gl for gl in ln.glyphs if gl.is_space and s.x0 - 0.5 <= (gl.x0 + gl.x1) / 2 <= s.x1 + 0.5]
+                        if len(blank) >= 3:
+                            for gl in blank:
+                                gl.underline = True
+                            hit = True
+                        elif ln.x1 - 1 <= s.x0 and s.x0 - ln.x1 < 4 * ln.size and s.x1 - s.x0 > 2 * ln.size \
+                                and ln.text.rstrip()[-1:] in (":", "：") and len(ln.text.strip()) <= 12:
+                            # 줄 끝 공백은 줄을 만들 때 지워졌다: 선 길이만큼 밑줄 친 공백을 붙인다
+                            w = 0.5 * ln.size
+                            n = max(3, int(round((s.x1 - s.x0) / w)))
+                            ln.glyphs.append(Glyph(" ", ln.x1, ln.y0, s.x0, ln.y1, ln.size))
+                            ln.glyphs += [Glyph(" ", s.x0 + k * w, ln.y0, s.x0 + (k + 1) * w, ln.y1, ln.size, underline=True)
+                                          for k in range(n)]
                             hit = True
                     if hit:
                         used_underlines.add(k)
@@ -830,6 +932,16 @@ def extract(pdf_path: str) -> Extraction:
             for i in range(1, len(gs) - 1):
                 if gs[i].is_space and gs[i - 1].underline and gs[i + 1].underline:
                     gs[i].underline = True
+
+        # ---- 형광펜: 한 줄 높이로 색을 칠한 띠 위의 글자는 음영 ----
+        for rect, color in fills:
+            if color and rect.height < 18 and rect.width > 8 and not any(
+                    t.x0 - 2 <= rect.x0 and rect.x1 <= t.x1 + 2 and t.y0 - 2 <= rect.y0 and rect.y1 <= t.y1 + 2 for t in tables):
+                for ln in lines:
+                    if ln.cell is None and ln.y0 < rect.y1 and ln.y1 > rect.y0:
+                        for g in ln.glyphs:
+                            if rect.x0 - 1 <= (g.x0 + g.x1) / 2 <= rect.x1 + 1 and rect.y0 - 2 <= (g.y0 + g.y1) / 2 <= rect.y1 + 2:
+                                g.shade = color
 
         # ---- 박스 소속 + 내부 도형 수 ----
         def _box_of_line(ln: Line) -> Optional[Box]:
@@ -851,6 +963,8 @@ def extract(pdf_path: str) -> Extraction:
                 ln.box = b.id
                 b.items.append(ln)
         for t in tables:
+            if t.nested:
+                continue
             b = _box_of((t.x0 + t.x1) / 2, (t.y0 + t.y1) / 2)
             if b and (b.x1 - b.x0) * (b.y1 - b.y0) > (t.x1 - t.x0) * (t.y1 - t.y0) * 1.02:
                 t.box = b.id
@@ -866,6 +980,11 @@ def extract(pdf_path: str) -> Extraction:
                 b.items.append(im)
         # 낱말 몇 개만 둘러싼 낮은 네모(강조 표시)는 줄을 담지 못해 비어 있다: 박스가 아니다
         word_boxes = [b for b in boxes if not b.items and b.y1 - b.y0 < 18]
+        # 색을 칠한 한 줄 높이 띠(정답 선지의 노란 형광펜)는 박스가 아니라 글자 음영
+        for b in boxes:
+            if b.fill and b.y1 - b.y0 < 18 and len(b.items) == 1 and isinstance(b.items[0], Line):
+                b.items[0].box = None
+                word_boxes.append(b)
         if word_boxes:
             stats["inline_word_boxes"] += len(word_boxes)
             boxes = [b for b in boxes if b not in word_boxes]
@@ -884,21 +1003,64 @@ def extract(pdf_path: str) -> Extraction:
                        or (s.horizontal and abs(s.x0 - bk.x) <= 2 and (abs(s.y0 - bk.y0) <= 2 or abs(s.y0 - bk.y1) <= 2))
                        for bk in brackets)
 
+        frames = [box_rects[i] for i in inset]
+        # 글자 높이의 작은 네모(낱말 하나를 둘러싼 테두리, 폭이 좁아 박스 찾기에서는 빠진다)
+        vs_short = [s for s in segs if s.vertical and s.y1 - s.y0 < 16]
+        small_rects = []
+        for a in vs_short:
+            for c in sorted(vs_short, key=lambda v: v.x0):
+                if c.x0 > a.x0 + 3 and c.x0 - a.x0 < 120 and abs(c.y0 - a.y0) < 1 and abs(c.y1 - a.y1) < 1 and any(
+                        h.horizontal and abs(h.y0 - a.y0) < 1 and h.x0 <= a.x0 + 1 and h.x1 >= c.x0 - 1 for h in segs):
+                    r = (a.x0, a.y0, c.x0, a.y1)
+                    if not any(q[0] < r[0] - 1 and r[2] <= q[2] + 1 for q in small_rects if abs(q[1] - r[1]) < 1):
+                        small_rects = [q for q in small_rects if not (abs(q[1] - r[1]) < 1 and q[0] == r[0] and q[2] > r[2])]
+                        small_rects.append(r)
+                    break
+
+        def _on_frame(s: _Seg) -> bool:  # 안쪽 틀(상자 모양)의 변
+            return any(abs(s.x0 - fx) < 1.5 and s.y0 >= fy0 - 1.5 and s.y1 <= fy1 + 1.5
+                       for fx0, fy0, fx1, fy1 in frames for fx in (fx0, fx1))
+
         for b in boxes:
             n = 0
             for s in segs:
                 if s.vertical and b.x0 + 3 < s.x0 < b.x1 - 3 and b.y0 - 1 <= s.y0 and s.y1 <= b.y1 + 1 \
-                        and not _in_table(s.x0, s.y0, s.x1, s.y1) and not _bracket_seg(s):
+                        and not _in_table(s.x0, s.y0, s.x1, s.y1) and not _bracket_seg(s) and not _on_frame(s):
                     n += 1
             for r in others:
                 if b.x0 + 2 < r.x0 and r.x1 < b.x1 - 2 and b.y0 + 2 < r.y0 and r.y1 < b.y1 - 2 \
-                        and not _in_table(r.x0, r.y0, r.x1, r.y1):
+                        and not _in_table(r.x0, r.y0, r.x1, r.y1) and not _inset((r.x0, r.y0, r.x1, r.y1), (b.x0, b.y0, b.x1, b.y1)):
                     n += 1
             inner = []
             for (x0, y0, x1, y1) in nested_rects:
                 if b.x0 - 1 <= x0 and x1 <= b.x1 + 1 and b.y0 - 1 <= y0 and y1 <= b.y1 + 1:
                     n += 4
                     inner.append((x0, y0, x1, y1))
+            # 낱말 네모: 줄의 일부 낱말만 둘러싼 낮은 사각형은 그 글자들의 글자 테두리
+            for r in [q for q in small_rects if b.x0 <= q[0] and q[2] <= b.x1 and b.y0 <= q[1] and q[3] <= b.y1]:
+                if r[3] - r[1] > 16:
+                    continue
+                for ln in b.items:
+                    if isinstance(ln, Line) and ln.y0 < r[3] and ln.y1 > r[1] and (r[2] - r[0]) < 0.7 * (ln.x1 - ln.x0):
+                        for g in ln.glyphs:
+                            if r[0] - 1 <= (g.x0 + g.x1) / 2 <= r[2] + 1:
+                                g.boxed = True
+            # 닫는 괄호 "]": 세로선 위·아래 끝에서 왼쪽으로 짧은 가로선(시 풀이에서 장마다 구절과 요약을 가른다)
+            for s in segs:
+                if s.vertical and b.x0 + 3 < s.x0 < b.x1 - 3 and b.y0 <= s.y0 and s.y1 <= b.y1 and s.y1 - s.y0 >= 15:
+                    ticks = [h for h in segs if h.horizontal and h.x1 - h.x0 < 30 and abs(h.x1 - s.x0) < 1.5
+                             and min(abs(h.y0 - s.y0), abs(h.y0 - s.y1)) < 1.5]
+                    if {round(h.y0) for h in ticks} >= {round(s.y0), round(s.y1)} or len({round(h.y0) for h in ticks}) >= 2:
+                        if not any(abs(x - s.x0) < 1.5 and abs(y0 - s.y0) < 1.5 for x, y0, _ in b.brackets):
+                            b.brackets.append((s.x0, s.y0, s.y1))
+            b.brackets.sort(key=lambda t: t[1])
+            # 낱말 띠: 박스 안 사각형이 줄 하나만 둘러싸면 그 줄의 띠 테두리(거의 겹친 사각형 두 개면 이중선)
+            for r in inner:
+                inside = [ln for ln in b.items if isinstance(ln, Line)
+                          and r[0] - 1 <= (ln.x0 + ln.x1) / 2 <= r[2] + 1 and r[1] - 1 <= (ln.y0 + ln.y1) / 2 <= r[3] + 1]
+                if len(inside) == 1 and r[3] - r[1] < 3 * inside[0].size and (r[2] - r[0]) >= 0.7 * (inside[0].x1 - inside[0].x0):
+                    twin = any(q is not r and all(abs(u - v) < 3 for u, v in zip(q, r)) for q in inner)
+                    inside[0].frame = "DOUBLE_SLIM" if twin else (inside[0].frame or "SOLID")
             inner += [(r.x0, r.y0, r.x1, r.y1) for r in others if b.x0 + 2 < r.x0 and r.x1 < b.x1 - 2
                       and b.y0 + 2 < r.y0 and r.y1 < b.y1 - 2]
             b.inner_drawings = n
@@ -907,7 +1069,7 @@ def extract(pdf_path: str) -> Extraction:
             b.items.sort(key=lambda it: (it.y0, it.x0))
 
         # ---- 출판사 저작권·콘텐츠 보호 고지문(© 마크 포함)은 문제 내용이 아니다 ----
-        drop = _notice_items(lines, content_imgs, boxes, tables)
+        drop = _notice_items(lines, content_imgs, boxes, tables, segs)
         if drop:
             stats["dropped_notice_lines"] += sum(1 for ln in lines if id(ln) in drop)
             lines = [ln for ln in lines if id(ln) not in drop]
@@ -917,7 +1079,9 @@ def extract(pdf_path: str) -> Extraction:
 
         # ---- 단 경계 ----
         def _col_bounds(col: int) -> tuple[float, float]:
-            ls = [ln for ln in lines if ln.col == col and len(ln.glyphs) >= 12]
+            # 표 칸 줄, 단을 넘어가는 줄(전폭 지문 등)은 단 폭을 재는 데 쓰지 않는다
+            ls = [ln for ln in lines if ln.col == col and len(ln.glyphs) >= 12 and ln.cell is None
+                  and (single or col == 1 or ln.x1 <= split_x + 10)]
             if not ls:
                 return ((36.0, min(split_x, W) - 14) if col == 0 else (split_x + 14, W - 36))
             xs0 = sorted(ln.x0 for ln in ls)
@@ -928,13 +1092,46 @@ def extract(pdf_path: str) -> Extraction:
 
         # ---- 읽기 순서 ----
         flow: list[FlowItem] = []
+        free: list = [b for b in boxes]
+        free += [ln for ln in lines if ln.box is None and ln.cell is None]
+        free += [im for im in content_imgs if im.box is None]
+        free += [t for t in tables if t.box is None and not t.nested]
+        # 두 단 쪽이라도 단 구분선 위/아래에 가운데를 가로지르는 지문·상자·표가 있으면 그 구간은 전폭:
+        # 위 구간 → 왼쪽 단 → 오른쪽 단 → 아래 구간 순서로 읽는다(해설서의 회색 지문, 맨 아래 '핵심 개념' 상자)
+        above, below = [], []
+
+        def crosses(it) -> bool:
+            return it.x0 < split_x - 10 and it.x1 > split_x + 10
+        if not best_len and not single and any(crosses(it) for it in free):
+            # 단 구분선 없는 두 단 쪽: 단 안 내용의 세로 범위 밖에 가로지르는 상자가 있으면 그 구간이 전폭
+            inner = [it for it in free if not crosses(it)]
+            div_y0 = min((it.y0 for it in inner), default=bottom)
+            div_y1 = max((it.y1 for it in inner), default=bottom)
+        if not single and (best_len or any(crosses(it) for it in free)):
+            up = [it for it in free if it.y1 <= div_y0 + 3]
+            down = [it for it in free if it.y0 >= div_y1 - 3]
+
+            def spans(zone) -> bool:  # 가운데를 가로지르거나, 가운데 선에서 맞붙은 좌우 두 상자(반쪽씩 그린 회색 지문)
+                if any(crosses(it) for it in zone):
+                    return True
+                return any(isinstance(a, Box) and isinstance(c, Box) and abs(a.x1 - c.x0) < 3 and abs(a.x1 - split_x) < 12
+                           and min(a.y1, c.y1) - max(a.y0, c.y0) > 0.6 * min(a.y1 - a.y0, c.y1 - c.y0)
+                           for a in zone for c in zone if a is not c)
+            if spans(up):
+                above = up
+            if spans(down):
+                below = down
+            if above or below:
+                stats["wide_zones"] += bool(above) + bool(below)
+                zone = {id(it) for it in above + below}
+                free = [it for it in free if id(it) not in zone]
+                wide_ids.update(id(it) for it in above + below)
+        flow.extend(sorted(above, key=lambda it: (it.y0, it.x0)))
         for col in (0, 1):
-            items: list = [b for b in boxes if b.col == col]
-            items += [ln for ln in lines if ln.col == col and ln.box is None and ln.cell is None]
-            items += [im for im in content_imgs if im.col == col and im.box is None]
-            items += [t for t in tables if t.col == col and t.box is None]
+            items = [it for it in free if it.col == col]
             items.sort(key=lambda it: (it.y0, it.x0))
             flow.extend(items)
+        flow.extend(sorted(below, key=lambda it: (it.y0, it.x0)))
         pm = PageModel(info, lines, content_imgs, boxes, flow)
         pages.append(pm)
 
@@ -963,7 +1160,7 @@ def extract(pdf_path: str) -> Extraction:
             it.png = None
     stats["pages"] = len(pages)
     stats["boxes"] = sum(1 for it in flow if isinstance(it, Box))
-    ex = Extraction(pdf_path, pages, flow, icon_digests, body_size, doc, dict(stats))
+    ex = Extraction(pdf_path, pages, flow, icon_digests, body_size, doc, dict(stats), wide_ids=wide_ids)
     ex.header_texts = header_texts
     return ex
 

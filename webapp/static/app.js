@@ -300,20 +300,61 @@
     $("#multi-count").textContent = multi ? `${n}개 · 최대 ${maxFiles()}개` : "";
     $$("[data-multi-mode]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.multiMode === state.multiMode)));
     $("#multi-note").textContent = state.multiMode === "merge"
-      ? "목록 순서대로 이어 한 파일로 만들어요. 문제 번호와 정답 번호가 1번부터 끝까지 이어져요(예: 20문제 3개 → 1~60번)."
+      ? "목록 순서대로 이어 한 파일로 만들어요(⋮⋮를 끌어 순서를 바꿀 수 있어요). 문제 번호와 정답 번호가 1번부터 끝까지 이어져요(예: 20문제 3개 → 1~60번)."
       : "파일마다 한글 파일을 하나씩 만들어요. 하나씩 차례로 변환하고, ZIP으로 한 번에 또는 따로 받을 수 있어요. 제목은 파일마다 따로 정해요.";
     $("#file-list").innerHTML = state.files.map((f, i) => {
       const st = f.job.stats || {};
       const meta = [st.pages != null ? `${st.pages}쪽` : "", st.questions != null ? `문제 ${st.questions}` : ""].filter(Boolean).join(" · ");
       const label = STATUS[f.status] || "";
-      return `<li class="fl-item${i === state.sel ? " is-sel" : ""}" data-i="${i}">
-        <button type="button" class="fl-main" data-act="select" title="${esc(f.job.filename)}"><span class="fl-no">${i + 1}</span><span class="fl-name">${esc(f.job.filename)}</span><span class="fl-meta">${esc(meta)}</span></button>
+      // 긴 이름은 가운데를 줄인다: 앞부분(…로 잘림) + 끝부분(확장자 앞 몇 글자는 늘 보이게)
+      const name = f.job.filename || "";
+      const cut = Math.max(0, name.length - 8);
+      return `<li class="fl-item${i === state.sel ? " is-sel" : ""}" data-i="${i}" draggable="true">
+        <span class="fl-grip" aria-hidden="true" title="끌어서 순서 바꾸기">⋮⋮</span>
+        <button type="button" class="fl-main" data-act="select" title="${esc(name)}"><span class="fl-no">${i + 1}</span><span class="fl-name"><span class="fl-head">${esc(name.slice(0, cut))}</span><span class="fl-tail">${esc(name.slice(cut))}</span></span><span class="fl-meta">${esc(meta)}</span></button>
         ${label ? `<span class="fl-status" data-s="${f.status}"${f.error ? ` title="${esc(f.error)}"` : ""}>${label}</span>` : ""}
         <button type="button" class="fl-btn" data-act="up" aria-label="위로" title="위로"${i === 0 ? " disabled" : ""}>↑</button>
         <button type="button" class="fl-btn" data-act="remove" aria-label="목록에서 빼기" title="빼기">×</button>
       </li>`;
     }).join("");
   }
+
+  // 끌어서 순서 바꾸기(통합본은 목록 순서대로 이어 붙인다)
+  function moveFile(from, to) {
+    if (from === to || from < 0 || to < 0 || from >= state.files.length || to >= state.files.length) return;
+    const selFile = state.files[state.sel];
+    const [f] = state.files.splice(from, 1);
+    state.files.splice(to, 0, f);
+    renderFiles();
+    selectFile(Math.max(0, state.files.indexOf(selFile)));
+    markStale();
+  }
+  let dragFrom = -1;
+  $("#file-list").addEventListener("dragstart", (e) => {
+    const li = e.target.closest(".fl-item");
+    if (!li || state.busy) { e.preventDefault(); return; }
+    dragFrom = +li.dataset.i;
+    li.classList.add("is-drag");
+    try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(dragFrom)); } catch (_) {}
+  });
+  $("#file-list").addEventListener("dragover", (e) => {
+    const li = e.target.closest(".fl-item");
+    if (!li || dragFrom < 0) return;
+    e.preventDefault();
+    $$("#file-list .fl-item").forEach((x) => x.classList.toggle("is-over", x === li));
+  });
+  $("#file-list").addEventListener("drop", (e) => {
+    const li = e.target.closest(".fl-item");
+    if (!li || dragFrom < 0) return;
+    e.preventDefault();
+    const to = +li.dataset.i, from = dragFrom;
+    dragFrom = -1;
+    moveFile(from, to);
+  });
+  $("#file-list").addEventListener("dragend", () => {
+    dragFrom = -1;
+    $$("#file-list .fl-item").forEach((x) => x.classList.remove("is-drag", "is-over"));
+  });
 
   $("#file-list").addEventListener("click", async (e) => {
     const btn = e.target.closest("button[data-act]");

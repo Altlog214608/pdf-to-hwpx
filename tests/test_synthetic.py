@@ -772,3 +772,17 @@ def test_merge_with_full_width_pages_in_the_middle(tmp_path):
     cols = _column_defs(str(out))
     assert [(n, pb) for n, pb, _ in cols] == [(2, False), (1, True), (2, True)], cols
     assert cols[1][2].startswith("• 작자 미상") and cols[2][2].startswith("※ 다음 글을")
+
+
+def test_wide_passage_on_top_of_two_column_page(tmp_path):
+    """실사용([풀이완성]): 쪽 맨 위 회색 지문은 가로로 길고(단 구분선 위), 그 아래부터 두 단. 그 구간은 한 단으로 먼저
+    읽고, 한글에서는 쪽을 나누지 않은 채 그 아래에서 두 단(가운데 선)으로 바꾼다."""
+    pdf = tmp_path / "widetop.pdf"
+    build(str(pdf), wide_top=True)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=DocStyle(answers_as_endnotes=True))
+    v = res["validation"]
+    assert v["status"] == "PASS", (v["root_causes"], v["warnings"])
+    items = res["document"]["items"]
+    assert items[0]["type"] in ("loose", "aux") and items[0]["wide"] and "(가)" in str(items[0])
+    cols = _column_defs(res["hwpx"])
+    assert [(n, pb) for n, pb, _ in cols] == [(1, False), (2, False)], cols
