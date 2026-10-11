@@ -611,6 +611,15 @@ def admin_sample_delete(sid: str) -> dict:
     return {"ok": True}
 
 
+@app.get("/")
+@app.get("/index.html")
+def index_page() -> HTMLResponse:
+    """첫 화면: app.js·app.css 주소에 버전을 붙여 배포 뒤 예전 스크립트가 캐시로 남지 않게."""
+    html = (Path(__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+    html = html.replace('href="app.css"', f'href="app.css?v={VERSION}"').replace('src="app.js"', f'src="app.js?v={VERSION}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+
+
 app.mount("/", StaticFiles(directory=str(Path(__file__).parent / "static"), html=True), name="static")
 
 

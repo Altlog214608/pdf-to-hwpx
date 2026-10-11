@@ -367,3 +367,12 @@ def test_preset_convert(env):
     assert "새 제목" in mp and "김한춘" in mp
     assert client.post(f"/api/jobs/{jid}/convert", json={"preset": "nope"}).status_code == 400
     assert client.post("/api/template", files={"file": ("x.hwpx", b"x", "application/octet-stream")}).status_code in (404, 405)
+
+
+def test_index_busts_script_cache(env):
+    """배포 뒤 예전 app.js(끌어서 순서 바꾸기 등)가 브라우저 캐시로 남지 않게 첫 화면이 스크립트 주소에 버전을 붙인다."""
+    client, server, _ = env
+    r = client.get("/")
+    assert r.status_code == 200 and r.headers.get("cache-control") == "no-cache"
+    assert f'src="app.js?v={server.VERSION}"' in r.text and f'href="app.css?v={server.VERSION}"' in r.text
+    assert client.get(f"/app.js?v={server.VERSION}").status_code == 200

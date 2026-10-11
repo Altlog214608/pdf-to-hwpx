@@ -309,7 +309,7 @@
       // 긴 이름은 가운데를 줄인다: 앞부분(…로 잘림) + 끝부분(확장자 앞 몇 글자는 늘 보이게)
       const name = f.job.filename || "";
       const cut = Math.max(0, name.length - 8);
-      return `<li class="fl-item${i === state.sel ? " is-sel" : ""}" data-i="${i}" draggable="true">
+      return `<li class="fl-item${i === state.sel ? " is-sel" : ""}" data-i="${i}">
         <span class="fl-grip" aria-hidden="true" title="끌어서 순서 바꾸기">⋮⋮</span>
         <button type="button" class="fl-main" data-act="select" title="${esc(name)}"><span class="fl-no">${i + 1}</span><span class="fl-name"><span class="fl-head">${esc(name.slice(0, cut))}</span><span class="fl-tail">${esc(name.slice(cut))}</span></span><span class="fl-meta">${esc(meta)}</span></button>
         ${label ? `<span class="fl-status" data-s="${f.status}"${f.error ? ` title="${esc(f.error)}"` : ""}>${label}</span>` : ""}
@@ -329,32 +329,53 @@
     selectFile(Math.max(0, state.files.indexOf(selFile)));
     markStale();
   }
-  let dragFrom = -1;
-  $("#file-list").addEventListener("dragstart", (e) => {
+  // 브라우저 끌어 놓기(HTML5 DnD)는 환경에 따라 🚫로 막히므로(글자 선택이 끌리는 경우 등) 포인터 움직임을 직접 따라간다.
+  // 6px 넘게 움직여야 끌기로 보고, 그 전에 떼면 원래 클릭(파일 선택)으로 둔다.
+  let drag = null;
+  let dragJustEnded = false;
+  // 포인터가 올라간 파일 자리(목록 위·아래 밖이면 맨 처음·맨 끝): 그 자리로 옮긴다
+  const dropIndex = (y) => {
+    const items = $$("#file-list .fl-item");
+    let k = 0;
+    items.forEach((li, i) => { if (y >= li.getBoundingClientRect().top) k = i; });
+    return k;
+  };
+  $("#file-list").addEventListener("pointerdown", (e) => {
     const li = e.target.closest(".fl-item");
-    if (!li || state.busy) { e.preventDefault(); return; }
-    dragFrom = +li.dataset.i;
-    li.classList.add("is-drag");
-    try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(dragFrom)); } catch (_) {}
+    if (!li || state.busy || e.button !== 0 || e.target.closest(".fl-btn")) return;
+    drag = { from: +li.dataset.i, x: e.clientX, y: e.clientY, on: false, id: e.pointerId, li };
+    if (e.target.closest(".fl-grip")) e.preventDefault(); // 손잡이에서는 글자 선택·스크롤 없이 바로
   });
-  $("#file-list").addEventListener("dragover", (e) => {
-    const li = e.target.closest(".fl-item");
-    if (!li || dragFrom < 0) return;
+  window.addEventListener("pointermove", (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    if (!drag.on) {
+      if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 6) return;
+      drag.on = true;
+      drag.li.classList.add("is-drag");
+      document.body.classList.add("is-reordering");
+      try { drag.li.setPointerCapture(e.pointerId); } catch (_) {}
+      window.getSelection && window.getSelection().removeAllRanges();
+    }
     e.preventDefault();
-    $$("#file-list .fl-item").forEach((x) => x.classList.toggle("is-over", x === li));
+    const to = dropIndex(e.clientY);
+    $$("#file-list .fl-item").forEach((x) => x.classList.toggle("is-over", +x.dataset.i === to && to !== drag.from));
   });
-  $("#file-list").addEventListener("drop", (e) => {
-    const li = e.target.closest(".fl-item");
-    if (!li || dragFrom < 0) return;
-    e.preventDefault();
-    const to = +li.dataset.i, from = dragFrom;
-    dragFrom = -1;
-    moveFile(from, to);
-  });
-  $("#file-list").addEventListener("dragend", () => {
-    dragFrom = -1;
+  const endDrag = (e, cancel) => {
+    if (!drag || (e && e.pointerId !== drag.id)) return;
+    const d = drag;
+    drag = null;
+    document.body.classList.remove("is-reordering");
     $$("#file-list .fl-item").forEach((x) => x.classList.remove("is-drag", "is-over"));
-  });
+    if (!d.on) return;
+    dragJustEnded = true; // 끌기 끝의 click(파일 선택)은 무시
+    setTimeout(() => { dragJustEnded = false; }, 0);
+    if (!cancel) moveFile(d.from, dropIndex(e.clientY));
+  };
+  window.addEventListener("pointerup", (e) => endDrag(e, false));
+  window.addEventListener("pointercancel", (e) => endDrag(e, true));
+  $("#file-list").addEventListener("click", (e) => {
+    if (dragJustEnded) { e.stopImmediatePropagation(); e.preventDefault(); }
+  }, true);
 
   $("#file-list").addEventListener("click", async (e) => {
     const btn = e.target.closest("button[data-act]");
