@@ -16,7 +16,7 @@ from collections import Counter, defaultdict
 from typing import Callable, Optional, Union
 
 from .extract import Extraction, TITLE_RE
-from .model import (CIRCLED_DIGITS, AnswerEntry, AuxBlock, Box, Choice, ChoiceGrid, Document, Glyph, ImageEl, Line,
+from .model import (CIRCLED_DIGITS, AnswerEntry, AuxBlock, Box, Cell, Choice, ChoiceGrid, Document, Glyph, ImageEl, Line,
                     Para, Passage, Question, Run, TableEl, WRITE_RE)
 
 GUIDE_RE = re.compile(r"^\s*(※|\[\s*\d+\s*[~∼～\-–]\s*\d+\s*\])")
@@ -239,7 +239,7 @@ class Builder:
             lines = [x for x in cl.items if isinstance(x, Line)]
             w = cl.x1 - cl.x0
             # 칸 안 모든 줄의 좌우 여백이 비슷하면 가운데 정렬 칸(표 칸은 대부분 이렇다)
-            if lines and all(abs((ln.x0 - cl.x0) - (cl.x1 - ln.x1)) <= max(4.0, 0.12 * w) for ln in lines):
+            if t.lines and lines and all(abs((ln.x0 - cl.x0) - (cl.x1 - ln.x1)) <= max(4.0, 0.12 * w) for ln in lines):
                 for p in cl.paras:
                     if p.kind == "text":
                         p.align, p.indent_pt = "CENTER", 0.0
@@ -327,6 +327,17 @@ class Builder:
             n = sum(1 for x in items if isinstance(x, Line))
             framed = box.framed_lines + sum(p.framed_lines for p in box.parts)
             diagram = drawings >= 2 * n or framed >= max(2, 0.3 * n)
+        if not diagram and wide and not box.parts:
+            # 전폭 상자 안이 좌우 두 칸(왼쪽 설명+표 | 오른쪽 설명+표)이면 선 없는 두 칸 표로 나란히
+            cx = (box.x0 + box.x1) / 2
+            left = [x for x in items if x.x1 <= cx + 6]
+            right = [x for x in items if x.x0 >= cx - 6]
+            if left and right and len(left) + len(right) == len(items):
+                cells = [Cell(0, 0, 1, 1, box.x0, box.y0, cx, box.y1, items=left),
+                         Cell(0, 1, 1, 1, cx, box.y0, box.x1, box.y1, items=right)]
+                t = TableEl(box.page, 0, [box.x0, cx, box.x1], [box.y0, box.y1], cells, lines=False)
+                blk.paras = [Para(kind="table", table=self.table(t), align="CENTER")]
+                return blk
         if diagram:
             # 화살표/칸 등 도형이 그려진 박스: 텍스트로 풀면 순서가 깨지므로 영역을 그림으로 보존
             parts = [box] + box.parts
@@ -529,8 +540,10 @@ def build_document(ex: Extraction) -> Document:
     q_index = dict(zip(headers, header_numbers))
     if skipped:
         doc.warnings.append(f"문제 머리를 찾지 못한 번호: {skipped}")
+    marks: dict[int, int] = {}  # 문서 항목 위치 -> 그 항목을 만든 흐름 위치(원문 쪽의 첫 내용인지 보려고)
     while i < answer_idx:
         it = flow[i]
+        marks[len(doc.items)] = i
         if isinstance(it, Line) and GUIDE_RE.match(it.text) and it.box is None and i not in header_set:
             j = i + 1
             while j < answer_idx and j not in header_set and not (isinstance(flow[j], Line) and GUIDE_RE.match(flow[j].text) and flow[j].box is None):
@@ -553,11 +566,11 @@ def build_document(ex: Extraction) -> Document:
             i = j
             continue
         # 문제/지문 밖의 내용도 버리지 않는다
-        if it.page in single_pages:
+        if it.page in single_pages or id(it) in ex.wide_ids:
             # 전폭 쪽(작품 개관·표·구조도): 한 단으로 읽었으므로 이어지는 줄은 문단으로 잇고, 출력은 새 쪽에 한 단으로
             j = i + 1
             if not isinstance(it, Box):
-                while j < answer_idx and j not in header_set and flow[j].page in single_pages \
+                while j < answer_idx and j not in header_set and (flow[j].page in single_pages or id(flow[j]) in ex.wide_ids) \
                         and not isinstance(flow[j], Box) and not (isinstance(flow[j], Line) and GUIDE_RE.match(flow[j].text)):
                     j += 1
             out = [b.aux_from_box(it, wide=True)] if isinstance(it, Box) else b.paragraphs(flow[i:j])
@@ -573,6 +586,10 @@ def build_document(ex: Extraction) -> Document:
             doc.items.extend(b.paragraphs([it]))
         doc.loose_notes.append(f"p{it.page}: {getattr(it, 'text', '[그림/박스]')[:30]}")
         i += 1
+
+    for k, fi in marks.items():
+        if k < len(doc.items) and (fi == 0 or flow[fi - 1].page != flow[fi].page):
+            doc.items[k].top = True
 
     # 정답/해설
     ans_lines: list[Line] = []

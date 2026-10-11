@@ -145,6 +145,7 @@ class TableEl:
     ys: list[float]
     cells: list[Cell] = field(default_factory=list)
     box: Optional[int] = None
+    lines: bool = True  # False: 선 없는 배치용 표(전폭 상자 안 좌우 두 칸)
 
     @property
     def x0(self) -> float:
@@ -205,6 +206,7 @@ class Para:
     children: list = field(default_factory=list)  # kind == "bracket": 괄호 안 문단들
     frame: Optional[str] = None  # 이 문단만 둘러싼 띠 테두리("SOLID" | "DOUBLE_SLIM", 낱말 띠 등)
     wide: bool = False  # 전폭 쪽(PageInfo.single)의 문제 밖 내용: 새 쪽에 한 단(가운데 선 없음)으로
+    top: bool = False  # 원문 쪽의 첫 내용(전폭 부분은 여기서 쪽을 나눈다)
 
     @property
     def text(self) -> str:
@@ -221,6 +223,7 @@ class AuxBlock:
     fill: Optional[str] = None  # 바탕색
     border_color: Optional[str] = None  # 테두리 색
     border: bool = True  # False: 선 없이 바탕색만
+    top: bool = False  # 원문 쪽의 첫 내용
 
 
 @dataclass
@@ -252,6 +255,7 @@ class Question:
     explanation: list[Para] = field(default_factory=list)
     page: int = 0
     grid: Optional[ChoiceGrid] = None
+    top: bool = False  # 원문 쪽의 첫 내용
 
     @property
     def written_parts(self) -> bool:
@@ -269,6 +273,7 @@ class Passage:
     guide: Para
     paras: list[Para] = field(default_factory=list)
     boxed: bool = True
+    top: bool = False  # 원문 쪽의 첫 내용
     question_numbers: list[int] = field(default_factory=list)
 
 

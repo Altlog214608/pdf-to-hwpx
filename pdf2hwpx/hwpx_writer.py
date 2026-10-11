@@ -300,6 +300,7 @@ class HwpxWriter:
         self.images: list[tuple[str, bytes]] = []
         self.preview_png = preview_png
         self._rng = random.Random(20260)
+        self._keep_next = False  # 전폭 머리글을 다음 표·상자와 함께
         self._styled = False  # 문제 밖 내용(작품 개관·해설서 등)을 쓰는 동안 원문의 글자 색·크기를 살린다
         self.stats = {"aux_boxes": 0, "passage_boxes": 0, "spacers": 0, "pictures": 0, "paragraphs": 0, "column_switches": 0}
         st = self.style
@@ -578,15 +579,17 @@ class HwpxWriter:
         k = min(PT_TO_HWP, max_w / max(1.0, t.x1 - t.x0))
         xs = [int(round((x - t.x0) * k)) for x in t.xs]
         ys = [int(round((y - t.y0) * PT_TO_HWP)) for y in t.ys]
-        plain = S.add_border_fill()
+        plain = S.add_border_fill() if t.lines else S.add_border_fill(sides_on=())
         rows: list[list[str]] = [[] for _ in range(len(t.ys) - 1)]
         for cl in sorted(t.cells, key=lambda c: (c.row, c.col)):
             w = xs[cl.col + cl.colspan] - xs[cl.col]
             h = max(600, ys[cl.row + cl.rowspan] - ys[cl.row])
-            bf = S.add_border_fill(fill=cl.fill) if cl.fill else plain
+            bf = S.add_border_fill(fill=cl.fill, sides_on=("left", "right", "top", "bottom") if t.lines else ()) \
+                if cl.fill else plain
             # 칸 정렬은 IR에서 칸 단위로 정한 문단 정렬을 따른다
             rows[cl.row].append(self._tc(cl.col, cl.row, cl.colspan, cl.rowspan, w, h, bf,
-                                         self._cell_paras(cl.paras, max(600, w - 700), 0, {})))
+                                         self._cell_paras(cl.paras, max(600, w - 700), 0, {}),
+                                         valign="CENTER" if t.lines else "TOP"))
         rows = [r for r in rows if r] or [[]]
         return self._tbl(rows, len(t.xs) - 1, xs[-1], max(600, ys[-1]), plain)
 
@@ -911,6 +914,8 @@ class HwpxWriter:
                 return [self._p(S0.derive(PP["plain"], align="CENTER"), self._framed(it, self.col_w - 1000))]
             if it.kind == "text":
                 ov = {"align": it.align} if it.align in ("RIGHT", "CENTER") else {"intent": _indent_hwp(it.indent_pt)}
+                if self._keep_next:
+                    ov["keep_next"] = 1
                 return [self._p(S0.derive(PP["plain"], **ov) if it.wide else PP["plain"], self._runs_xml(it.runs))]
             if it.kind == "blank" and it.wide:
                 return [self._empty(PP["plain"])]
@@ -929,21 +934,30 @@ class HwpxWriter:
         items = self.doc.items
         first_wide = bool(items) and getattr(items[0], "wide", False)
         wide_mode = first_wide
-        for it in items:
+        for k, it in enumerate(items):
             wide = getattr(it, "wide", False)
             self._set_width(wide)
             self._styled = not isinstance(it, (Passage, Question))
+            nxt = items[k + 1] if k + 1 < len(items) else None
+            # 전폭 부분의 짧은 머리글(• 개관 정리)은 바로 뒤 표·상자와 같은 쪽에
+            self._keep_next = bool(wide and isinstance(it, Para) and it.kind == "text" and len(it.text) <= 40
+                                   and getattr(nxt, "wide", False) and (isinstance(nxt, AuxBlock)
+                                                                         or getattr(nxt, "kind", "") in ("table", "image")))
             paras = self._item(it, prev_passage)
-            self._styled = False
+            self._styled = self._keep_next = False
             prev_passage = isinstance(it, Passage)
             if not paras:
                 continue
+            top = bool(body) and getattr(it, "top", False)
             if wide != wide_mode:
-                # 전폭 내용(작품 개관·표·구조도)은 새 쪽에서 한 단(가운데 선 없음)으로, 문제·지문이 다시 시작되면
-                # 새 쪽에서 원래 두 단(가운데 선)으로. 같은 구역 안에서 단 정의만 바꾸므로 미주 번호는 그대로 이어진다
-                paras[0] = _new_columns(paras[0], 1 if wide else 2, page_break=bool(body))
+                # 전폭 내용(작품 개관·표·구조도·가로로 긴 지문)은 한 단(가운데 선 없음), 문제·지문은 원래 두 단(가운데 선).
+                # 원문 쪽 맨 위에서 바뀌면 쪽을 나누고, 쪽 중간(지문 아래 문제, 문제 아래 '핵심 개념' 상자)이면 그 자리에서
+                # 단 정의만 바꾼다. 같은 구역 안이므로 미주 번호는 그대로 이어진다
+                paras[0] = _new_columns(paras[0], 1 if wide else 2, page_break=top)
                 wide_mode = wide
                 self.stats["column_switches"] += 1
+            elif wide and top:  # 전폭 부분은 원문 쪽마다 새 쪽(작품 미리보기 / 출제 포인트 / 작품 정리)
+                paras[0] = paras[0].replace('pageBreak="0"', 'pageBreak="1"', 1)
             body.extend(paras)
         self._set_width(False)
         mp = self.master_ids is not None or self.master_tpl is not None

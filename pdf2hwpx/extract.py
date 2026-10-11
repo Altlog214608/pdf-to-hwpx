@@ -79,6 +79,7 @@ class Extraction:
     doc: fitz.Document
     stats: dict = field(default_factory=dict)
     header_texts: list = field(default_factory=list)
+    wide_ids: set = field(default_factory=set)  # 두 단 쪽 위/아래의 전폭 구간에 든 흐름 항목(id)
 
     def render(self, page: int, rect: tuple[float, float, float, float]) -> bytes:
         p = self.doc[page - 1]
@@ -179,19 +180,33 @@ def _table_lines(t) -> list:
     return [x for cl in t.cells for x in cl.items if isinstance(x, Line)]
 
 
-def _notice_items(lines: list, imgs: list, boxes: list, tables: list) -> set[int]:
+def _notice_items(lines: list, imgs: list, boxes: list, tables: list, segs: Optional[list] = None) -> set[int]:
     """고지문 줄에서 시작해 위아래·옆으로 맞붙은 줄과 그림(© 마크)까지 넓힌 덩어리의 id.
     지문·표 안에 법 이름이 나오는 경우처럼 덩어리가 본문 박스나 표의 일부에만 걸치거나, 고지문이라기엔
     너무 길면 아무것도 빼지 않는다."""
     seeds = [ln for ln in lines if NOTICE_RE.search(ln.text)]
     if not seeds:
         return set()
+    # 고지문이 표(© 칸 | 표시 | 경고)에 들어 있으면 그 표만: 표 밖으로 넓히면 바로 아래 문제 줄까지 붙는다
+    for t in tables:
+        tl = _table_lines(t)
+        if tl and all(any(ln is x for x in tl) for ln in seeds) and len(tl) <= 15:
+            ids = {id(x) for x in tl}
+            ids |= {id(im) for im in imgs if t.x0 - 2 <= im.x0 and im.x1 <= t.x1 + 2 and t.y0 - 2 <= im.y0 and im.y1 <= t.y1 + 2}
+            return ids
 
     def near(a, b) -> bool:
         h = max(4.0, min(a.y1 - a.y0, b.y1 - b.y0))
         xo = min(a.x1, b.x1) - max(a.x0, b.x0)  # 가로로 겹친 길이(음수면 떨어진 거리)
         yo = min(a.y1, b.y1) - max(a.y0, b.y0)
-        return (xo > 0 and -yo <= 0.9 * h) or (yo > 0.5 * h and -xo <= 20)
+        if xo > 0 and -yo <= 0.9 * h:
+            # 사이에 가로선(고지문 틀의 아래 변)이 있으면 바로 아래 문제 줄과는 이어지지 않는다
+            lo, hi = sorted((a.y1, b.y1))[0], sorted((a.y0, b.y0))[1]
+            if any(s.horizontal and lo - 1 <= s.y0 <= hi + 1 and s.x0 <= max(a.x0, b.x0) + 2
+                   and s.x1 >= min(a.x1, b.x1) - 2 for s in segs or ()):
+                return False
+            return True
+        return yo > 0.5 * h and -xo <= 20
 
     pool = list(lines) + list(imgs)
     group = list(seeds)
@@ -624,6 +639,7 @@ def extract(pdf_path: str) -> Extraction:
     stats = Counter()
 
     bracket_id = 0
+    wide_ids: set[int] = set()
     for pno, W, H, frags, segs, others, imgs, top, bottom, fills in raw_pages:
         # ---- 단 분리선 ----
         content_h = max(1.0, bottom - top)
@@ -634,6 +650,9 @@ def extract(pdf_path: str) -> Extraction:
                 ln = min(s.y1, bottom) - max(s.y0, top)
                 if ln >= 0.4 * content_h and ln > best_len:
                     best_len, split_x = ln, s.x0
+        # 단 구분선이 그어진 세로 범위(위·아래로 전폭 지문/상자가 있으면 그 범위 밖)
+        div_y0 = min((s.y0 for s in segs if s.vertical and abs(s.x0 - split_x) < 1.0), default=top) if best_len else top
+        div_y1 = max((s.y1 for s in segs if s.vertical and abs(s.x0 - split_x) < 1.0), default=bottom) if best_len else bottom
 
         # ---- 글자 조각 필터 ----
         kept: list[_Frag] = []
@@ -986,7 +1005,7 @@ def extract(pdf_path: str) -> Extraction:
             b.items.sort(key=lambda it: (it.y0, it.x0))
 
         # ---- 출판사 저작권·콘텐츠 보호 고지문(© 마크 포함)은 문제 내용이 아니다 ----
-        drop = _notice_items(lines, content_imgs, boxes, tables)
+        drop = _notice_items(lines, content_imgs, boxes, tables, segs)
         if drop:
             stats["dropped_notice_lines"] += sum(1 for ln in lines if id(ln) in drop)
             lines = [ln for ln in lines if id(ln) not in drop]
@@ -1007,13 +1026,39 @@ def extract(pdf_path: str) -> Extraction:
 
         # ---- 읽기 순서 ----
         flow: list[FlowItem] = []
+        free: list = [b for b in boxes]
+        free += [ln for ln in lines if ln.box is None and ln.cell is None]
+        free += [im for im in content_imgs if im.box is None]
+        free += [t for t in tables if t.box is None]
+        # 두 단 쪽이라도 단 구분선 위/아래에 가운데를 가로지르는 지문·상자·표가 있으면 그 구간은 전폭:
+        # 위 구간 → 왼쪽 단 → 오른쪽 단 → 아래 구간 순서로 읽는다(해설서의 회색 지문, 맨 아래 '핵심 개념' 상자)
+        above, below = [], []
+
+        def crosses(it) -> bool:
+            return it.x0 < split_x - 10 and it.x1 > split_x + 10
+        if not best_len and not single and any(crosses(it) for it in free):
+            # 단 구분선 없는 두 단 쪽: 단 안 내용의 세로 범위 밖에 가로지르는 상자가 있으면 그 구간이 전폭
+            inner = [it for it in free if not crosses(it)]
+            div_y0 = min((it.y0 for it in inner), default=bottom)
+            div_y1 = max((it.y1 for it in inner), default=bottom)
+        if not single and (best_len or any(crosses(it) for it in free)):
+            up = [it for it in free if it.y1 <= div_y0 + 3]
+            down = [it for it in free if it.y0 >= div_y1 - 3]
+            if any(crosses(it) for it in up):
+                above = up
+            if any(crosses(it) for it in down):
+                below = down
+            if above or below:
+                stats["wide_zones"] += bool(above) + bool(below)
+                zone = {id(it) for it in above + below}
+                free = [it for it in free if id(it) not in zone]
+                wide_ids.update(id(it) for it in above + below)
+        flow.extend(sorted(above, key=lambda it: (it.y0, it.x0)))
         for col in (0, 1):
-            items: list = [b for b in boxes if b.col == col]
-            items += [ln for ln in lines if ln.col == col and ln.box is None and ln.cell is None]
-            items += [im for im in content_imgs if im.col == col and im.box is None]
-            items += [t for t in tables if t.col == col and t.box is None]
+            items = [it for it in free if it.col == col]
             items.sort(key=lambda it: (it.y0, it.x0))
             flow.extend(items)
+        flow.extend(sorted(below, key=lambda it: (it.y0, it.x0)))
         pm = PageModel(info, lines, content_imgs, boxes, flow)
         pages.append(pm)
 
@@ -1042,7 +1087,7 @@ def extract(pdf_path: str) -> Extraction:
             it.png = None
     stats["pages"] = len(pages)
     stats["boxes"] = sum(1 for it in flow if isinstance(it, Box))
-    ex = Extraction(pdf_path, pages, flow, icon_digests, body_size, doc, dict(stats))
+    ex = Extraction(pdf_path, pages, flow, icon_digests, body_size, doc, dict(stats), wide_ids=wide_ids)
     ex.header_texts = header_texts
     return ex
 
