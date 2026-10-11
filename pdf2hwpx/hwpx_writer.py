@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import dataclasses
 import io
 import random
 import re
@@ -54,7 +55,7 @@ def _strip_prefix(runs: list[Run], pat: re.Pattern) -> list[Run]:
         if cut >= len(r.text):
             cut -= len(r.text)
             continue
-        out.append(Run(r.text[cut:], bold=r.bold, underline=r.underline) if cut else r)
+        out.append(dataclasses.replace(r, text=r.text[cut:]) if cut else r)
         cut = 0
     return out
 
@@ -178,6 +179,28 @@ class Styles:
         self.new_chars.append(x)
         return cid
 
+    def derive_char(self, base: int, color: Optional[str] = None, height: Optional[int] = None,
+                    border_fill: Optional[int] = None, shade: Optional[str] = None) -> int:
+        """글자 모양 base를 복제해 색·크기·글자 테두리·음영만 바꾼다(문제 밖 내용의 원문 모양)."""
+        key = ("char", base, color, height, border_fill, shade)
+        if key in self.cache:
+            return self.cache[key]
+        x = self.char_xml[base]
+        cid = max(self.char_xml) + 1
+        x = re.sub(r'<hh:charPr id="\d+"', f'<hh:charPr id="{cid}"', x, count=1)
+        if color:
+            x = re.sub(r'textColor="#[0-9A-Fa-f]{6}"', f'textColor="{color}"', x, count=1)
+        if height:
+            x = re.sub(r' height="\d+"', f' height="{int(height)}"', x, count=1)
+        if border_fill is not None:
+            x = re.sub(r'borderFillIDRef="\d+"', f'borderFillIDRef="{border_fill}"', x, count=1)
+        if shade:
+            x = re.sub(r'shadeColor="[^"]*"', f'shadeColor="{shade}"', x, count=1)
+        self.char_xml[cid] = x
+        self.new_chars.append(x)
+        self.cache[key] = cid
+        return cid
+
     def add_border_fill(self, width: str = "0.12 mm", fill: Optional[str] = None,
                         sides_on: tuple[str, ...] = ("left", "right", "top", "bottom")) -> int:
         key = ("bf", width, fill, sides_on)
@@ -276,6 +299,7 @@ class HwpxWriter:
         self.images: list[tuple[str, bytes]] = []
         self.preview_png = preview_png
         self._rng = random.Random(20260)
+        self._styled = False  # 문제 밖 내용(작품 개관·해설서 등)을 쓰는 동안 원문의 글자 색·크기를 살린다
         self.stats = {"aux_boxes": 0, "passage_boxes": 0, "spacers": 0, "pictures": 0, "paragraphs": 0, "column_switches": 0}
         st = self.style
         # 글꼴/크기: 본문 글자 모양(0, 7, 8, 9, 10)은 모두 글꼴 1을 쓴다
@@ -413,14 +437,34 @@ class HwpxWriter:
         return int(round(v * self.scale / 10.0)) * 10
 
     # ------------------------------------------------------------ xml ----
+    def _char_look(self, cp: int, r: Run) -> int:
+        """문제 밖 내용: 원문의 글자 색과 크기(본문 대비 8% 넘게 다를 때, 0.5pt 단위)."""
+        height = None
+        if r.size and abs(r.rel - 1.0) >= 0.08:
+            height = int(round(self.style.body_size * r.rel * 2) / 2 * 100)
+            height = max(500, min(height, 3000))
+        if not r.color and not height:
+            return cp
+        return self.styles.derive_char(cp, color=r.color, height=height)
+
     def _runs_xml(self, runs: list[Run], base_bold: bool = False) -> str:
         out = []
+        if not self._styled:  # 문제·지문은 굵게/밑줄만(색·크기는 문서 설정을 따른다)
+            merged: list[Run] = []
+            for r in runs:
+                if merged and merged[-1].bold == r.bold and merged[-1].underline == r.underline:
+                    merged[-1] = dataclasses.replace(merged[-1], text=merged[-1].text + r.text)
+                else:
+                    merged.append(r)
+            runs = merged
         for r in runs:
             bold = r.bold or base_bold
             if bold:
                 cp = CP["bold_ul"] if r.underline else CP["bold"]
             else:
                 cp = CP["body_ul"] if r.underline else CP["body"]
+            if self._styled:
+                cp = self._char_look(cp, r)
             for part in re.split(f"({BLANK_BOX}+)", r.text):
                 if part.startswith(BLANK_BOX):
                     out.append(self._blank_box(len(part)))
@@ -862,7 +906,9 @@ class HwpxWriter:
         for it in items:
             wide = getattr(it, "wide", False)
             self._set_width(wide)
+            self._styled = not isinstance(it, (Passage, Question))
             paras = self._item(it, prev_passage)
+            self._styled = False
             prev_passage = isinstance(it, Passage)
             if not paras:
                 continue

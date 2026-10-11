@@ -117,8 +117,18 @@ def _resample(pix: fitz.Pixmap, n: int) -> list[int]:
 
 # --------------------------------------------------------------------------
 
-def _is_bold(font: str, flags: int) -> bool:
-    return "bold" in font.lower() or bool(flags & 16)
+def _is_bold(font: str, flags: int, char_flags: int = 0) -> bool:
+    """굵은 글꼴 이름(…Bold, 나눔스퀘어 B/EB 등)이거나, 글자를 칠하고 테두리까지 그린 가짜 굵게(한글이 내보내는 진하게)."""
+    return ("bold" in font.lower() or bool(flags & 16) or bool(re.search(r"[a-z](?:EB|XB|B)$", font))
+            or (char_flags & 48) == 48)
+
+
+def _color(c: int) -> Optional[str]:
+    """글자 색. 검정(또는 거의 검정)과 흰색(색 배경 위 글자: 한글에선 배경이 없어 보이지 않음)은 None."""
+    r, g, b = (c >> 16) & 255, (c >> 8) & 255, c & 255
+    if max(r, g, b) < 40 or min(r, g, b) > 235:
+        return None
+    return "#%02X%02X%02X" % (r, g, b)
 
 
 # Wingdings 글꼴은 일반 글자 자리에 기호를 그린다(예: 'ü'가 체크 표시). 문제집에 자주 나오는 것만 같은 모양의 유니코드로.
@@ -128,7 +138,7 @@ WINGDINGS = {"ü": "✓", "û": "✗", "ý": "☒", "þ": "☑", "è": "→", "�
 
 def _page_fragments(page: fitz.Page) -> list[_Frag]:
     frags: list[_Frag] = []
-    raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+    raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_COLLECT_STYLES)
     for block in raw.get("blocks", []):
         if block.get("type") != 0:
             continue
@@ -138,7 +148,8 @@ def _page_fragments(page: fitz.Page) -> list[_Frag]:
                 size = float(span.get("size") or 0)
                 if size < HIDDEN_TEXT_MAX_SIZE:
                     continue
-                bold = _is_bold(span.get("font", ""), int(span.get("flags") or 0))
+                bold = _is_bold(span.get("font", ""), int(span.get("flags") or 0), int(span.get("char_flags") or 0))
+                color = _color(int(span.get("color") or 0))
                 wingdings = "wingdings" in span.get("font", "").lower()
                 for ch in span.get("chars", []):
                     c = ch.get("c") or ""
@@ -149,7 +160,7 @@ def _page_fragments(page: fitz.Page) -> list[_Frag]:
                     x0, y0, x1, y1 = ch["bbox"]
                     if c == " ":
                         c = " "
-                    glyphs.append(Glyph(c, x0, y0, x1, y1, size, bold))
+                    glyphs.append(Glyph(c, x0, y0, x1, y1, size, bold, color=color))
             if not glyphs or all(g.is_space for g in glyphs):
                 continue
             solid = [g for g in glyphs if not g.is_space]

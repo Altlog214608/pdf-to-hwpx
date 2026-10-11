@@ -25,6 +25,7 @@ class Glyph:
     bold: bool = False
     underline: bool = False
     icon: Optional[str] = None  # 아이콘 이미지 해시(원문자)
+    color: Optional[str] = None  # 검정이 아닌 글자 색("#28448E" 등)
 
     @property
     def is_space(self) -> bool:
@@ -179,6 +180,9 @@ class Run:
     text: str
     underline: bool = False
     bold: bool = False
+    color: Optional[str] = None  # 검정이 아닌 글자 색
+    size: float = 0.0  # 원문 글자 크기(pt). 본문 크기 대비 비율은 rel
+    rel: float = 1.0  # 원문 본문 글자 크기 대비 비율(문제 밖 내용에서 작은 설명 글 등을 줄여 쓸 때)
 
 
 @dataclass

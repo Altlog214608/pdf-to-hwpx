@@ -38,27 +38,31 @@ class _BracketGroup:
 
 # ------------------------------------------------------------- helpers ----
 
+def _same_look(a: Run, b: Run) -> bool:
+    return a.underline == b.underline and a.bold == b.bold and a.color == b.color and a.size == b.size
+
+
 def _runs_from_glyphs(glyphs: list[Glyph], bold: bool = False) -> list[Run]:
-    """글자 -> 런. 원문의 밑줄과 굵게(지문 속 강조 시어 등)를 보존한다."""
+    """글자 -> 런. 원문의 밑줄과 굵게(지문 속 강조 시어 등), 글자 색과 크기(0.5pt 단위)를 보존한다."""
     runs: list[Run] = []
     for g in glyphs:
-        ul = g.underline
-        b = bold or g.bold
+        r = Run(g.c, g.underline, bold or g.bold, g.color, round(g.size * 2) / 2 if not g.icon else 0.0)
         if g.is_space and runs:  # 공백은 앞 런의 모양을 따라가 런이 잘게 쪼개지지 않게
-            ul, b = runs[-1].underline and ul, runs[-1].bold
-        if runs and runs[-1].underline == ul and runs[-1].bold == b:
+            p = runs[-1]
+            r = Run(g.c, p.underline and r.underline, p.bold, p.color, p.size)
+        if runs and _same_look(runs[-1], r):
             runs[-1].text += g.c
         else:
-            runs.append(Run(g.c, ul, b))
+            runs.append(r)
     return runs
 
 
 def _append_runs(dst: list[Run], src: list[Run]) -> None:
     for r in src:
-        if dst and dst[-1].underline == r.underline and dst[-1].bold == r.bold:
+        if dst and _same_look(dst[-1], r):
             dst[-1].text += r.text
         else:
-            dst.append(Run(r.text, r.underline, r.bold))
+            dst.append(Run(r.text, r.underline, r.bold, r.color, r.size))
 
 
 def _clean_runs(runs: list[Run]) -> list[Run]:
@@ -66,7 +70,7 @@ def _clean_runs(runs: list[Run]) -> list[Run]:
     for r in runs:
         t = re.sub(r"[ \t]{2,}", " ", r.text)
         if t:
-            _append_runs(out, [Run(t, r.underline, r.bold)])
+            _append_runs(out, [Run(t, r.underline, r.bold, r.color, r.size)])
     if out:
         out[0].text = out[0].text.lstrip()
         out[-1].text = out[-1].text.rstrip()
@@ -267,7 +271,8 @@ class Builder:
             if i > 0:
                 prev = lines[i - 1]
                 if prev.trailing_space or not self.trailing_space_reliable or self._emphasis_boundary(prev, ln):
-                    _append_runs(runs, [Run(" ", False, bold)])
+                    last = runs[-1] if runs else None
+                    _append_runs(runs, [Run(" ", False, bold, last.color if last else None, last.size if last else 0.0)])
             _append_runs(runs, _runs_from_glyphs(ln.glyphs, bold))
         p = Para(runs=_clean_runs(runs))
         left, right = self.bounds(lines[0])
@@ -582,6 +587,9 @@ def build_document(ex: Extraction) -> Document:
             q.answer = ANSWER_HEAD_RE.sub("", head, count=1).strip()
             q.explanation = a.paras
 
+    for r in _iter_runs(doc):  # 원문 본문 크기 대비 글자 크기(문제 밖 내용의 작은 설명 글 등)
+        r.rel = round(r.size / body, 2) if r.size and body else 1.0
+
     # 그림 렌더링 (박스 안/지문/문제 그림)
     for img in _iter_images(doc):
         if img.png is None:
@@ -848,6 +856,30 @@ def _build_answers(b: Builder, lines: list[Line]) -> list[AnswerEntry]:
         (cur_body if in_body else cur_head).append(ln)
     flush()
     return entries
+
+
+def _iter_runs(doc: Document):
+    """문서의 모든 글자 런(지문·문제·박스·표 칸·정답 포함)."""
+    def from_paras(ps):
+        for p in ps:
+            if isinstance(p, AuxBlock):
+                yield from from_paras(p.paras)
+            elif isinstance(p, Para):
+                yield from p.runs
+                if p.table is not None:
+                    for cl in p.table.cells:
+                        yield from from_paras(cl.paras)
+                yield from from_paras(p.children)
+    for it in doc.items:
+        if isinstance(it, Passage):
+            yield from from_paras(([it.guide] if it.guide else []) + it.paras)
+        elif isinstance(it, Question):
+            yield from from_paras([it.stem] + it.blocks + it.after + [c.para for c in it.choices]
+                                  + [x for c in it.choices for x in c.extra])
+        else:
+            yield from from_paras([it])
+    for a in doc.answers:
+        yield from from_paras([a.head] + a.paras)
 
 
 def _iter_images(doc: Document):
