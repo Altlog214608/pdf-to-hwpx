@@ -684,16 +684,20 @@ class HwpxWriter:
             out.append(self._choice_grid(q))
         for i, c in enumerate(q.choices if not use_grid else []):
             base = PP["choice_last"] if i == len(q.choices) - 1 else PP["choice"]
-            if c.extra:  # 출전 줄이 뒤따르면 선택지 문단은 다음 줄과 붙어 있게
+            if c.extra:  # 출전 줄·하위 줄이 뒤따르면 선택지 문단은 다음 줄과 붙어 있게
                 base = PP["choice"]
             out.append(self._p(S.derive(base, left=1100, intent=-self._hang(1430)), self._runs_xml(c.para.runs)))
             for k, x in enumerate(c.extra):
                 last_extra = i == len(q.choices) - 1 and k == len(c.extra) - 1
                 xb = PP["choice_last"] if last_extra else PP["choice"]
-                out.append(self._p(S.derive(xb, align="RIGHT", left=1100, intent=0), self._runs_xml(x.runs)))
+                if x.role == "credit":  # 오른쪽 정렬 출전
+                    xp = S.derive(xb, align="RIGHT", left=1100, intent=0)
+                else:  # 서술형 하위 물음 아래 "(a) :" 같은 줄: 선택지 글 첫머리에 맞춘다
+                    xp = S.derive(xb, left=1100 + self._hang(1430), intent=0)
+                out.append(self._p(xp, self._runs_xml(x.runs)))
         for i, b in enumerate(q.after):
             out.extend(self._block(b, i == len(q.after) - 1))
-        if q.qtype == "subjective":  # 서술형: 답을 쓸 빈 줄
+        if q.qtype == "subjective" and not q.choices:  # 서술형: 답을 쓸 빈 줄 (하위 물음이 있으면 그 줄이 답 칸)
             out.extend(self._empty(PP["plain"]) for _ in range(SUBJECTIVE_BLANK_LINES))
         return out
 

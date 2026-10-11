@@ -211,13 +211,14 @@ def validate(ex: "Extraction | list[Extraction]", doc: Document, hwpx_path: str)
     out_sh = _shingles(out_text)
     # 줄 단위 n-gram: 읽기 순서가 바뀌거나 그림으로 대체된 줄이 있어도 경계 n-gram이 왜곡되지 않게
     src_sh: set[str] = set()
+    fixes = doc.source_fixes
     for l in src_lines:
-        src_sh |= _shingles(_compact(l.text, keep_numbers))
+        src_sh |= _shingles(_compact(fixes.get(id(l), l.text), keep_numbers))
     coverage = len(src_sh & out_sh) / max(1, len(src_sh))
     precision = len(src_sh & out_sh) / max(1, len(out_sh))
     missing = []
     for l in src_lines:
-        c = _compact(l.text, keep_numbers)
+        c = _compact(fixes.get(id(l), l.text), keep_numbers)
         sh = _shingles(c)
         if len(c) >= NGRAM and sh and len(sh & out_sh) / len(sh) < 0.5:
             missing.append(f"p{l.page}: {l.text[:40]}")
@@ -248,11 +249,14 @@ def validate(ex: "Extraction | list[Extraction]", doc: Document, hwpx_path: str)
         if k < len(qs) and re.match(rf"^\s*{shown[k]}\s*\.", p["text"]):
             k += 1
     checks["question_order_status"] = "PASS" if seq_ok and k == len(qs) and qs else "FAIL"
-    if checks["question_order_status"] == "FAIL":
+    if not qs:  # 내용은 옮겼지만 문제 머리를 하나도 못 찾음: 번호를 그림으로 넣은 해설서 같은 다른 양식
+        causes.append("문제를 하나도 찾지 못함 (문제 번호가 그림이거나 문제집과 다른 양식) — 내용은 줄 단위로 옮겼고, "
+                      "자동 번호·정답 미주는 넣지 못함")
+    elif checks["question_order_status"] == "FAIL":
         gaps = [f"{a.number}→{b.number}" for a, b in zip(qs, qs[1:]) if b.number != a.number + 1]
         causes.append(f"문제 번호 순서/누락 (IR {len(qs)}개, HWPX에서 순서대로 찾은 수 {k}"
                       + (f", 건너뛴 곳 {', '.join(gaps[:3])}" if gaps else "") + ")")
-    bad_choices = [q.number for q in qs if q.choices and len(q.choices) != 5]
+    bad_choices = [q.number for q in qs if q.choices and len(q.choices) != 5 and not q.written_parts]
     checks["choice_count_status"] = "PASS" if not bad_choices else "WARN"
     if bad_choices:
         warns.append(f"선택지가 5개가 아닌 문제: {bad_choices}")

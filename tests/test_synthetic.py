@@ -645,3 +645,71 @@ def test_answer_numbers_over_100_not_doubled(tmp_path):
         sec0 = z.read("Contents/section0.xml").decode("utf-8")
     head_pp = re.search(r'<hp:endNote [^>]*>.*?<hp:p [^>]*paraPrIDRef="(\d+)"', sec0, re.S).group(1)
     assert re.search(rf'<hh:paraPr id="{head_pp}"[^>]*>.*?keepWithNext="1"', header, re.S)
+
+
+@pytest.mark.parametrize("endnotes", [False, True])
+def test_bare_big_question_numbers(tmp_path, endnotes):
+    """실사용([시대별 문학]): 문제 번호가 마침표 없이 큰 회색 숫자 "1"뿐(옆에 흰색 1pt 숨은 글자 "zb1)")이라 문제를 하나도
+    못 찾고 정답 10개를 문서 끝에 모았다(통합본에서는 미주가 빠지고 번호가 건너뜀). 번호 글자가 본문·뒤 글자보다 확실히 크면
+    문제 머리로 보고, 발문은 다른 양식처럼 "1. …"로 맞춘다."""
+    pdf = tmp_path / "bare.pdf"
+    build(str(pdf), bare_numbers=True)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=DocStyle(answers_as_endnotes=endnotes))
+    v = res["validation"]
+    assert v["status"] == "PASS", (v["root_causes"], v["warnings"])
+    qs = _items(res, "question")
+    assert [q["number"] for q in qs] == [1, 2, 3, 4, 5]
+    assert all(re.match(rf"^{q['number']}\. \S", q["stem"]) for q in qs), [q["stem"] for q in qs]
+    assert v["checks"]["answer_count"] == 5 and (v["checks"]["endnotes"] == 5 if endnotes else True)
+    text = " ".join(p["text"] for p in read_hwpx(res["hwpx"])["paragraphs"])
+    assert "zb1)" not in text and "1. 1" not in text
+
+
+def test_written_sub_questions_and_credit_without_space(tmp_path):
+    """실사용(제망매가 10번): ① ②가 고르는 선택지가 아니라 '…쓰시오.' 하위 물음이고 그 아래 "(a) :" 답 칸 줄이 있다.
+    답 칸 줄을 선택지 글에 잇지 않고 따로 두며, 서술형으로 보고(선택지 수 경고 없음) 그 뒤 <조건> 박스는 원래대로 뒤에 둔다.
+    출전이 대시 뒤 띄어쓰기 없이("-한호, 「…」") 오른쪽에 붙어도 출전 줄로 본다."""
+    pdf = tmp_path / "written.pdf"
+    build(str(pdf), written_parts=True, credit_nospace=True)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    v = res["validation"]
+    assert v["status"] == "PASS", (v["root_causes"], v["warnings"])
+    qs = {q["number"]: q for q in _items(res, "question")}
+    q4 = qs[4]
+    assert q4["qtype"] == "subjective" and len(q4["choices"]) == 2
+    assert q4["choices"][0].rstrip().endswith("쓰시오.")
+    assert q4["choice_sublines"] == {"①": ["(a) :"], "②": ["(b) :"]}
+    assert q4["blocks"] == [] and [b.get("title") for b in q4["after"]] == ["<조건>"]
+    assert not any("선택지" in w for w in res["document"]["warnings"] + v["warnings"])
+    assert qs[3]["choices"][0] == "① 현저동" and qs[3]["choice_credits"]["①"] == ["-작가1, 「작품1」"]
+    assert qs[3]["choice_credits"]["⑤"] == ["-작가5, 「작품5」"] and qs[3]["after"] == []
+    paras = [p["text"].strip() for p in read_hwpx(res["hwpx"])["paragraphs"]]
+    i = paras.index("(a) :")
+    assert paras[i - 1].endswith("쓰시오.") and "(b) :" in paras[i + 1:i + 3]
+
+
+def test_two_choices_per_line_with_wide_label_gap(tmp_path):
+    """실사용(최척전(04) 20번): 원문자 아이콘과 글 사이(4.6pt)가 두 선택지 사이(글자 0.7개)보다 크게 벌어진 문제집.
+    번호 뒤 간격은 '보통 띄어쓰기' 폭에서 빼고 재야 ①③⑤로 붙지 않는다."""
+    pdf = tmp_path / "wide.pdf"
+    build(str(pdf), narrow_pairs="wide_label")
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    v = res["validation"]
+    assert v["status"] == "PASS", (v["root_causes"], v["warnings"])
+    q1 = _items(res, "question")[0]
+    assert [c[:1] for c in q1["choices"]] == list("①②③④⑤"), q1["choices"]
+
+
+def test_example_sheet_without_question_numbers(tmp_path):
+    """실사용([풀이완성]): 문제 번호가 '예제' 그림뿐이고 정답부가 없어 문제를 찾지 못하는 자료. 내용은 옮기되, 선택지
+    원문자 아이콘은 같은 단에서 이어지는 줄머리 아이콘 묶음 순서로 판별하고(○ 로 바꾸지 않음), 원인을 알기 쉽게 알린다."""
+    from tests.synth_pdf import build_examples
+
+    pdf = tmp_path / "examples.pdf"
+    build_examples(str(pdf))
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    v = res["validation"]
+    assert any("문제를 하나도 찾지 못함" in c for c in v["root_causes"]), v["root_causes"]
+    assert not any("원문자 아이콘" in w for w in res["document"]["warnings"])
+    text = " ".join(p["text"] for p in read_hwpx(res["hwpx"])["paragraphs"])
+    assert "① 선택지 1-1" in text and "⑤ 선택지 4-5" in text and "○" not in text

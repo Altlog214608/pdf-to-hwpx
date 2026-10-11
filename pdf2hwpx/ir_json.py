@@ -50,7 +50,11 @@ def document_to_json(doc: Document) -> dict:
             items.append({"type": "question", "number": it.number, "qtype": it.qtype, "passage": it.passage_id,
                           "stem": it.stem.text, "blocks": blocks,
                           "choices": [c.para.text for c in it.choices],
-                          "choice_credits": {c.label: [x.text for x in c.extra] for c in it.choices if c.extra}, "answer": it.answer,
+                          "choice_credits": {c.label: [x.text for x in c.extra if x.role == "credit"]
+                                             for c in it.choices if any(x.role == "credit" for x in c.extra)},
+                          "choice_sublines": {c.label: [x.text for x in c.extra if x.role == "subline"]
+                                              for c in it.choices if any(x.role == "subline" for x in c.extra)},
+                          "answer": it.answer,
                           "explanation": [p.text for p in it.explanation if p.kind == "text"],
                           "after": [_block(b) for b in it.after],
                           **({"grid": {"header": ["".join(r.text for r in h) for h in it.grid.header],
