@@ -81,10 +81,11 @@ class Extraction:
     header_texts: list = field(default_factory=list)
     wide_ids: set = field(default_factory=set)  # 두 단 쪽 위/아래의 전폭 구간에 든 흐름 항목(id)
 
-    def render(self, page: int, rect: tuple[float, float, float, float]) -> bytes:
+    def render(self, page: int, rect: tuple[float, float, float, float], sharp: bool = False) -> bytes:
+        """원문 영역을 그림으로. sharp: 쪽 폭 가까이 크게 들어가는 도식(구조도 등)은 더 높은 해상도(약 290dpi)."""
         p = self.doc[page - 1]
         clip = fitz.Rect(*rect) & p.rect
-        zoom = min(RENDER_ZOOM, RENDER_MAX_PX / max(1.0, clip.width, clip.height))
+        zoom = min(4.0 if sharp else RENDER_ZOOM, (3200 if sharp else RENDER_MAX_PX) / max(1.0, clip.width, clip.height))
         pix = p.get_pixmap(clip=clip, matrix=fitz.Matrix(zoom, zoom), alpha=False)
         return pix.tobytes("png")
 
@@ -562,8 +563,8 @@ def _group_lines(frags: list[_Frag]) -> list[list[_Frag]]:
     for f in frags:
         target = None
         for g in reversed(groups[-4:]):
-            gy0 = min(x.y0 for x in g)
-            gy1 = max(x.y1 for x in g)
+            # 줄의 첫 조각 높이와 비교한다(조각마다 넓히면 사이에 걸친 조각을 타고 위·아래 줄까지 한 줄이 된다)
+            gy0, gy1 = g[0].y0, g[0].y1
             ov = min(gy1, f.y1) - max(gy0, f.y0)
             if ov >= 0.5 * min(f.y1 - f.y0, gy1 - gy0):
                 target = g
@@ -899,12 +900,27 @@ def extract(pdf_path: str) -> Extraction:
         used_underlines = set()
         for ln in lines:
             for k, s in enumerate(underline_segs):
-                if ln.y1 - 0.45 * ln.size <= s.y0 <= ln.y1 + 0.35 * ln.size and s.x1 > ln.x0 and s.x0 < ln.x1:
+                if ln.y1 - 0.45 * ln.size <= s.y0 <= ln.y1 + 0.35 * ln.size and s.x1 > ln.x0 \
+                        and s.x0 < ln.x1 + 4 * ln.size and k not in used_underlines:
                     hit = False
                     for gl in ln.glyphs:
                         cx = (gl.x0 + gl.x1) / 2
                         if not gl.is_space and s.x0 - 0.5 <= cx <= s.x1 + 0.5:
                             gl.underline = True
+                            hit = True
+                    if not hit:  # 빈칸 밑줄("㉠ : ______"): 글자 없이 공백 위에만 그은 선
+                        blank = [gl for gl in ln.glyphs if gl.is_space and s.x0 - 0.5 <= (gl.x0 + gl.x1) / 2 <= s.x1 + 0.5]
+                        if len(blank) >= 3:
+                            for gl in blank:
+                                gl.underline = True
+                            hit = True
+                        elif ln.x1 - 1 <= s.x0 and s.x0 - ln.x1 < 4 * ln.size and s.x1 - s.x0 > 2 * ln.size:
+                            # 줄 끝 공백은 줄을 만들 때 지워졌다: 선 길이만큼 밑줄 친 공백을 붙인다
+                            w = 0.5 * ln.size
+                            n = max(3, int(round((s.x1 - s.x0) / w)))
+                            ln.glyphs.append(Glyph(" ", ln.x1, ln.y0, s.x0, ln.y1, ln.size))
+                            ln.glyphs += [Glyph(" ", s.x0 + k * w, ln.y0, s.x0 + (k + 1) * w, ln.y1, ln.size, underline=True)
+                                          for k in range(n)]
                             hit = True
                     if hit:
                         used_underlines.add(k)
@@ -985,6 +1001,18 @@ def extract(pdf_path: str) -> Extraction:
                        for bk in brackets)
 
         frames = [box_rects[i] for i in inset]
+        # 글자 높이의 작은 네모(낱말 하나를 둘러싼 테두리, 폭이 좁아 박스 찾기에서는 빠진다)
+        vs_short = [s for s in segs if s.vertical and s.y1 - s.y0 < 16]
+        small_rects = []
+        for a in vs_short:
+            for c in sorted(vs_short, key=lambda v: v.x0):
+                if c.x0 > a.x0 + 3 and c.x0 - a.x0 < 120 and abs(c.y0 - a.y0) < 1 and abs(c.y1 - a.y1) < 1 and any(
+                        h.horizontal and abs(h.y0 - a.y0) < 1 and h.x0 <= a.x0 + 1 and h.x1 >= c.x0 - 1 for h in segs):
+                    r = (a.x0, a.y0, c.x0, a.y1)
+                    if not any(q[0] < r[0] - 1 and r[2] <= q[2] + 1 for q in small_rects if abs(q[1] - r[1]) < 1):
+                        small_rects = [q for q in small_rects if not (abs(q[1] - r[1]) < 1 and q[0] == r[0] and q[2] > r[2])]
+                        small_rects.append(r)
+                    break
 
         def _on_frame(s: _Seg) -> bool:  # 안쪽 틀(상자 모양)의 변
             return any(abs(s.x0 - fx) < 1.5 and s.y0 >= fy0 - 1.5 and s.y1 <= fy1 + 1.5
@@ -1005,11 +1033,29 @@ def extract(pdf_path: str) -> Extraction:
                 if b.x0 - 1 <= x0 and x1 <= b.x1 + 1 and b.y0 - 1 <= y0 and y1 <= b.y1 + 1:
                     n += 4
                     inner.append((x0, y0, x1, y1))
+            # 낱말 네모: 줄의 일부 낱말만 둘러싼 낮은 사각형은 그 글자들의 글자 테두리
+            for r in [q for q in small_rects if b.x0 <= q[0] and q[2] <= b.x1 and b.y0 <= q[1] and q[3] <= b.y1]:
+                if r[3] - r[1] > 16:
+                    continue
+                for ln in b.items:
+                    if isinstance(ln, Line) and ln.y0 < r[3] and ln.y1 > r[1] and (r[2] - r[0]) < 0.7 * (ln.x1 - ln.x0):
+                        for g in ln.glyphs:
+                            if r[0] - 1 <= (g.x0 + g.x1) / 2 <= r[2] + 1:
+                                g.boxed = True
+            # 닫는 괄호 "]": 세로선 위·아래 끝에서 왼쪽으로 짧은 가로선(시 풀이에서 장마다 구절과 요약을 가른다)
+            for s in segs:
+                if s.vertical and b.x0 + 3 < s.x0 < b.x1 - 3 and b.y0 <= s.y0 and s.y1 <= b.y1 and s.y1 - s.y0 >= 15:
+                    ticks = [h for h in segs if h.horizontal and h.x1 - h.x0 < 30 and abs(h.x1 - s.x0) < 1.5
+                             and min(abs(h.y0 - s.y0), abs(h.y0 - s.y1)) < 1.5]
+                    if {round(h.y0) for h in ticks} >= {round(s.y0), round(s.y1)} or len({round(h.y0) for h in ticks}) >= 2:
+                        if not any(abs(x - s.x0) < 1.5 and abs(y0 - s.y0) < 1.5 for x, y0, _ in b.brackets):
+                            b.brackets.append((s.x0, s.y0, s.y1))
+            b.brackets.sort(key=lambda t: t[1])
             # 낱말 띠: 박스 안 사각형이 줄 하나만 둘러싸면 그 줄의 띠 테두리(거의 겹친 사각형 두 개면 이중선)
             for r in inner:
                 inside = [ln for ln in b.items if isinstance(ln, Line)
                           and r[0] - 1 <= (ln.x0 + ln.x1) / 2 <= r[2] + 1 and r[1] - 1 <= (ln.y0 + ln.y1) / 2 <= r[3] + 1]
-                if len(inside) == 1 and r[3] - r[1] < 3 * inside[0].size:
+                if len(inside) == 1 and r[3] - r[1] < 3 * inside[0].size and (r[2] - r[0]) >= 0.7 * (inside[0].x1 - inside[0].x0):
                     twin = any(q is not r and all(abs(u - v) < 3 for u, v in zip(q, r)) for q in inner)
                     inside[0].frame = "DOUBLE_SLIM" if twin else (inside[0].frame or "SOLID")
             inner += [(r.x0, r.y0, r.x1, r.y1) for r in others if b.x0 + 2 < r.x0 and r.x1 < b.x1 - 2

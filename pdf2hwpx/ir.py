@@ -40,17 +40,19 @@ class _BracketGroup:
 
 def _same_look(a: Run, b: Run) -> bool:
     return a.underline == b.underline and a.bold == b.bold and a.color == b.color and a.size == b.size \
-        and a.shade == b.shade
+        and a.shade == b.shade and a.boxed == b.boxed
 
 
 def _runs_from_glyphs(glyphs: list[Glyph], bold: bool = False) -> list[Run]:
     """글자 -> 런. 원문의 밑줄과 굵게(지문 속 강조 시어 등), 글자 색과 크기(0.5pt 단위)를 보존한다."""
     runs: list[Run] = []
     for g in glyphs:
-        r = Run(g.c, g.underline, bold or g.bold, g.color, round(g.size * 2) / 2 if not g.icon else 0.0, shade=g.shade)
+        r = Run(g.c, g.underline, bold or g.bold, g.color, round(g.size * 2) / 2 if not g.icon else 0.0, shade=g.shade,
+                boxed=g.boxed)
         if g.is_space and runs:  # 공백은 앞 런의 모양을 따라가 런이 잘게 쪼개지지 않게
             p = runs[-1]
-            r = Run(g.c, p.underline and r.underline, p.bold, p.color, p.size, shade=p.shade if g.shade else None)
+            r = Run(g.c, r.underline, p.bold, p.color, p.size, shade=p.shade if g.shade else None,
+                    boxed=p.boxed and g.boxed)
         if runs and _same_look(runs[-1], r):
             runs[-1].text += g.c
         else:
@@ -63,18 +65,20 @@ def _append_runs(dst: list[Run], src: list[Run]) -> None:
         if dst and _same_look(dst[-1], r):
             dst[-1].text += r.text
         else:
-            dst.append(Run(r.text, r.underline, r.bold, r.color, r.size, shade=r.shade))
+            dst.append(Run(r.text, r.underline, r.bold, r.color, r.size, shade=r.shade, boxed=r.boxed))
 
 
 def _clean_runs(runs: list[Run]) -> list[Run]:
     out: list[Run] = []
     for r in runs:
-        t = re.sub(r"[ \t]{2,}", " ", r.text)
+        blank = r.underline and not r.text.strip()  # 빈칸 밑줄은 공백 길이 그대로
+        t = r.text if blank else re.sub(r"[ \t]{2,}", " ", r.text)
         if t:
-            _append_runs(out, [Run(t, r.underline, r.bold, r.color, r.size, shade=r.shade)])
+            _append_runs(out, [Run(t, r.underline, r.bold, r.color, r.size, shade=r.shade, boxed=r.boxed)])
     if out:
         out[0].text = out[0].text.lstrip()
-        out[-1].text = out[-1].text.rstrip()
+        if not (out[-1].underline and not out[-1].text.strip()):
+            out[-1].text = out[-1].text.rstrip()
     return [r for r in out if r.text]
 
 
@@ -329,12 +333,19 @@ class Builder:
         blk = AuxBlock(title=title, kind=kind, fill=box.fill, border_color=box.border_color, border=box.border)
         drawings = box.inner_drawings + sum(p.inner_drawings for p in box.parts)
         diagram = drawings >= 4
+        n_imgs = sum(1 for x in items if isinstance(x, ImageEl))
+        if wide and n_imgs >= 2:  # 여러 조각 그림으로 된 구조도: 조각마다 넣으면 이음매가 어긋나니 상자째 한 장으로
+            diagram = True
         if diagram and wide:
             # 전폭 쪽의 큰 글 상자(시대 특징 설명 + 낱말 띠 하나)는 글로 둔다. 도형이 줄 수의 두 배를 넘거나
             # 줄의 30% 이상이 작은 칸 안에 든 것(화살표 풀이·구조도)만 그림으로
             n = sum(1 for x in items if isinstance(x, Line))
             framed = box.framed_lines + sum(p.framed_lines for p in box.parts)
             diagram = drawings >= 2 * n or framed >= max(2, 0.3 * n)
+        if wide and len(box.brackets) >= 2 and not box.parts:
+            laid = self._bracket_layout(box, blk, items)
+            if laid is not None:
+                return laid
         if not diagram and wide and not box.parts:
             # 전폭 상자 안이 좌우 두 칸(왼쪽 설명+표 | 오른쪽 설명+표)이면 선 없는 두 칸 표로 나란히
             cx = (box.x0 + box.x1) / 2
@@ -356,7 +367,7 @@ class Builder:
                     first = box.items[0]
                     y0 = first.y1 + 1
                 img = ImageEl(part.page, part.col, part.x0 + 1, y0, part.x1 - 1, part.y1 - 1, "diagram", 0)
-                img.png = self.ex.render(part.page, (img.x0, img.y0, img.x1, img.y1))
+                img.png = self.ex.render(part.page, (img.x0, img.y0, img.x1, img.y1), sharp=wide)
                 imgs.append(img)
             title_line = box.items[0] if title else None
             for x in box.all_items():
@@ -368,6 +379,56 @@ class Builder:
             blk.paras = [Para(kind="image", image=im, align="CENTER") for im in imgs]
             return blk
         blk.paras = self.paragraphs(items)
+        return blk
+
+    def _bracket_layout(self, box: Box, blk: AuxBlock, items: list) -> Optional[AuxBlock]:
+        """시 풀이(구절 위아래로 파란 풀이, 오른쪽 "]" 괄호 뒤에 장마다 요약): 괄호마다 한 행인 두 칸 표.
+        왼쪽 칸은 줄마다 한 문단(원문 위치만큼 왼쪽 여백), 왼쪽 칸 오른쪽 변이 괄호, 오른쪽 칸은 요약."""
+        lines = [x for x in items if isinstance(x, Line)]
+        if len(lines) != len(items):
+            return None
+        bx = statistics.median(x for x, _, _ in box.brackets)
+        groups = [(y0, y1) for _, y0, y1 in box.brackets]
+        head = [ln for ln in lines if (ln.y0 + ln.y1) / 2 < groups[0][0] - 2]
+        rows: list[list[Line]] = [[] for _ in groups]
+        for ln in lines:
+            if ln in head:
+                continue
+            cy = (ln.y0 + ln.y1) / 2
+            k = min(range(len(groups)), key=lambda i: 0 if groups[i][0] - 2 <= cy <= groups[i][1] + 2
+                    else min(abs(cy - groups[i][0]), abs(cy - groups[i][1])))
+            rows[k].append(ln)
+        x0, x1 = box.x0 + 4, box.x1 - 4
+        ys = [min([groups[0][0]] + [ln.y0 for ln in rows[0]])]
+        for k in range(len(groups) - 1):
+            ys.append((max([groups[k][1]] + [ln.y1 for ln in rows[k]]) + min([groups[k + 1][0]] + [ln.y0 for ln in rows[k + 1]])) / 2)
+        ys.append(max([groups[-1][1]] + [ln.y1 for ln in rows[-1]]))
+        cells = []
+        for k, rl in enumerate(rows):
+            left = sorted([ln for ln in rl if ln.x0 < bx], key=lambda ln: (ln.y0, ln.x0))
+            right = sorted([ln for ln in rl if ln.x0 >= bx], key=lambda ln: (ln.y0, ln.x0))
+            lc = Cell(k, 0, 1, 1, x0, ys[k], bx, ys[k + 1], sides=("right",))
+            rc = Cell(k, 1, 1, 1, bx, ys[k], x1, ys[k + 1])
+            for ln in left:
+                p = self.single_para([ln])
+                p.align, p.indent_pt, p.left_pt = "LEFT", 0.0, round(max(0.0, ln.x0 - x0), 1)
+                lc.paras.append(p)
+            rc.paras = self.paragraphs(right, stanza=False) if right else []
+            for p in rc.paras:
+                p.indent_pt = 0.0
+            cells += [lc, rc]
+        t = TableEl(box.page, 0, [x0, bx, x1], ys, cells, lines=False)
+        paras = []
+        for ln in sorted(head, key=lambda ln: (ln.y0, ln.x0)):
+            p = self.single_para([ln])
+            cx = (ln.x0 + ln.x1) / 2
+            p.align = "RIGHT" if ln.x1 > box.x1 - 30 and ln.x0 > (box.x0 + box.x1) / 2 else (
+                "CENTER" if abs(cx - (box.x0 + box.x1) / 2) < 30 else "LEFT")
+            p.indent_pt = 0.0
+            paras.append(p)
+        paras.append(Para(kind="table", table=t, align="CENTER"))
+        blk.paras = paras
+        self.stats_bracket_layouts = getattr(self, "stats_bracket_layouts", 0) + 1
         return blk
 
     def passage_paras(self, items: list) -> tuple[list[Para], bool]:

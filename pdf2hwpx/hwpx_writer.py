@@ -445,9 +445,10 @@ class HwpxWriter:
         if r.size and abs(r.rel - 1.0) >= 0.08:
             height = int(round(self.style.body_size * r.rel * 2) / 2 * 100)
             height = max(500, min(height, 3000))
-        if not r.color and not height and not r.shade:
+        if not r.color and not height and not r.shade and not r.boxed:
             return cp
-        return self.styles.derive_char(cp, color=r.color, height=height, shade=r.shade)
+        bf = self.styles.add_border_fill() if r.boxed else None  # 낱말 네모: 글자 테두리
+        return self.styles.derive_char(cp, color=r.color, height=height, shade=r.shade, border_fill=bf)
 
     def _runs_xml(self, runs: list[Run], base_bold: bool = False) -> str:
         out = []
@@ -571,6 +572,8 @@ class HwpxWriter:
                     o["align"] = p.align
                 elif p.indent_pt:
                     o["intent"] = _indent_hwp(p.indent_pt)
+                if p.left_pt:  # 원문 위치만큼 왼쪽 여백(칸 폭을 넘지 않게)
+                    o["left"] = min(int(p.left_pt * 90), max(0, inner_w - 3000))
                 out.append(self._note_p(S.derive(base, **o), self._runs_xml(p.runs, base_bold=p.role == "heading")))
         return "".join(out) or self._note_p(base, '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>')
 
@@ -586,8 +589,8 @@ class HwpxWriter:
         for cl in sorted(t.cells, key=lambda c: (c.row, c.col)):
             w = xs[cl.col + cl.colspan] - xs[cl.col]
             h = max(600, ys[cl.row + cl.rowspan] - ys[cl.row])
-            bf = S.add_border_fill(fill=cl.fill, sides_on=("left", "right", "top", "bottom") if t.lines else ()) \
-                if cl.fill else plain
+            bf = S.add_border_fill(fill=cl.fill, sides_on=("left", "right", "top", "bottom") if t.lines else cl.sides) \
+                if cl.fill or (not t.lines and cl.sides) else plain
             # 칸 정렬은 IR에서 칸 단위로 정한 문단 정렬을 따른다
             rows[cl.row].append(self._tc(cl.col, cl.row, cl.colspan, cl.rowspan, w, h, bf,
                                          self._cell_paras(cl.paras, max(600, w - 700), 0, {}),
