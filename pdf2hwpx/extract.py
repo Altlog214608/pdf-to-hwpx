@@ -652,8 +652,10 @@ def extract(pdf_path: str) -> Extraction:
                 if ln >= 0.4 * content_h and ln > best_len:
                     best_len, split_x = ln, s.x0
         # 단 구분선이 그어진 세로 범위(위·아래로 전폭 지문/상자가 있으면 그 범위 밖)
-        div_y0 = min((s.y0 for s in segs if s.vertical and abs(s.x0 - split_x) < 1.0), default=top) if best_len else top
-        div_y1 = max((s.y1 for s in segs if s.vertical and abs(s.x0 - split_x) < 1.0), default=bottom) if best_len else bottom
+        # (구분선 위에서 맞붙은 상자의 짧은 경계선은 빼고, 길게 이어진 구분선만)
+        div = [s for s in segs if s.vertical and abs(s.x0 - split_x) < 1.0 and s.y1 - s.y0 >= 0.25 * content_h]
+        div_y0 = min((s.y0 for s in div), default=top) if best_len else top
+        div_y1 = max((s.y1 for s in div), default=bottom) if best_len else bottom
 
         # ---- 글자 조각 필터 ----
         kept: list[_Frag] = []
@@ -914,7 +916,8 @@ def extract(pdf_path: str) -> Extraction:
                             for gl in blank:
                                 gl.underline = True
                             hit = True
-                        elif ln.x1 - 1 <= s.x0 and s.x0 - ln.x1 < 4 * ln.size and s.x1 - s.x0 > 2 * ln.size:
+                        elif ln.x1 - 1 <= s.x0 and s.x0 - ln.x1 < 4 * ln.size and s.x1 - s.x0 > 2 * ln.size \
+                                and ln.text.rstrip()[-1:] in (":", "：") and len(ln.text.strip()) <= 12:
                             # 줄 끝 공백은 줄을 만들 때 지워졌다: 선 길이만큼 밑줄 친 공백을 붙인다
                             w = 0.5 * ln.size
                             n = max(3, int(round((s.x1 - s.x0) / w)))
@@ -1107,9 +1110,16 @@ def extract(pdf_path: str) -> Extraction:
         if not single and (best_len or any(crosses(it) for it in free)):
             up = [it for it in free if it.y1 <= div_y0 + 3]
             down = [it for it in free if it.y0 >= div_y1 - 3]
-            if any(crosses(it) for it in up):
+
+            def spans(zone) -> bool:  # 가운데를 가로지르거나, 가운데 선에서 맞붙은 좌우 두 상자(반쪽씩 그린 회색 지문)
+                if any(crosses(it) for it in zone):
+                    return True
+                return any(isinstance(a, Box) and isinstance(c, Box) and abs(a.x1 - c.x0) < 3 and abs(a.x1 - split_x) < 12
+                           and min(a.y1, c.y1) - max(a.y0, c.y0) > 0.6 * min(a.y1 - a.y0, c.y1 - c.y0)
+                           for a in zone for c in zone if a is not c)
+            if spans(up):
                 above = up
-            if any(crosses(it) for it in down):
+            if spans(down):
                 below = down
             if above or below:
                 stats["wide_zones"] += bool(above) + bool(below)

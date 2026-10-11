@@ -642,7 +642,17 @@ def build_document(ex: Extraction) -> Document:
                 while j < answer_idx and j not in header_set and (flow[j].page in single_pages or id(flow[j]) in ex.wide_ids) \
                         and not isinstance(flow[j], Box) and not (isinstance(flow[j], Line) and GUIDE_RE.match(flow[j].text)):
                     j += 1
-            out = [b.aux_from_box(it, wide=True)] if isinstance(it, Box) else b.paragraphs(flow[i:j])
+            nb = flow[i + 1] if i + 1 < answer_idx else None
+            if isinstance(it, Box) and isinstance(nb, Box) and not it.parts and not nb.parts and abs(it.x1 - nb.x0) < 3 \
+                    and min(it.y1, nb.y1) - max(it.y0, nb.y0) > 0.6 * min(it.y1 - it.y0, nb.y1 - nb.y0):
+                # 가운데에서 맞붙은 좌우 두 상자((가) | (나) 회색 지문): 두 칸 표 하나로 나란히
+                cells = [Cell(0, k, 1, 1, x.x0, min(it.y0, nb.y0), x.x1, max(it.y1, nb.y1), fill=x.fill, items=x.all_items())
+                         for k, x in enumerate((it, nb))]
+                t = TableEl(it.page, 0, [it.x0, it.x1, nb.x1], [cells[0].y0, cells[0].y1], cells)
+                out = [Para(kind="table", table=b.table(t), align="CENTER")]
+                j = i + 2
+            else:
+                out = [b.aux_from_box(it, wide=True)] if isinstance(it, Box) else b.paragraphs(flow[i:j])
             for x in out:
                 x.wide = True
             doc.items.extend(out)
