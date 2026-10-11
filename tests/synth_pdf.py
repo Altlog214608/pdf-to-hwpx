@@ -534,9 +534,11 @@ def build_tables(path: str) -> dict:
 
 
 def build_examples(path: str) -> dict:
-    """문제 번호가 그림('예제' 꼬리표)뿐이고 정답부도 없는 해설서형(풀이완성): 발문은 번호 없이, 선택지는 원문자 아이콘."""
+    """문제 번호가 그림('예제' 꼬리표)뿐이고 정답부도 없는 해설서형(풀이완성): 발문은 번호 없이, 선택지는 원문자 아이콘.
+    꼬리표 그림은 예제1·예제2가 서로 다른 그림이고, 단마다 아래에 이중 테두리 Tip 상자(진한 테두리 안에 몇 pt 들여
+    연한 바탕 사각형). 마지막 쪽은 풀이: 선택지 줄 오른쪽 끝에 "( ✕ )", 그 아래 작은 파란 해설(둘째 줄부터 들여 씀)."""
     w = Writer()
-    tag = _picture_png(56, 26, (0.3, 0.5, 0.8))
+    tags = [_picture_png(56, 26, (0.3, 0.5, 0.8)), _picture_png(56, 26, (0.3, 0.7, 0.4))]
     stems = ["윗글의 서술자에 대한 설명으로 가장 적절한 것은?", "윗글에 대한 설명으로 적절하지 않은 것은?",
              "윗글의 인물에 대한 이해로 가장 적절한 것은?", "윗글의 표현 방식으로 가장 적절한 것은?"]
     for k, stem in enumerate(stems):
@@ -544,7 +546,7 @@ def build_examples(path: str) -> dict:
             w.new_page()
         elif k:
             w.next_col()
-        w.page.insert_image(fitz.Rect(w.left, w.y, w.left + 28, w.y + 13), stream=tag, keep_proportion=False)
+        w.page.insert_image(fitz.Rect(w.left, w.y, w.left + 28, w.y + 13), stream=tags[k % 2], keep_proportion=False)
         w.text(w.left + 32, w.y + 10, stem)
         w.y += 22
         for idx in range(5):
@@ -552,10 +554,92 @@ def build_examples(path: str) -> dict:
             w.text(w.left + 23, w.y + 9, f"선택지 {k + 1}-{idx + 1}의 내용입니다.")
             w.y += 16
         w.y += 12
-        w.text(w.left + 10, w.y + 9, f"[예제{k % 2 + 1}]은 서술자를 파악하는 문제야.")
-        w.y += 20
+        # Tip 상자: 진한 초록 테두리 + 6pt 안쪽 연두 바탕 사각형(테두리도 연두)
+        top = w.y
+        w.page.draw_rect(fitz.Rect(w.left + 6, top + 3, w.right - 6, top + 57), color=(0.9, 0.95, 0.88),
+                         fill=(0.9, 0.95, 0.88), width=0.9)
+        w.page.draw_rect(fitz.Rect(w.left, top, w.right, top + 60), color=(0.6, 0.8, 0.48), width=0.9)
+        w.text(w.left + 12, top + 18, f"[예제{k % 2 + 1}]은 서술자를 파악하는 문제야.")
+        w.text(w.left + 12, top + 34, "이해완성에서 배운 내용을 떠올려 보자.")
+        w.y = top + 72
+    w.new_page()
+    w.page.insert_image(fitz.Rect(w.left, w.y, w.left + 28, w.y + 13), stream=tags[0], keep_proportion=False)
+    w.text(w.left + 32, w.y + 10, "풀이: 윗글의 서술 방식으로 가장 적절한 것은?")
+    w.y += 22
+    for idx in range(3):
+        w.icon("①②③④⑤"[idx], w.left + 10, w.y + 9)
+        w.text(w.left + 23, w.y + 9, f"풀이 선택지 {idx + 1}의 내용입니다.")
+        w.y += 14
+        w.text(w.left + 23, w.y + 9, "둘째 줄에서 끝나는 선택지.")
+        w.text(w.right - 22, w.y + 9, "( X )")
+        w.y += 14
+        x = w.left + 10
+        for word in "- 해설 첫 줄은 단의 오른쪽 끝까지 꽉 차게 이어지는 아주 긴 설명이라서 줄이".split(" "):
+            if x + len(word) * 0.9 * 7.4 > w.right:
+                break
+            x = _tight(w, x, w.y + 7, word + " ", size=7.4, pitch=0.9, color=BLUE)
+        w.y += 10
+        _tight(w, w.left + 20, w.y + 7, "둘째 줄은 들여 써서 이어진다.", size=7.4, pitch=0.9, color=BLUE)
+        w.y += 16
     w.doc.save(path)
     return {"questions": 0}
+
+
+BLUE = (0.16, 0.27, 0.56)
+
+
+def _tight(w: "Writer", x: float, y: float, s: str, size: float = SIZE, pitch: float = 0.88,
+           color: tuple = (0, 0, 0)) -> float:
+    """글자마다 따로 찍어 한글을 좁게(글자 폭의 pitch배 간격) 놓는다(원문 자간이 좁은 한글 PDF 흉내). 끝 x를 돌려준다."""
+    for ch in s:
+        w.page.insert_text((x, y), ch, fontname=FONT, fontsize=size, color=color)
+        x += (0.33 if ch == " " else pitch if "가" <= ch <= "힣" else 0.55) * size
+    return x
+
+
+def build_poem(path: str) -> dict:
+    """[시대별 문학] '시험에 자주 출제되는 포인트' 쪽: 가운데 선 없는 쪽, 큰 상자 안에 장(초장/중장/종장)마다
+    구절(검정, 낱말 네모) 위아래로 작은 파란 풀이, 오른쪽 "]" 괄호 뒤에 요약. 중장의 첫 풀이 줄은 요약과 같은 높이."""
+    w = Writer()
+    w.doc.delete_page(0)
+    w.new_page(divider=False)
+    x0, x1 = 56.6, 538.6
+    bx = 330.0  # 괄호 세로선
+    y = w.y + 14
+    top = y - 12
+    w.text(250, y, "십 년을 경영하여")
+    y += 14
+    w.text(x1 - 40, y, "- 송순")
+    groups = [
+        ("초장", [("note", 150, "세 칸 밖에 안 되는 초가"), ("main", 64, "십 년을 경영하여 초려 삼간 지여 내니"),
+                  ("note", 110, "계획하여 준비하여"), ("note", 150, "화자는 소박한 삶에 만족감을 느끼고 있음")]),
+        ("중장", [("main", 64, "나 한 간 달 한 간에 청풍 한 간 맡겨 두고"), ("note", 90, "의인화된 자연물"),
+                  ("note", 64, "나와 달과 청풍이 어우러지는 물아일체의 경지를 드러냄")]),
+        ("종장", [("main", 64, "강산은 들일 데 없으니 둘러 두고 보리라"), ("note", 70, "자연을 병풍에 빗대어 표현함")]),
+    ]
+    y += 30
+    for name, rows in groups:
+        g0 = y - 10
+        for kind, x, text in rows:
+            if kind == "main":
+                end = _tight(w, x, y, text)
+                # 첫 낱말 네모(글자 높이의 작은 사각형)
+                w.page.draw_rect(fitz.Rect(x - 1, y - 9, x + 3 * 0.88 * SIZE + 1, y + 2), width=0.5)
+            else:
+                _tight(w, x, y, text, size=7.4, pitch=0.86, color=BLUE)
+            y += 13 if kind == "main" else 11
+        g1 = y - 6
+        if name == "중장":  # 요약이 첫 줄(구절)과 같은 높이
+            w.text(bx + 8, g0 + 10, f"▶ {name} : 각각 한 칸씩 맡음")
+        else:
+            w.text(bx + 8, (g0 + g1) / 2 + 3, f"▶ {name} : 요약 {name}")
+        w.page.draw_line(fitz.Point(bx, g0), fitz.Point(bx, g1), width=0.5)
+        for yy in (g0, g1):
+            w.page.draw_line(fitz.Point(bx - 12, yy), fitz.Point(bx, yy), width=0.5)
+        y += 30
+    w.page.draw_rect(fitz.Rect(x0, top, x1, y), width=0.6)
+    w.doc.save(path)
+    return {"groups": 3}
 
 
 if __name__ == "__main__":
