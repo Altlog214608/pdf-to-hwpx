@@ -509,9 +509,10 @@ class Builder:
                 p = self._spaced_para(ln)
                 p.align, p.indent_pt, p.left_pt = "LEFT", 0.0, round(max(0.0, ln.x0 - x0), 1)
                 lc.paras.append(p)
-            rc.paras = self.paragraphs(right, stanza=False) if right else []
+            rc.paras = [self.single_para(right)] if right else []  # 요약은 한 문단(둘째 줄 내어쓰기)
             for p in rc.paras:
-                p.indent_pt = 0.0
+                if not -60 <= p.indent_pt <= 0:  # 오른쪽 끝에 붙은 "(근경)" 같은 줄은 내어쓰기가 아니다
+                    p.indent_pt = 0.0
             cells += [lc, mc, rc]
         t = TableEl(box.page, 0, [x0, tx, bx, x1], ys, cells, lines=False, text_pt=main)
         paras = []

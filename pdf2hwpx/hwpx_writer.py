@@ -180,9 +180,11 @@ class Styles:
         return cid
 
     def derive_char(self, base: int, color: Optional[str] = None, height: Optional[int] = None,
-                    border_fill: Optional[int] = None, shade: Optional[str] = None, spacing: int = 0) -> int:
-        """글자 모양 base를 복제해 색·크기·글자 테두리·음영·자간만 바꾼다(문제 밖 내용의 원문 모양)."""
-        key = ("char", base, color, height, border_fill, shade) + ((spacing,) if spacing else ())
+                    border_fill: Optional[int] = None, shade: Optional[str] = None, spacing: int = 0,
+                    font_space: bool = False) -> int:
+        """글자 모양 base를 복제해 색·크기·글자 테두리·음영·자간만 바꾼다(문제 밖 내용의 원문 모양).
+        font_space: 빈칸을 글꼴의 빈칸 폭으로(한글 기본 빈칸은 더 넓어 원문 위치에 맞춘 줄이 넘어간다)."""
+        key = ("char", base, color, height, border_fill, shade) + ((spacing,) if spacing else ()) + (("fs",) if font_space else ())
         if key in self.cache:
             return self.cache[key]
         x = self.char_xml[base]
@@ -196,6 +198,8 @@ class Styles:
             x = re.sub(r'borderFillIDRef="\d+"', f'borderFillIDRef="{border_fill}"', x, count=1)
         if shade:
             x = re.sub(r'shadeColor="[^"]*"', f'shadeColor="{shade}"', x, count=1)
+        if font_space:
+            x = x.replace('useFontSpace="0"', 'useFontSpace="1"', 1)
         if spacing:
             x = re.sub(r'<hh:spacing [^>]*/>', '<hh:spacing ' + " ".join(
                 f'{k}="{spacing}"' for k in ("hangul", "latin", "hanja", "japanese", "other", "symbol", "user")) + '/>', x, count=1)
@@ -444,18 +448,20 @@ class HwpxWriter:
         return int(round(v * self.scale / 10.0)) * 10
 
     # ------------------------------------------------------------ xml ----
-    def _char_look(self, cp: int, r: Run, spacing: int = 0) -> int:
+    def _char_look(self, cp: int, r: Run, spacing: int = 0, font_space: bool = False) -> int:
         """문제 밖 내용: 원문의 글자 색과 크기(본문 대비 8% 넘게 다를 때, 0.5pt 단위)."""
         height = None
         if r.size and abs(r.rel - 1.0) >= 0.08:
             height = int(round(self.style.body_size * r.rel * 2) / 2 * 100)
             height = max(500, min(height, 3000))
-        if not r.color and not height and not r.shade and not r.boxed and not spacing:
+        font_space = font_space or bool(spacing)  # 자간은 글꼴 빈칸 폭 기준으로 잰 값
+        if not r.color and not height and not r.shade and not r.boxed and not spacing and not font_space:
             return cp
         bf = self.styles.add_border_fill() if r.boxed else None  # 낱말 네모: 글자 테두리
-        return self.styles.derive_char(cp, color=r.color, height=height, shade=r.shade, border_fill=bf, spacing=spacing)
+        return self.styles.derive_char(cp, color=r.color, height=height, shade=r.shade, border_fill=bf, spacing=spacing,
+                                       font_space=font_space)
 
-    def _runs_xml(self, runs: list[Run], base_bold: bool = False, spacing: int = 0) -> str:
+    def _runs_xml(self, runs: list[Run], base_bold: bool = False, spacing: int = 0, font_space: bool = False) -> str:
         out = []
         if not self._styled:  # 문제·지문은 굵게/밑줄만(색·크기는 문서 설정을 따른다)
             merged: list[Run] = []
@@ -472,7 +478,7 @@ class HwpxWriter:
             else:
                 cp = CP["body_ul"] if r.underline else CP["body"]
             if self._styled:
-                cp = self._char_look(cp, r, spacing)
+                cp = self._char_look(cp, r, spacing, font_space)
             for part in re.split(f"({BLANK_BOX}+)", r.text):
                 if part.startswith(BLANK_BOX):
                     out.append(self._blank_box(len(part)))
@@ -558,7 +564,7 @@ class HwpxWriter:
                 f'{tr}</hp:tbl><hp:t/></hp:run>')
 
     def _cell_paras(self, paras: list[Para], inner_w: int, base: int = 0, ov: Optional[dict] = None,
-                    left_k: float = 90.0) -> str:
+                    left_k: float = 90.0, font_space: bool = False) -> str:
         """표 칸/묶음 괄호 안의 문단들. left_k: 원문 왼쪽 여백(pt) -> HWPUNIT 비율."""
         S = self.styles
         ov = dict(ov or {})
@@ -581,7 +587,7 @@ class HwpxWriter:
                 if p.left_pt:  # 원문 위치만큼 왼쪽 여백(칸 폭을 넘지 않게)
                     o["left"] = min(int(p.left_pt * left_k), max(0, inner_w - 3000))
                 out.append(self._note_p(S.derive(base, **o), self._runs_xml(p.runs, base_bold=p.role == "heading",
-                                                                               spacing=p.spacing)))
+                                                                               spacing=p.spacing, font_space=font_space)))
         return "".join(out) or self._note_p(base, '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>')
 
     def _table(self, t: TableEl, max_w: int) -> str:
@@ -613,7 +619,7 @@ class HwpxWriter:
             margin = (0, 0, 141, 141) if tight else (283, 283, 141, 141)
             rows[cl.row].append(self._tc(cl.col, cl.row, cl.colspan, cl.rowspan, w, h, bf,
                                          self._cell_paras(cl.paras, max(600, w - (0 if tight else 700)), 0, cell_ov,
-                                                          left_k=k if t.text_pt else 90.0),
+                                                          left_k=k if t.text_pt else 90.0, font_space=bool(t.text_pt)),
                                          margin=margin, valign=cl.valign or ("CENTER" if t.lines else "TOP")))
         rows = [r for r in rows if r] or [[]]
         return self._tbl(rows, len(t.xs) - 1, xs[-1], max(600, ys[-1]), plain)

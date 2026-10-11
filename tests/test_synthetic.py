@@ -821,6 +821,9 @@ def test_annotated_poem_bracket_rows(tmp_path):
     blue = [int(h) for h in re.findall(r'<hh:charPr id="\d+" height="(\d+)" textColor="#29458F"', head)]
     assert blue and max(blue) < 1000  # 파란 풀이는 본문(10pt)보다 작게
     assert re.search(r'<hh:spacing hangul="-\d+"', head)
+    # 한글 기본 빈칸(글꼴 빈칸보다 넓음)이면 원문 위치에 맞춘 줄이 넘어가므로 글꼴 빈칸으로
+    assert re.search(r'<hh:charPr id="\d+" height="\d+" textColor="#29458F"[^>]*useFontSpace="1"', head)
+    assert all(len(c.paras) == 1 for c in t.cells if c.col == 2)  # 요약은 줄마다 끊지 않고 한 문단
     assert sec.count('<hp:cellMargin left="0" right="0"') >= 6  # 구절·괄호 칸은 좌우 여백 없이(줄이 넘어가지 않게)
 
 
