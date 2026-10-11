@@ -582,10 +582,17 @@ def build_document(ex: Extraction) -> Document:
             continue
         if isinstance(it, Box):
             doc.items.append(b.aux_from_box(it))
+            j = i + 1
         else:
-            doc.items.extend(b.paragraphs([it]))
-        doc.loose_notes.append(f"p{it.page}: {getattr(it, 'text', '[그림/박스]')[:30]}")
-        i += 1
+            # 이어지는 줄은 한꺼번에 문단으로(줄마다 끊으면 선택지가 "달래기 / 위해"처럼 원문 줄 끝에서 잘린다)
+            j = i + 1
+            while j < answer_idx and j not in header_set and isinstance(flow[j], Line) \
+                    and not (GUIDE_RE.match(flow[j].text) and flow[j].box is None) \
+                    and not (flow[j].page in single_pages or id(flow[j]) in ex.wide_ids):
+                j += 1
+            doc.items.extend(b.paragraphs(flow[i:j]))
+        doc.loose_notes.extend(f"p{x.page}: {getattr(x, 'text', '[그림/박스]')[:30]}" for x in flow[i:j])
+        i = j
 
     for k, fi in marks.items():
         if k < len(doc.items) and (fi == 0 or flow[fi - 1].page != flow[fi].page):

@@ -825,6 +825,10 @@ def extract(pdf_path: str) -> Extraction:
             col = 0 if (x0 + x1) / 2 < split_x else 1
             boxes.append(Box(id=pno * 1000 + i, page=pno, col=col, x0=x0, y0=y0, x1=x1, y1=y1))
         nested_rects = [box_rects[i] for i in nested_in if i not in inset]
+        for i in inset:  # 안쪽 틀이 있으면 글 줄의 좌우 경계는 안쪽 틀(줄이 꽉 찼는지 판단)
+            outer = next((b for b in boxes if b.id == pno * 1000 + nested_in[i]), None)
+            if outer is not None:
+                outer.x0, outer.x1 = max(outer.x0, box_rects[i][0]), min(outer.x1, box_rects[i][2])
         # 상자 바탕색·테두리 색
         for b in boxes:
             area = (b.x1 - b.x0) * (b.y1 - b.y0)
@@ -1015,7 +1019,9 @@ def extract(pdf_path: str) -> Extraction:
 
         # ---- 단 경계 ----
         def _col_bounds(col: int) -> tuple[float, float]:
-            ls = [ln for ln in lines if ln.col == col and len(ln.glyphs) >= 12]
+            # 표 칸 줄, 단을 넘어가는 줄(전폭 지문 등)은 단 폭을 재는 데 쓰지 않는다
+            ls = [ln for ln in lines if ln.col == col and len(ln.glyphs) >= 12 and ln.cell is None
+                  and (single or col == 1 or ln.x1 <= split_x + 10)]
             if not ls:
                 return ((36.0, min(split_x, W) - 14) if col == 0 else (split_x + 14, W - 36))
             xs0 = sorted(ln.x0 for ln in ls)
