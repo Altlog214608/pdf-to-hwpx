@@ -137,6 +137,12 @@ def _color(c: int) -> Optional[str]:
 # Wingdings 글꼴은 일반 글자 자리에 기호를 그린다(예: 'ü'가 체크 표시). 문제집에 자주 나오는 것만 같은 모양의 유니코드로.
 WINGDINGS = {"ü": "✓", "û": "✗", "ý": "☒", "þ": "☑", "è": "→", "ç": "←", "é": "↑", "ê": "↓",
              "ð": "⇨", "ï": "⇦", "ñ": "⇧", "ò": "⇩", "l": "●", "n": "■", "u": "◆", "§": "▪", "o": "□", "¡": "○"}
+MISMAPPED_SPACE = "$%#&@\ufffd"  # \ufffd: 글자 정보가 없는 글자
+
+
+def _mismapped_space(c: str, width: float, size: float) -> bool:
+    """글꼴의 공백 글자가 엉뚱한 기호로 매겨진 경우("전략적$ 공약", "전략적\ufffd공약"): 진짜 기호보다 폭이 훨씬 좁다."""
+    return c in MISMAPPED_SPACE and width < 0.36 * size
 
 
 def _page_fragments(page: fitz.Page) -> list[_Frag]:
@@ -161,7 +167,7 @@ def _page_fragments(page: fitz.Page) -> list[_Frag]:
                     if wingdings:
                         c = WINGDINGS.get(c, c)
                     x0, y0, x1, y1 = ch["bbox"]
-                    if c == " ":
+                    if c == " " or _mismapped_space(c, x1 - x0, size):
                         c = " "
                     glyphs.append(Glyph(c, x0, y0, x1, y1, size, bold, color=color))
             if not glyphs or all(g.is_space for g in glyphs):
@@ -272,11 +278,87 @@ def _invisible(d: dict) -> bool:
     return not fill or min(float(v) for v in fill[:3]) > 0.97 or d.get("fill_opacity", 1.0) < 0.2
 
 
-def _page_segments(page: fitz.Page) -> tuple[list[_Seg], int]:
+def _glyph_path(d: dict) -> bool:
+    """글자를 윤곽선 도형으로 그린 것(글꼴을 넣지 않고 내보낸 발문 등): 진하게 칠한 글자 크기의 도형이고
+    곡선이 있거나 선분이 많다. 동그라미(곡선 4개)·화살촉(선 3개)·네모는 여기에 들지 않는다."""
+    fill = d.get("fill")
+    if not fill or "f" not in (d.get("type") or "") or min(float(v) for v in fill[:3]) > 0.6:
+        return False
+    r = d["rect"]
+    if not (3 <= r.height <= 30 and r.width <= 2 * max(r.height, 4)):
+        return False
+    ops = [it[0] for it in d.get("items", [])]
+    return len(ops) >= 8 or (len(ops) >= 6 and "c" in ops)
+
+
+def _outline_rows(drawings: list[dict]) -> list[list[float]]:
+    """윤곽선 글자를 같은 높이에 글자 폭 정도 간격으로 이어진 것끼리 묶은 줄 [x0, y0, x1, y1, 글자 수]."""
+    rects = sorted((fitz.Rect(d["rect"]) for d in drawings if _glyph_path(d)), key=lambda r: (r.x0, r.y0))
+    rows: list[list[fitz.Rect]] = []
+    for r in rects:
+        for row in rows:
+            last = row[-1]
+            h = max(r.height, last.height)
+            if min(r.y1, last.y1) - max(r.y0, last.y0) >= 0.4 * min(r.height, last.height) and -2 <= r.x0 - last.x1 <= 1.5 * h:
+                row.append(r)
+                break
+        else:
+            rows.append([r])
+    return [[row[0].x0, min(r.y0 for r in row), row[-1].x1, max(r.y1 for r in row), len(row)] for row in rows]
+
+
+def _merge_outline_rows(rows: list[list[float]], frags: list[_Frag]) -> list[tuple[float, float, float, float]]:
+    """윤곽선 글자 줄을 그림으로 넣을 영역으로. 같은 높이의 줄 사이를 진짜 글자가 메우고 있으면(발문 중간의 "㉠∼㉤"만
+    글자) 한 줄로 합친다. 글자 3개 이상인 줄과, 그 바로 아래에서 이어지는 짧은 줄(발문 둘째 줄 "은?")만 남긴다.
+    같은 자리에 진짜 글자가 겹쳐 찍힌 줄(글자 위에 윤곽선을 한 번 더 그린 머리글)은 글자로 읽으므로 뺀다."""
+    def covered(r) -> bool:
+        w = sum(min(g.x1, r[2]) - max(g.x0, r[0]) for f in frags for g in f.glyphs
+                if not g.is_space and r[0] - 1 <= (g.x0 + g.x1) / 2 <= r[2] + 1 and r[1] - 1 <= (g.y0 + g.y1) / 2 <= r[3] + 1)
+        return w >= 0.5 * (r[2] - r[0])
+    rows = [list(r) for r in rows if not covered(r)]
+    merged = True
+    while merged:
+        merged = False
+        for a in rows:
+            for b in rows:
+                if a is b or b[0] < a[2] - 2:
+                    continue
+                h = min(a[3] - a[1], b[3] - b[1])
+                if min(a[3], b[3]) - max(a[1], b[1]) < 0.5 * h:
+                    continue
+                ivs = sorted((g.x0, g.x1) for f in frags for g in f.glyphs if not g.is_space
+                             and a[2] - 2 <= g.x0 and g.x1 <= b[0] + 2 and max(a[1], b[1]) - 2 <= (g.y0 + g.y1) / 2 <= min(a[3], b[3]) + 2)
+                cur = a[2]
+                for x0, x1 in ivs:
+                    if x0 - cur <= 1.5 * h:
+                        cur = max(cur, x1)
+                if b[0] - cur <= 1.5 * h:
+                    a[:] = [a[0], min(a[1], b[1]), b[2], max(a[3], b[3]), a[4] + b[4]]
+                    rows.remove(b)
+                    merged = True
+                    break
+            if merged:
+                break
+    rows.sort(key=lambda r: r[1])
+    keep: list[list[float]] = []
+    for r in rows:
+        h = r[3] - r[1]
+        if r[4] >= 3 or any(0 <= r[1] - k[3] <= 1.8 * h and k[0] - 2 * h <= r[0] <= k[2] for k in keep):
+            keep.append(r)
+    out = []
+    for x0, y0, x1, y1, _ in keep:
+        h = y1 - y0
+        out.append((x0 - 0.3 * h, y0 - 0.15 * h, x1 + 0.5 * h, y1 + 0.15 * h))
+    return out
+
+
+def _page_segments(page: fitz.Page, drawings: Optional[list[dict]] = None) -> tuple[list[_Seg], int]:
     segs: list[_Seg] = []
     others = []
-    for d in page.get_drawings():
+    for d in page.get_drawings() if drawings is None else drawings:
         if _invisible(d):  # 선 없이 흰색으로만 칠한 사각형(한글이 문단 배경으로 내보냄)은 보이지 않으므로 테두리가 아니다
+            continue
+        if _glyph_path(d):  # 윤곽선 글자의 획은 테두리·도형이 아니다
             continue
         w = float(d.get("width") or 0.0)
         sc = d.get("color")
@@ -356,6 +438,76 @@ def _detect_boxes(segs: list[_Seg], top: float, bottom: float) -> list[tuple[flo
             rx, ry0, ry1 = runs[best]
             boxes.append((lx, max(ly0, ry0), rx, min(ly1, ry1)))
     return boxes
+
+
+def _linked_boxes(rects: list[tuple[float, float, float, float]], segs: list[_Seg],
+                  colsep: Optional[float]) -> list[tuple[float, float, float, float]]:
+    """상자 변이 아닌 가로·세로 선(화살표 몸통)이 상자와 상자를 잇는 묶음(상자 2개 이상)을 감싸는 사각형.
+    선끼리 맞닿으면(갈라지는 화살표) 이어진 것으로 본다. 두 단 쪽에서는 단 구분선을 넘는 묶음은 만들지 않는다.
+    다른 상자 안에 든 상자(이미 바깥 상자의 도형)는 보지 않는다."""
+    top = [r for r in rects if not any(o is not r and o[0] - 1 <= r[0] and r[2] <= o[2] + 1 and o[1] - 1 <= r[1]
+                                       and r[3] <= o[3] + 1 for o in rects)]
+    if len(top) < 2:
+        return []
+
+    def on_edge(s: _Seg) -> bool:
+        for x0, y0, x1, y1 in rects:
+            if s.horizontal and any(abs(s.y0 - y) < 1.5 for y in (y0, y1)) and s.x0 >= x0 - 2 and s.x1 <= x1 + 2:
+                return True
+            if s.vertical and any(abs(s.x0 - x) < 1.5 for x in (x0, x1)) and s.y0 >= y0 - 2 and s.y1 <= y1 + 2:
+                return True
+        return False
+
+    def inside(px: float, py: float) -> bool:
+        return any(r[0] + 2 < px < r[2] - 2 and r[1] + 2 < py < r[3] - 2 for r in top)
+
+    # 잇는 선은 상자 사이 빈 곳을 지난다(상자 안의 밑줄·구분선은 아니다)
+    links = [s for s in segs if (s.horizontal or s.vertical) and max(s.x1 - s.x0, s.y1 - s.y0) >= 8 and not on_edge(s)
+             and not inside((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2) and not inside(s.x0, s.y0) and not inside(s.x1, s.y1)]
+    n = len(top)
+    parent = list(range(n + len(links)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def touches(s: _Seg, px: float, py: float, r) -> bool:
+        """선 끝이 선 방향으로 상자 면에 닿는다(가로선은 왼쪽·오른쪽 면, 세로선은 위·아래 면).
+        화살촉(따로 칠한 세모) 길이만큼 떨어져 있어도 된다."""
+        if s.horizontal:
+            return r[1] <= py <= r[3] and min(abs(px - r[0]), abs(px - r[2])) <= 8
+        return r[0] <= px <= r[2] and min(abs(py - r[1]), abs(py - r[3])) <= 8
+
+    def near_seg(px: float, py: float, s: _Seg) -> bool:
+        return s.x0 - 3 <= px <= s.x1 + 3 and s.y0 - 3 <= py <= s.y1 + 3
+
+    for k, s in enumerate(links):
+        ends = ((s.x0, s.y0), (s.x1, s.y1))
+        for i, r in enumerate(top):
+            if any(touches(s, px, py, r) for px, py in ends):
+                parent[find(n + k)] = find(i)
+        for m, o in enumerate(links[:k]):
+            if any(near_seg(px, py, o) for px, py in ends) or any(near_seg(px, py, s) for px, py in ((o.x0, o.y0), (o.x1, o.y1))):
+                parent[find(n + k)] = find(n + m)
+    groups: dict[int, list[int]] = defaultdict(list)
+    for k in range(n + len(links)):
+        groups[find(k)].append(k)
+    out = []
+    for members in groups.values():
+        bs = [top[k] for k in members if k < n]
+        ls = [links[k - n] for k in members if k >= n]
+        if len(bs) < 2 or not ls:
+            continue
+        x0 = min([r[0] for r in bs] + [s.x0 for s in ls]) - 2
+        y0 = min([r[1] for r in bs] + [s.y0 for s in ls]) - 2
+        x1 = max([r[2] for r in bs] + [s.x1 for s in ls]) + 2
+        y1 = max([r[3] for r in bs] + [s.y1 for s in ls]) + 2
+        if colsep is not None and x0 < colsep - 10 < colsep + 10 < x1:
+            continue
+        out.append((x0, y0, x1, y1))
+    return out
 
 
 def _page_fills(page: fitz.Page) -> list[tuple[fitz.Rect, Optional[str]]]:
@@ -606,7 +758,9 @@ def extract(pdf_path: str) -> Extraction:
     for pno, page in enumerate(doc, start=1):
         W, H = page.rect.width, page.rect.height
         frags = _page_fragments(page)
-        segs, others = _page_segments(page)
+        drawings = page.get_drawings()
+        segs, others = _page_segments(page, drawings)
+        outlines = _outline_rows(drawings)
         fills = _page_fills(page)
         infos = page.get_image_info(hashes=True, xrefs=True)
         seen = set()
@@ -638,7 +792,7 @@ def extract(pdf_path: str) -> Extraction:
         for f in frags:
             if f.y1 <= 0.12 * H or f.y0 >= 0.88 * H:
                 band_texts[_repeat_key(f)] += 1
-        raw_pages.append((pno, W, H, frags, segs, others, imgs, top, bottom, fills))
+        raw_pages.append((pno, W, H, frags, segs, others, imgs, top, bottom, fills, outlines))
 
     repeat_min = max(2, int(0.4 * len(raw_pages)))
     # 문제 번호("3.")처럼 짧은 숫자 조각은 반복돼도 머리글이 아니다.
@@ -655,7 +809,7 @@ def extract(pdf_path: str) -> Extraction:
     wide_ids: set[int] = set()
     pill_order: dict[str, int] = {}  # 알약 번호 그림 해시 -> 처음 나온 차례(1, 2, ...)
     pill_glyphs: list[tuple[Glyph, int]] = []
-    for pno, W, H, frags, segs, others, imgs, top, bottom, fills in raw_pages:
+    for pno, W, H, frags, segs, others, imgs, top, bottom, fills, outlines in raw_pages:
         # ---- 단 분리선 ----
         content_h = max(1.0, bottom - top)
         split_x = W / 2
@@ -684,6 +838,18 @@ def extract(pdf_path: str) -> Extraction:
                 stats["dropped_repeated_text"] += 1
                 continue
             kept.append(f)
+
+        # ---- 윤곽선 글자 줄: 글자 정보가 없으므로 줄 영역을 그림으로 넣는다. 사이에 낀 진짜 글자("㉠∼㉤")는 그림에 들어간다 ----
+        outline_rects = _merge_outline_rows([r for r in outlines if top < (r[1] + r[3]) / 2 < bottom], kept)
+        if outline_rects:
+            stats["outline_text_rows"] += len(outline_rects)
+            for f in kept:
+                f.glyphs = [g for g in f.glyphs if not any(
+                    x0 <= (g.x0 + g.x1) / 2 <= x1 and y0 <= (g.y0 + g.y1) / 2 <= y1 for x0, y0, x1, y1 in outline_rects)]
+            kept = [f for f in kept if any(not g.is_space for g in f.glyphs)]
+            for f in kept:
+                solid = [g for g in f.glyphs if not g.is_space]
+                f.x0, f.y0, f.x1, f.y1 = min(g.x0 for g in solid), min(g.y0 for g in solid), max(g.x1 for g in solid), max(g.y1 for g in solid)
 
         # ---- 표: 격자를 칸으로 복원하고 칸 안의 글자는 칸별로 따로 줄을 만든다 ----
         colsep = split_x if best_len else None
@@ -798,6 +964,8 @@ def extract(pdf_path: str) -> Extraction:
                 continue
             col = 0 if (x0 + x1) / 2 < split_x else 1
             content_imgs.append(ImageEl(pno, col, x0, y0, x1, y1, digest, xref))
+        for x0, y0, x1, y1 in outline_rects:
+            content_imgs.append(ImageEl(pno, 0 if (x0 + x1) / 2 < split_x else 1, x0, y0, x1, y1, OUTLINE_TEXT, 0))
 
         # 표 칸 안의 그림
         if tables:
@@ -843,6 +1011,19 @@ def extract(pdf_path: str) -> Extraction:
         box_rects = [r for r in box_rects if not any(
             r[0] >= t.x0 - 4 and r[2] <= t.x1 + 4 and r[1] >= t.y0 - 4 and r[3] <= t.y1 + 4 for t in tables)
             and r not in blank_rects]
+        # 쪽 테두리: 내용 영역 위·아래 끝까지 닿는 쪽 크기의 사각형은 내용 상자가 아니다
+        # (상자로 보면 다음 쪽 테두리와 이어 붙어 단원 전체가 상자 하나가 된다)
+        frame = [r for r in box_rects if r[2] - r[0] >= 0.6 * W and r[3] - r[1] >= 0.6 * H
+                 and r[1] <= top + 2 and r[3] >= bottom - 2]
+        if frame:
+            stats["page_frames"] += 1
+            box_rects = [r for r in box_rects if r not in frame]
+        # 머리 띠(학원 이름 칸 등) 안의 사각형은 내용이 아니다
+        box_rects = [r for r in box_rects if top < (r[1] + r[3]) / 2 < bottom]
+        # 선·화살표로 이어진 상자 묶음(지문 구조도): 묶음 전체를 감싸는 테두리 없는 상자를 두어 그 안의 도형으로 센다
+        charts = _linked_boxes(box_rects, box_segs, split_x if best_len else None)
+        stats["linked_box_charts"] += len(charts)
+        box_rects += charts
         # 다른 박스 안에 들어 있는 사각형(도식의 칸 등)은 박스가 아니라 바깥 박스의 내부 도형으로 센다
         nested_in: dict[int, int] = {}
         for i, (x0, y0, x1, y1) in enumerate(box_rects):
@@ -860,7 +1041,8 @@ def extract(pdf_path: str) -> Extraction:
             if i in nested_in:
                 continue
             col = 0 if (x0 + x1) / 2 < split_x else 1
-            boxes.append(Box(id=pno * 1000 + i, page=pno, col=col, x0=x0, y0=y0, x1=x1, y1=y1))
+            boxes.append(Box(id=pno * 1000 + i, page=pno, col=col, x0=x0, y0=y0, x1=x1, y1=y1,
+                             border=box_rects[i] not in charts))
         nested_rects = [box_rects[i] for i in nested_in if i not in inset]
         outer_rect = {b.id: (b.x0, b.y0, b.x1, b.y1) for b in boxes}  # 테두리 색은 바깥 틀에서 읽는다
         for i in inset:  # 안쪽 틀이 있으면 글 줄의 좌우 경계는 안쪽 틀(줄이 꽉 찼는지 판단)
@@ -1016,7 +1198,7 @@ def extract(pdf_path: str) -> Extraction:
             stats["inline_word_boxes"] += len(word_boxes)
             boxes = [b for b in boxes if b not in word_boxes]
         # 박스 밖의 작은 그림(‘빈출’ 배지 등 편집 장식)은 내용이 아니다
-        small = [im for im in content_imgs if im.box is None and im.height < 26 and im.width < 120]
+        small = [im for im in content_imgs if im.box is None and im.height < 26 and im.width < 120 and im.digest != OUTLINE_TEXT]
         if small:
             stats["dropped_decorative_image"] += len(small)
             content_imgs = [im for im in content_imgs if im not in small]
@@ -1197,6 +1379,7 @@ def extract(pdf_path: str) -> Extraction:
     return ex
 
 
+OUTLINE_TEXT = "outline-text"  # 윤곽선 글자 줄을 영역째 그린 그림(ImageEl.digest)
 PILL_MARK = "\ue0ff"  # 알약 번호 그림 자리표(문서를 다 읽은 뒤 "예제1 " 같은 글자로 바뀐다)
 PILL_WORD_RE = re.compile(r"\[\s*([가-힣]{1,4})\s?(\d{1,2})\s*\]")
 
@@ -1269,7 +1452,9 @@ def _split_far_fragments(frags: list[_Frag]) -> list[list[_Frag]]:
         first = next((g for g in f.glyphs if not g.is_space), None)
         starts_marker = first is not None and (first.icon is not None or first.c in "①②③④⑤⑥⑦⑧⑨⑩")
         side_label = any(re.fullmatch(r"\s*\[[A-Z가-힣]\]\s*", "".join(g.c for g in x.glyphs)) for x in (f, prev))
-        gap = f.x0 - prev.x1
+        # 앞 조각들 중 가장 오른쪽 끝과 잰다: 문장부호만 따로 찍은 조각(". ")이 긴 조각 안쪽에 겹쳐 있으면
+        # 바로 앞 조각 끝과 재면 뒤 조각까지 거리가 멀어 보인다
+        gap = f.x0 - max(x.x1 for x in out[-1])
         if (side_label and gap > 0.8 * f.size) or (gap > 3.0 * max(f.size, prev.size) and not starts_marker
                                                      and not choice_row):
             out.append([f])

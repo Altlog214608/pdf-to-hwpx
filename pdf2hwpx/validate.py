@@ -286,8 +286,9 @@ def validate(ex: "Extraction | list[Extraction]", doc: Document, hwpx_path: str)
     checks["loose_items"] = doc.loose_notes[:20]  # 문제/지문 밖 내용(단원 제목 박스 등) — 경고 아님
 
     # ---- 박스 ----
-    expected_aux = sum(1 for q in qs for b in q.blocks + q.after if isinstance(b, AuxBlock)) \
-        + sum(1 for it in doc.items if isinstance(it, AuxBlock))
+    # 테두리 없는 보조박스(색만 칠한 바탕, 선으로 이은 상자 묶음 구조도)는 테두리 묶음으로 세지 않는다
+    expected_aux = sum(1 for q in qs for b in q.blocks + q.after if isinstance(b, AuxBlock) and b.border) \
+        + sum(1 for it in doc.items if isinstance(it, AuxBlock) and it.border)
     expected_passage = sum(1 for p in doc.passages if p.boxed and p.paras)
     groups = []
     cur = None

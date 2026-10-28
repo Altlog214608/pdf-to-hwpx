@@ -39,7 +39,8 @@ def tl(text: str, size: float = SIZE) -> float:
 
 
 class Writer:
-    def __init__(self):
+    def __init__(self, frame: bool = False):
+        self.frame = frame  # 쪽마다 내용 전체를 두르는 쪽 테두리 + 머리 띠의 학원 이름 칸
         self.doc = fitz.open()
         self.page = None
         self.col = 0
@@ -56,6 +57,9 @@ class Writer:
         self.page.insert_text((516, 800), f"- {self.doc.page_count} -", fontname=FONT, fontsize=9.1)
         if divider:
             self.page.draw_line(fitz.Point(297.6, 72), fitz.Point(297.6, 772), width=0.24)
+        if self.frame:
+            self.page.draw_rect(fitz.Rect(40, 64, 555, 792), color=(0, 0, 0), width=0.5)
+            self.page.draw_rect(fitz.Rect(60, 40, 150, 56), color=(0, 0, 0), width=0.5)
         self.col, self.y = 0, TOP + 10
 
     def next_col(self):
@@ -228,7 +232,7 @@ def _intro(w: "Writer") -> None:
 def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tuple[int, ...] = (),
           notice: bool = False, word_box: tuple[int, ...] = (), narrow_pairs: bool | str = False,
           bare_numbers: bool = False, credit_nospace: bool = False, written_parts: bool = False,
-          intro_page: bool = False, wide_top: bool = False, hanging_expl: bool = False) -> dict:
+          intro_page: bool = False, wide_top: bool = False, hanging_expl: bool = False, page_frame: bool = False) -> dict:
     """answer_style: 'bracket' = '1) [정답] ③ / [해설] …', 'plain' = '1) 정답 ③ / 오답 point / …'(최다오답·최상위 공략형)
     start: 첫 문제 번호(단원 중간부터 시작하는 문제집 일부, 예: 13번부터)
     white_bg: 발문 줄 뒤에 선 없는 흰 사각형(한글이 내보내는 문단 배경, 보이지 않음)이 깔린 문제(몇 번째, 1부터)
@@ -239,8 +243,9 @@ def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tu
     bare_numbers: 문제 번호를 마침표 없이 큰 회색 숫자만 찍고 옆에 흰색 아주 작은 숨은 글자 "zb1)"(시대별 문학형)
     credit_nospace: 3번 선택지 아래 출전을 대시 뒤 띄어쓰기 없이("-작가1, 「작품1」")
     written_parts: 4번을 "① …쓰시오. / (a) : / ② …쓰시오. / (b) :" 하위 물음 + 그 아래 <조건> 박스로
-    intro_page: 맨 앞에 가운데 선 없이 쪽 전체 폭을 쓰는 '작품 개관' 쪽(전폭 산문 + 전폭 표 + 전폭 글 상자, 시대별 문학형)"""
-    w = Writer()
+    intro_page: 맨 앞에 가운데 선 없이 쪽 전체 폭을 쓰는 '작품 개관' 쪽(전폭 산문 + 전폭 표 + 전폭 글 상자, 시대별 문학형)
+    page_frame: 쪽마다 내용 영역 위·아래 끝까지 닿는 쪽 테두리와 머리 띠의 빈 학원 이름 칸(학원 자체 교재형)"""
+    w = Writer(frame=page_frame)
     if intro_page:
         _intro(w)
         w.new_page()
@@ -648,3 +653,65 @@ def build_poem(path: str) -> dict:
 if __name__ == "__main__":
     import sys
     print(build(sys.argv[1] if len(sys.argv) > 1 else "synth.pdf"))
+
+
+def _outline_glyph(page, x: float, y: float, w: float = 8.0, h: float = 9.0) -> None:
+    """글꼴 없이 윤곽선으로 그린 글자 하나(선분 8개로 닫은 팔각형을 검게 칠함)."""
+    c = w * 0.3
+    pts = [(x + c, y), (x + w - c, y), (x + w, y + c), (x + w, y + h - c), (x + w - c, y + h), (x + c, y + h),
+           (x, y + h - c), (x, y + c), (x + c, y)]
+    sh = page.new_shape()
+    for a, b in zip(pts, pts[1:]):
+        sh.draw_line(fitz.Point(*a), fitz.Point(*b))
+    sh.finish(color=None, fill=(0, 0, 0), closePath=True)
+    sh.commit()
+
+
+def build_flow_outline(path: str) -> dict:
+    """학원 자체 교재형 한 쪽(가운데 선 없음):
+    - 지문 구조도: 상자 세 개를 화살표(가로선 + 칠한 세모)로 잇고, 둘째 상자에서 갈라진 선(세로→가로)이 아래 상자로
+    - 그 아래 글꼴 없이 윤곽선으로 그린 발문 두 줄(첫 줄 가운데에 진짜 글자 "㉠∼㉤" 낀 것, 둘째 줄은 두 글자)
+    - 이어서 진짜 글자 선택지 다섯 줄"""
+    w = Writer()
+    w.doc.delete_page(-1)
+    w.new_page(divider=False)
+    page = w.page
+    w.text(70, 100, "지문 구조", 12)
+    boxes = [fitz.Rect(70, 120, 190, 180), fitz.Rect(240, 120, 360, 180), fitz.Rect(410, 120, 530, 180),
+             fitz.Rect(410, 210, 530, 270)]
+    for k, r in enumerate(boxes, 1):
+        page.draw_rect(r, color=(0, 0, 0), width=0.9)
+        w.text(r.x0 + 40, r.y0 + 25, f"{k} 문단", 11)
+        w.text(r.x0 + 25, r.y0 + 45, f"구조 설명 {k}", 9)
+
+    def arrow(x0: float, y: float, x1: float) -> None:
+        page.draw_line(fitz.Point(x0, y), fitz.Point(x1 - 6, y), width=0.4)
+        sh = page.new_shape()
+        sh.draw_polyline([fitz.Point(x1, y), fitz.Point(x1 - 6, y - 3), fitz.Point(x1 - 6, y + 3), fitz.Point(x1, y)])
+        sh.finish(color=(0, 0, 0), fill=(0, 0, 0), width=0.4)
+        sh.commit()
+    arrow(190, 150, 240)
+    arrow(360, 150, 410)
+    page.draw_line(fitz.Point(380, 150), fitz.Point(380, 240), width=0.4)  # 갈라지는 선
+    arrow(380, 240, 410)
+
+    # 윤곽선 발문: "1. ○○○○ ㉠∼㉤ ○○○○○○" / "○○"
+    x, y = 70, 320
+    for _ in range(5):
+        _outline_glyph(page, x, y)
+        x += 10
+    w.text(x + 2, y + 8.5, "㉠∼㉤", 9)
+    x += tl("㉠∼㉤", 9) + 4
+    for _ in range(6):
+        _outline_glyph(page, x, y)
+        x += 10
+    first_row_x1 = x
+    for k in range(2):
+        _outline_glyph(page, 70 + 10 * k, y + 15)
+    y = 360
+    for k, ch in enumerate("①②③④⑤"):
+        w.icon(ch, 70, y + 16 * k)
+        w.text(82, y + 16 * k, f"선택지 {k + 1}번 내용입니다.")
+    w.doc.save(path)
+    return {"boxes": boxes, "stem": (70, 320, first_row_x1, 344)}
+

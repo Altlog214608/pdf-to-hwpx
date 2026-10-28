@@ -875,3 +875,85 @@ def test_answer_explanations_have_no_hanging_indent(tmp_path, endnotes):
         r'<hh:paraPr id="(\d+)".*?<hc:intent value="(-?\d+)"', head, re.S)}
     ids = re.findall(r'paraPrIDRef="(\d+)"[^>]*>(?:(?!</hp:p>).)*?\[해설\]', sec, re.S)
     assert ids and all(intent[i] == 0 for i in ids), [(i, intent[i]) for i in ids]
+
+
+def test_page_frame_is_not_a_box(tmp_path):
+    """실사용(학원 자체 교재): 쪽마다 내용 전체를 두르는 테두리가 상자로 잡혀 다음 쪽 테두리와 이어 붙고, 단원 전체가
+    상자 하나(도형이 많아 통째로 그림)가 됐다. 내용 영역 위·아래 끝까지 닿는 쪽 크기의 사각형과 머리 띠 안의 칸은
+    상자가 아니다: 테두리 없는 원본과 같은 결과."""
+    from pdf2hwpx.extract import extract
+
+    plain, framed = tmp_path / "plain.pdf", tmp_path / "framed.pdf"
+    build(str(plain))
+    build(str(framed), page_frame=True)
+    a, b = extract(str(plain)), extract(str(framed))
+    assert b.stats["page_frames"] == b.stats["pages"]
+    box = lambda ex: [(round(x.x0), round(x.y0), round(x.x1), round(x.y1), len(x.parts)) for x in ex.flow if type(x).__name__ == "Box"]
+    assert box(a) == box(b)
+    res = convert(str(framed), out_dir=str(tmp_path), overwrite=True)
+    v = res["validation"]
+    assert v["status"] == "PASS", (v["root_causes"], v["warnings"])
+    assert v["checks"]["question_count"] == 5
+
+
+def test_mismapped_space_symbols():
+    """실사용: 제목 글꼴이 띄어쓰기 자리에 좁은 '$'·'%'·'#'·'&'를 찍거나(전략적$ 공약) 글자 정보 없는 글자
+    (전략적�공약)로 읽혔다. 진짜 기호보다 훨씬 좁은 것만 공백으로."""
+    from pdf2hwpx.extract import _mismapped_space
+
+    assert _mismapped_space("$", 2.2, 9.8) and _mismapped_space("�", 2.1, 9.8) and _mismapped_space("&", 3.9, 12.0)
+    assert not _mismapped_space("%", 7.5, 10.0)  # 30%
+    assert not _mismapped_space("#", 5.5, 10.0) and not _mismapped_space(".", 2.0, 10.0)
+
+
+def test_punctuation_fragment_inside_long_fragment():
+    """실사용: 문장부호만 다른 조각으로 찍혀(긴 조각 안쪽에 겹친 ". ") 그 뒤 조각("? 이는")과의 거리를 바로 앞 조각 끝에서
+    재 줄이 갈라지고 순서가 섞였다("…것일까 / ? 이는 ‘전략적 공약 이라 / ’"). 앞 조각들 중 가장 오른쪽 끝에서 잰다."""
+    from pdf2hwpx.extract import _Frag, _build_line, _split_far_fragments
+    from pdf2hwpx.model import Glyph
+
+    def frag(text: str, x: float, adv: float = 9.8) -> _Frag:
+        gs = [Glyph(c, x + k * adv, 170.7, x + (k + 1) * adv, 182.4, 9.8) for k, c in enumerate(text)]
+        return _Frag(gs, gs[0].x0, 170.7, gs[-1].x1, 182.4, 9.8)
+
+    long = frag("는 경우가 많다", 225.5)
+    long.glyphs += [Glyph(c, 320 + k * 9.8, 170.7, 320 + (k + 1) * 9.8, 182.4, 9.8) for k, c in enumerate("왜 이런 것일까")]
+    long.x1 = long.glyphs[-1].x1
+    dot = frag(".", long.glyphs[7].x1, 4.7)
+    q = frag("?", long.x1, 6.6)
+    rest = frag("이는", q.x1 + 3)
+    groups = _split_far_fragments([long, dot, q, rest])
+    assert len(groups) == 1
+    assert _build_line(1, 0, groups[0]).text == "는 경우가 많다. 왜 이런 것일까? 이는"
+
+
+def test_linked_box_chart_and_outline_text_rows(tmp_path):
+    """실사용(학원 자체 교재): ① 지문 구조도(상자를 화살표로 이음)는 쪽 테두리에 묻혀 쪽째 그림이 됐는데, 테두리를 빼면 상자가
+    흩어지고 나란한 상자 속 글이 한 줄로 섞인다 → 선으로 이어진 상자 묶음은 테두리 없는 상자 하나(도형으로 세어 그림).
+    ② 발문을 글꼴 없이 윤곽선으로 그려 글자가 없어 통째로 빠졌다 → 윤곽선 글자 줄은 그 영역을 그림으로 넣고,
+    사이에 낀 진짜 글자("㉠∼㉤")는 그림에 포함(글로 또 넣지 않음), 바로 아래 두 글자 줄도 이어진 줄로."""
+    from pdf2hwpx.extract import OUTLINE_TEXT, extract
+    from pdf2hwpx.ir import build_document
+    from pdf2hwpx.model import AuxBlock
+    from tests.synth_pdf import build_flow_outline
+
+    pdf = tmp_path / "flow.pdf"
+    info = build_flow_outline(str(pdf))
+    ex = extract(str(pdf))
+    pm = ex.pages[0]
+    assert ex.stats["linked_box_charts"] == 1
+    chart = [b for b in pm.boxes if not b.border]
+    assert len(chart) == 1 and len(pm.boxes) == 1
+    c = chart[0]
+    assert all(c.x0 <= r.x0 and r.x1 <= c.x1 and c.y0 <= r.y0 and r.y1 <= c.y1 for r in info["boxes"])
+    outl = [im for im in pm.images if im.digest == OUTLINE_TEXT]
+    assert len(outl) == 2
+    sx0, sy0, sx1, _ = info["stem"]
+    assert outl[0].x0 <= sx0 and outl[0].x1 >= sx1 - 2
+    assert not any("㉠" in ln.text for ln in pm.lines)
+    doc = build_document(ex)
+    aux = [it for it in doc.items if isinstance(it, AuxBlock)]
+    assert len(aux) == 1 and aux[0].diagram is not None and not aux[0].border
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    v = res["validation"]
+    assert not v["root_causes"], v["root_causes"]
