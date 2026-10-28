@@ -787,7 +787,8 @@ class HwpxWriter:
         for p in a.paras:
             if p.kind != "text":
                 continue
-            paras.append(self._note_p(S.derive(PP["ans_expl"], left=0, intent=_indent_hwp(p.indent_pt)),
+            # 해설은 원문의 내어쓰기("[해설]" 다음 줄부터 안쪽)를 따르지 않고 줄이 넘어가도 왼쪽에서 그대로 잇는다
+            paras.append(self._note_p(S.derive(PP["ans_expl"], left=0, intent=0),
                                       self._runs_xml(p.runs, base_bold=p.role == "heading")))
         inst = self._rng.randint(10 ** 9, 2 * 10 ** 9)
         # 앞 미주와 번호가 이어지지 않으면 '새 번호로 시작'(미주) 조판 부호를 먼저 넣는다
@@ -906,7 +907,7 @@ class HwpxWriter:
             for p in a.paras:
                 if p.kind != "text":
                     continue
-                out.append(self._p(S.derive(PP["ans_expl"], left=0, intent=_indent_hwp(p.indent_pt)),
+                out.append(self._p(S.derive(PP["ans_expl"], left=0, intent=0),  # 해설은 내어쓰기 없이(미주와 같게)
                                    self._runs_xml(p.runs, base_bold=p.role == "heading")))
         return out
 

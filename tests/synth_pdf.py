@@ -228,7 +228,7 @@ def _intro(w: "Writer") -> None:
 def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tuple[int, ...] = (),
           notice: bool = False, word_box: tuple[int, ...] = (), narrow_pairs: bool | str = False,
           bare_numbers: bool = False, credit_nospace: bool = False, written_parts: bool = False,
-          intro_page: bool = False, wide_top: bool = False) -> dict:
+          intro_page: bool = False, wide_top: bool = False, hanging_expl: bool = False) -> dict:
     """answer_style: 'bracket' = '1) [정답] ③ / [해설] …', 'plain' = '1) 정답 ③ / 오답 point / …'(최다오답·최상위 공략형)
     start: 첫 문제 번호(단원 중간부터 시작하는 문제집 일부, 예: 13번부터)
     white_bg: 발문 줄 뒤에 선 없는 흰 사각형(한글이 내보내는 문단 배경, 보이지 않음)이 깔린 문제(몇 번째, 1부터)
@@ -450,6 +450,9 @@ def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tu
         w.text(w.left + 10, w.y + 9, lead)
         w.icon("②", w.left + 10 + tl(lead), w.y + 9)
         w.text(w.left + 22 + tl(lead), w.y + 9, "는 오답이다.")
+        if hanging_expl:  # 해설이 둘째 줄로 넘어가면 "[해설]" 폭만큼 안쪽에서 시작(실사용 PDF의 내어쓰기)
+            w.y += 13
+            w.text(w.left + 10 + tl("[해설] "), w.y + 9, "둘째 줄은 안쪽에서 시작한다.")
         w.y += 22
     w.doc.save(path)
     return {"questions": 5, "objective": 4, "subjective": 1}
