@@ -850,3 +850,28 @@ def test_example_labels_tip_boxes_and_explanations(tmp_path):
     assert sum(t.startswith("둘째 줄에서 끝나는 선택지.") and t.endswith("( X )") for t in texts) == 3
     expl = [t for t in texts if t.startswith("- 해설 첫 줄")]
     assert len(expl) == 3 and all(t.endswith("둘째 줄은 들여 써서 이어진다.") for t in expl)
+
+
+@pytest.mark.parametrize("endnotes", [True, False])
+def test_answer_explanations_have_no_hanging_indent(tmp_path, endnotes):
+    """실사용 피드백: 해설(미주·문서 끝 정답)이 원문처럼 '[해설]' 다음 줄부터 오른쪽으로 들어가 읽기 불편하다.
+    원문에 내어쓰기가 있어도 해설 문단은 들여쓰기 없이 왼쪽에서 그대로 잇는다."""
+    import zipfile
+
+    pdf = tmp_path / "hang.pdf"
+    build(str(pdf), hanging_expl=True)
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.ir import build_document
+    doc = build_document(extract(str(pdf)))
+    expl = [p for a in doc.answers for p in a.paras if p.kind == "text" and p.text.startswith("[해설]")]
+    assert expl and all(p.indent_pt < -5 for p in expl)  # 원문은 내어쓰기
+    assert all("둘째 줄은 안쪽에서" in p.text for p in expl)  # 한 문단으로 이어짐
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=DocStyle(answers_as_endnotes=endnotes))
+    assert res["validation"]["status"] == "PASS", res["validation"]["root_causes"]
+    with zipfile.ZipFile(res["hwpx"]) as z:
+        head = z.read("Contents/header.xml").decode("utf-8")
+        sec = "".join(z.read(n).decode("utf-8") for n in z.namelist() if n.startswith("Contents/section"))
+    intent = {m.group(1): int(m.group(2)) for m in re.finditer(
+        r'<hh:paraPr id="(\d+)".*?<hc:intent value="(-?\d+)"', head, re.S)}
+    ids = re.findall(r'paraPrIDRef="(\d+)"[^>]*>(?:(?!</hp:p>).)*?\[해설\]', sec, re.S)
+    assert ids and all(intent[i] == 0 for i in ids), [(i, intent[i]) for i in ids]
