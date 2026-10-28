@@ -875,6 +875,9 @@ def test_answer_explanations_have_no_hanging_indent(tmp_path, endnotes):
         r'<hh:paraPr id="(\d+)".*?<hc:intent value="(-?\d+)"', head, re.S)}
     ids = re.findall(r'paraPrIDRef="(\d+)"[^>]*>(?:(?!</hp:p>).)*?\[해설\]', sec, re.S)
     assert ids and all(intent[i] == 0 for i in ids), [(i, intent[i]) for i in ids]
+    # 문단 보호 없음: 긴 해설이 통째로 다음 단으로 넘어가 앞에 큰 빈칸이 생기지 않게(실사용: 미주 1번·7번이 떨어져 보임)
+    keep = {m.group(1): m.group(2) for m in re.finditer(r'<hh:paraPr id="(\d+)".*?keepLines="(\d)"', head, re.S)}
+    assert all(keep[i] == "0" for i in ids), [(i, keep[i]) for i in ids]
 
 
 def test_page_frame_is_not_a_box(tmp_path):

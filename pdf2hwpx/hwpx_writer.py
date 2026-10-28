@@ -258,6 +258,8 @@ class Styles:
             x = re.sub(r'<hh:heading [^>]*/>', f'<hh:heading type="NUMBER" idRef="{int(ov["number"])}" level="0"/>', x, count=1)
         if "keep_next" in ov:
             x = re.sub(r'keepWithNext="\d"', f'keepWithNext="{int(ov["keep_next"])}"', x, count=1)
+        if "keep_lines" in ov:  # 문단 보호(문단을 쪼개지 않음)
+            x = re.sub(r'keepLines="\d"', f'keepLines="{int(ov["keep_lines"])}"', x, count=1)
         if "border" in ov:
             bf, ol, orr, ot, ob, conn = ov["border"]
             x = re.sub(r'<hh:border [^>]*/>',
@@ -787,8 +789,9 @@ class HwpxWriter:
         for p in a.paras:
             if p.kind != "text":
                 continue
-            # 해설은 원문의 내어쓰기("[해설]" 다음 줄부터 안쪽)를 따르지 않고 줄이 넘어가도 왼쪽에서 그대로 잇는다
-            paras.append(self._note_p(S.derive(PP["ans_expl"], left=0, intent=0),
+            # 해설은 원문의 내어쓰기("[해설]" 다음 줄부터 안쪽)를 따르지 않고 줄이 넘어가도 왼쪽에서 그대로 잇는다.
+            # 문단 보호를 끈다: 긴 해설이 남은 자리에 다 들어가지 않으면 통째로 다음 단으로 넘어가 앞에 큰 빈칸이 생긴다
+            paras.append(self._note_p(S.derive(PP["ans_expl"], left=0, intent=0, keep_lines=0),
                                       self._runs_xml(p.runs, base_bold=p.role == "heading")))
         inst = self._rng.randint(10 ** 9, 2 * 10 ** 9)
         # 앞 미주와 번호가 이어지지 않으면 '새 번호로 시작'(미주) 조판 부호를 먼저 넣는다
@@ -907,7 +910,7 @@ class HwpxWriter:
             for p in a.paras:
                 if p.kind != "text":
                     continue
-                out.append(self._p(S.derive(PP["ans_expl"], left=0, intent=0),  # 해설은 내어쓰기 없이(미주와 같게)
+                out.append(self._p(S.derive(PP["ans_expl"], left=0, intent=0, keep_lines=0),  # 해설은 내어쓰기·문단 보호 없이(미주와 같게)
                                    self._runs_xml(p.runs, base_bold=p.role == "heading")))
         return out
 
