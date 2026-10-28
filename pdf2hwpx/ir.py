@@ -724,6 +724,10 @@ def build_document(ex: Extraction) -> Document:
 
     header_set = set(headers)
     single_pages = {pm.info.number for pm in ex.pages if pm.info.single}
+    doc.faithful = ex.faithful
+
+    def same_page(j: int) -> bool:  # 원문 쪽마다 새 쪽인 교재는 쪽을 넘어 문단을 잇지 않는다
+        return not ex.faithful or flow[j].page == flow[j - 1].page
     i = 0
     current_passage: Optional[Passage] = None
     passage_id = 0
@@ -760,7 +764,7 @@ def build_document(ex: Extraction) -> Document:
             # 전폭 쪽(작품 개관·표·구조도): 한 단으로 읽었으므로 이어지는 줄은 문단으로 잇고, 출력은 새 쪽에 한 단으로
             j = i + 1
             if not isinstance(it, Box):
-                while j < answer_idx and j not in header_set and (flow[j].page in single_pages or id(flow[j]) in ex.wide_ids) \
+                while j < answer_idx and j not in header_set and (flow[j].page in single_pages or id(flow[j]) in ex.wide_ids) and same_page(j) \
                         and not isinstance(flow[j], Box) and not (isinstance(flow[j], Line) and GUIDE_RE.match(flow[j].text)):
                     j += 1
             nb = flow[i + 1] if i + 1 < answer_idx else None
@@ -788,7 +792,7 @@ def build_document(ex: Extraction) -> Document:
             j = i + 1
             while j < answer_idx and j not in header_set and isinstance(flow[j], Line) \
                     and not (GUIDE_RE.match(flow[j].text) and flow[j].box is None) \
-                    and not (flow[j].page in single_pages or id(flow[j]) in ex.wide_ids):
+                    and not (flow[j].page in single_pages or id(flow[j]) in ex.wide_ids) and same_page(j):
                 j += 1
             doc.items.extend(b.paragraphs(flow[i:j]))
         doc.loose_notes.extend(f"p{x.page}: {getattr(x, 'text', '[그림/박스]')[:30]}" for x in flow[i:j])

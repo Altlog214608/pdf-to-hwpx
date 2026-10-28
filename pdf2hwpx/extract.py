@@ -80,6 +80,7 @@ class Extraction:
     stats: dict = field(default_factory=dict)
     header_texts: list = field(default_factory=list)
     wide_ids: set = field(default_factory=set)  # 두 단 쪽 위/아래의 전폭 구간에 든 흐름 항목(id)
+    faithful: bool = False  # 쪽 테두리가 있는 교재: 원문 쪽마다 새 쪽으로(PDF 한 쪽 = 한글 한 쪽)
 
     def render(self, page: int, rect: tuple[float, float, float, float], sharp: bool = False) -> bytes:
         """원문 영역을 그림으로. sharp: 쪽 폭 가까이 크게 들어가는 도식(구조도 등)은 더 높은 해상도(약 290dpi)."""
@@ -386,7 +387,31 @@ def _page_segments(page: fitz.Page, drawings: Optional[list[dict]] = None) -> tu
                 xs = [p.x for p in pts]
                 ys = [p.y for p in pts]
                 others.append(fitz.Rect(min(xs), min(ys), max(xs), max(ys)))
-    return segs, others
+    return segs + _join_dots(segs), others
+
+
+def _join_dots(segs: list[_Seg]) -> list[_Seg]:
+    """점선(1pt 안팎의 짧은 획을 같은 줄에 촘촘히 찍은 것)을 하나의 선으로 잇는다(지문 분석 쪽의 메모 칸 구분선)."""
+    out: list[_Seg] = []
+    for vertical in (True, False):
+        groups: dict[float, list[_Seg]] = defaultdict(list)
+        for s in segs:
+            dx, dy = s.x1 - s.x0, s.y1 - s.y0
+            if (dx < 1.0 and dy < 3.0) if vertical else (dy < 1.0 and dx < 3.0):
+                groups[round((s.x0 if vertical else s.y0) * 2) / 2].append(s)
+        for pos, dots in groups.items():
+            dots.sort(key=lambda s: s.y0 if vertical else s.x0)
+            run = [dots[0]]
+            for d in dots[1:] + [None]:
+                if d is not None and ((d.y0 - run[-1].y1) if vertical else (d.x0 - run[-1].x1)) <= 3.0:
+                    run.append(d)
+                    continue
+                a, b = run[0], run[-1]
+                if len(run) >= 5 and ((b.y1 - a.y0) if vertical else (b.x1 - a.x0)) >= 20:
+                    out.append(_Seg(a.x0, a.y0, a.x0, b.y1, a.width, a.color) if vertical
+                               else _Seg(a.x0, a.y0, b.x1, a.y0, a.width, a.color))
+                run = [d] if d is not None else []
+    return out
 
 
 def _merge_runs(values: list[tuple[float, float, float]], tol: float = 3.0) -> list[tuple[float, float, float]]:
@@ -440,6 +465,13 @@ def _detect_boxes(segs: list[_Seg], top: float, bottom: float) -> list[tuple[flo
     return boxes
 
 
+def _content_boxes(rects: list, W: float, H: float, top: float, bottom: float) -> tuple[list, bool]:
+    """쪽 테두리(내용 영역 위·아래 끝까지 닿는 쪽 크기 사각형)와 머리 띠 안의 칸(학원 이름 등)을 뺀 상자, 쪽 테두리가 있었는지.
+    쪽 테두리를 상자로 보면 다음 쪽 테두리와 이어 붙어 단원 전체가 상자 하나가 된다."""
+    frame = [r for r in rects if r[2] - r[0] >= 0.6 * W and r[3] - r[1] >= 0.6 * H and r[1] <= top + 2 and r[3] >= bottom - 2]
+    return [r for r in rects if r not in frame and top < (r[1] + r[3]) / 2 < bottom], bool(frame)
+
+
 def _linked_boxes(rects: list[tuple[float, float, float, float]], segs: list[_Seg],
                   colsep: Optional[float]) -> list[tuple[float, float, float, float]]:
     """상자 변이 아닌 가로·세로 선(화살표 몸통)이 상자와 상자를 잇는 묶음(상자 2개 이상)을 감싸는 사각형.
@@ -450,11 +482,11 @@ def _linked_boxes(rects: list[tuple[float, float, float, float]], segs: list[_Se
     if len(top) < 2:
         return []
 
-    def on_edge(s: _Seg) -> bool:
+    def on_edge(s: _Seg) -> bool:  # 상자 변과 같은 줄에 겹쳐 놓인 선(여러 칸에 걸친 표의 행·열 선 포함)
         for x0, y0, x1, y1 in rects:
-            if s.horizontal and any(abs(s.y0 - y) < 1.5 for y in (y0, y1)) and s.x0 >= x0 - 2 and s.x1 <= x1 + 2:
+            if s.horizontal and any(abs(s.y0 - y) < 1.5 for y in (y0, y1)) and s.x0 < x1 - 1 and s.x1 > x0 + 1:
                 return True
-            if s.vertical and any(abs(s.x0 - x) < 1.5 for x in (x0, x1)) and s.y0 >= y0 - 2 and s.y1 <= y1 + 2:
+            if s.vertical and any(abs(s.x0 - x) < 1.5 for x in (x0, x1)) and s.y0 < y1 - 1 and s.y1 > y0 + 1:
                 return True
         return False
 
@@ -476,9 +508,10 @@ def _linked_boxes(rects: list[tuple[float, float, float, float]], segs: list[_Se
     def touches(s: _Seg, px: float, py: float, r) -> bool:
         """선 끝이 선 방향으로 상자 면에 닿는다(가로선은 왼쪽·오른쪽 면, 세로선은 위·아래 면).
         화살촉(따로 칠한 세모) 길이만큼 떨어져 있어도 된다."""
+        # 선은 그 면에서 바깥으로 뻗는다(상자를 가로지르는 표의 행·열 선은 잇는 선이 아니다)
         if s.horizontal:
-            return r[1] <= py <= r[3] and min(abs(px - r[0]), abs(px - r[2])) <= 8
-        return r[0] <= px <= r[2] and min(abs(py - r[1]), abs(py - r[3])) <= 8
+            return r[1] <= py <= r[3] and ((abs(px - r[0]) <= 8 and s.x1 <= r[0] + 8) or (abs(px - r[2]) <= 8 and s.x0 >= r[2] - 8))
+        return r[0] <= px <= r[2] and ((abs(py - r[1]) <= 8 and s.y1 <= r[1] + 8) or (abs(py - r[3]) <= 8 and s.y0 >= r[3] - 8))
 
     def near_seg(px: float, py: float, s: _Seg) -> bool:
         return s.x0 - 3 <= px <= s.x1 + 3 and s.y0 - 3 <= py <= s.y1 + 3
@@ -854,10 +887,19 @@ def extract(pdf_path: str) -> Extraction:
         # ---- 표: 격자를 칸으로 복원하고 칸 안의 글자는 칸별로 따로 줄을 만든다 ----
         colsep = split_x if best_len else None
         grids = _detect_tables(segs, fills, top, bottom, W, colsep)
+        # 선으로 이은 상자 묶음(구조도) 안의 격자(위아래 상자 + 잇는 세로선)는 표가 아니다
+        content_rects, framed = _content_boxes(_detect_boxes(segs, top, bottom), W, H, top, bottom)
+        stats["page_frames"] += framed
+        charted = _linked_boxes(content_rects, segs, colsep)
+
+        def _not_charted(gs):
+            return [g for g in gs if not any(c[0] <= g[0][0] and g[0][-1] <= c[2] and c[1] <= g[1][0] and g[1][-1] <= c[3]
+                                             for c in charted)]
+        grids = _not_charted(grids)
         # ---- 전폭 쪽: 가운데 단 구분선이 없고 글·박스·표·그림이 가운데를 가로지르는 쪽은 한 단으로 읽는다 ----
         single = False
         if not best_len:
-            wide_grids = _detect_tables(segs, fills, top, bottom, W, None, wide=True)
+            wide_grids = _not_charted(_detect_tables(segs, fills, top, bottom, W, None, wide=True))
             single = _full_width_page(kept, segs, wide_grids, imgs, W, top, bottom)
         if single:
             grids = wide_grids  # 큰 표 칸 안의 작은 표(구성 칸의 초장/중장/종장 상자)는 그 칸 안의 표로(아래)
@@ -868,7 +910,10 @@ def extract(pdf_path: str) -> Extraction:
             if _frame_grid(xs, ys):  # 테두리 안에 조금 들여 그린 칠 사각형(Tip 상자)은 표가 아니라 상자
                 continue
             col = 0 if (xs[0] + xs[-1]) / 2 < split_x else 1
-            tables.append(TableEl(pno, col, xs, ys, cells))
+            t = TableEl(pno, col, xs, ys, cells)
+            # 쪽 크기 한 행 표: 메모 칸 쪽(지문 분석 쪽: 점선 한쪽은 비워 둔 메모 칸, 다른 쪽에 글·그림)
+            t.memo = single and len(ys) == 2 and len(xs) >= 3 and xs[-1] - xs[0] >= 0.6 * W and ys[-1] - ys[0] >= 0.6 * H
+            tables.append(t)
         # 표 칸 안에 든 표: 바깥 표의 그 칸에 넣는다(글자는 가장 안쪽 칸으로)
         tables.sort(key=lambda t: (t.x1 - t.x0) * (t.y1 - t.y0))
         for k, t in enumerate(tables):
@@ -891,6 +936,7 @@ def extract(pdf_path: str) -> Extraction:
             return None
 
         cell_frags: dict[int, list[_Frag]] = defaultdict(list)
+        blank_memo: list[TableEl] = []
         cell_obj: dict[int, Cell] = {}
         if tables:
             rest: list[_Frag] = []
@@ -913,6 +959,17 @@ def extract(pdf_path: str) -> Extraction:
                         cell_obj[id(cl)] = cl
             kept = rest
             stats["tables"] += len(tables)
+            # 모든 칸이 빈 메모 칸 쪽(글 없는 메모 쪽)은 다른 빈 쪽처럼 넣지 않는다
+            blank_memo = [t for t in tables if t.memo and not any(id(cl) in cell_frags for cl in t.cells)
+                          and not any(t.x0 <= (r[0] + r[2]) / 2 <= t.x1 and t.y0 <= (r[1] + r[3]) / 2 <= t.y1
+                                      for r in [im[:4] for im in imgs] + outline_rects)]
+            tables = [t for t in tables if t not in blank_memo]
+            for t in tables:
+                for cl in t.cells if t.memo else ():
+                    cl.valign = "TOP"
+            # 메모 칸 쪽은 테두리가 점선에서 둘로 나뉘어 쪽 테두리로 잡히지 않는다: 쪽 테두리가 있는 쪽으로 센다
+            if not framed and (blank_memo or any(t.memo for t in tables)):
+                stats["page_frames"] += 1
 
         # ---- 줄 안의 빈칸 네모: 글자가 없는 작은 사각형이 같은 높이의 글 줄 옆에 있으면 빈칸 표시로 넣는다 ----
         blank_rects = []
@@ -1011,15 +1068,8 @@ def extract(pdf_path: str) -> Extraction:
         box_rects = [r for r in box_rects if not any(
             r[0] >= t.x0 - 4 and r[2] <= t.x1 + 4 and r[1] >= t.y0 - 4 and r[3] <= t.y1 + 4 for t in tables)
             and r not in blank_rects]
-        # 쪽 테두리: 내용 영역 위·아래 끝까지 닿는 쪽 크기의 사각형은 내용 상자가 아니다
-        # (상자로 보면 다음 쪽 테두리와 이어 붙어 단원 전체가 상자 하나가 된다)
-        frame = [r for r in box_rects if r[2] - r[0] >= 0.6 * W and r[3] - r[1] >= 0.6 * H
-                 and r[1] <= top + 2 and r[3] >= bottom - 2]
-        if frame:
-            stats["page_frames"] += 1
-            box_rects = [r for r in box_rects if r not in frame]
-        # 머리 띠(학원 이름 칸 등) 안의 사각형은 내용이 아니다
-        box_rects = [r for r in box_rects if top < (r[1] + r[3]) / 2 < bottom]
+        box_rects = [r for r in _content_boxes(box_rects, W, H, top, bottom)[0] if not any(
+            t.x0 - 4 <= r[0] and r[2] <= t.x1 + 4 and t.y0 - 4 <= r[1] and r[3] <= t.y1 + 4 for t in blank_memo)]
         # 선·화살표로 이어진 상자 묶음(지문 구조도): 묶음 전체를 감싸는 테두리 없는 상자를 두어 그 안의 도형으로 센다
         charts = _linked_boxes(box_rects, box_segs, split_x if best_len else None)
         stats["linked_box_charts"] += len(charts)
@@ -1374,7 +1424,8 @@ def extract(pdf_path: str) -> Extraction:
             it.png = None
     stats["pages"] = len(pages)
     stats["boxes"] = sum(1 for it in flow if isinstance(it, Box))
-    ex = Extraction(pdf_path, pages, flow, icon_digests, body_size, doc, dict(stats), wide_ids=wide_ids)
+    ex = Extraction(pdf_path, pages, flow, icon_digests, body_size, doc, dict(stats), wide_ids=wide_ids,
+                    faithful=len(pages) >= 2 and stats["page_frames"] >= 0.5 * len(pages))
     ex.header_texts = header_texts
     return ex
 

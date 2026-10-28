@@ -715,3 +715,33 @@ def build_flow_outline(path: str) -> dict:
     w.doc.save(path)
     return {"boxes": boxes, "stem": (70, 320, first_row_x1, 344)}
 
+
+
+def build_memo_pages(path: str) -> dict:
+    """지문 분석 쪽(학원 자체 교재형): 쪽 테두리 안을 점선 세로줄(짧은 획을 촘촘히 찍음)로 나눠 한쪽은 빈 메모 칸,
+    다른 쪽에 문단 번호 ①② 글. 짝수 쪽은 메모 칸이 왼쪽, 홀수 쪽은 오른쪽. 가운데 쪽은 글 없는 메모 쪽(빈 쪽)."""
+    w = Writer()
+    w.doc.delete_page(-1)
+    frame = fitz.Rect(45, 82, 553, 766)
+    texts = []
+    for k, divider in enumerate((206.0, 392.0, 392.0)):
+        w.new_page(divider=False)
+        page = w.page
+        page.draw_rect(frame, color=(0, 0, 0), width=0.36)
+        y = frame.y0 + 0.4
+        while y < frame.y1 - 0.5:
+            page.draw_line(fitz.Point(divider, y), fitz.Point(divider, y + 0.48), width=0.36)
+            y += 1.2
+        if k == 1:
+            continue  # 글 없는 메모 쪽
+        x0, x1 = (divider + 20, frame.x1 - 18) if divider < 300 else (frame.x0 + 18, divider - 20)
+        y = 150.0
+        for n, mark in enumerate("①②"):
+            for j in range(4):
+                s = (f"{mark} " if j == 0 else "") + f"{k + 1}쪽 {n + 1}문단 {j + 1}번째 줄, 분석 글"
+                w.text(x0 + (8 if j == 0 else 0), y, s, 9.8)
+                y += 21.5
+            texts.append(f"{k + 1}쪽 {n + 1}문단")
+            y += 60
+    w.doc.save(path)
+    return {"pages": 3, "texts": texts}

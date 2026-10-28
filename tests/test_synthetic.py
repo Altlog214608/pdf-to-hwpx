@@ -960,3 +960,33 @@ def test_linked_box_chart_and_outline_text_rows(tmp_path):
     res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
     v = res["validation"]
     assert not v["root_causes"], v["root_causes"]
+
+
+def test_memo_column_pages_follow_source_pages(tmp_path):
+    """실사용(학원 자체 교재의 지문 분석 쪽): 쪽 테두리 안을 점선으로 나눠 한쪽은 빈 메모 칸, 다른 쪽에 글.
+    점선은 짧은 획 수백 개라 선으로 잡히지 않아 메모 칸이 사라졌다 → 점선을 하나의 선으로 이어 쪽 크기 두 칸 표(메모 칸 | 글)로,
+    표 높이는 쪽 본문 높이, 글은 칸 위에서부터. 쪽 테두리가 있는 교재는 원문 쪽마다 새 쪽(PDF 한 쪽 = 한글 한 쪽),
+    글 없는 메모 쪽은 다른 빈 쪽처럼 넣지 않는다."""
+    import zipfile
+
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.model import TableEl
+    from tests.synth_pdf import build_memo_pages
+
+    pdf = tmp_path / "memo.pdf"
+    info = build_memo_pages(str(pdf))
+    ex = extract(str(pdf))
+    assert ex.faithful
+    memo = [t for t in ex.flow if isinstance(t, TableEl)]
+    assert [t.page for t in memo] == [1, 3] and all(t.memo for t in memo)
+    assert [round(t.xs[1]) for t in memo] == [206, 392]
+    filled = [[bool(cl.items) for cl in t.cells] for t in memo]
+    assert filled == [[False, True], [True, False]]
+    assert all(cl.valign == "TOP" for t in memo for cl in t.cells)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    with zipfile.ZipFile(res["hwpx"]) as z:
+        sec = z.read("Contents/section0.xml").decode("utf-8")
+    assert len(re.findall(r'<hp:tbl ', sec)) == 2
+    assert len(re.findall(r'<hp:p [^>]*pageBreak="1"', sec)) == 1  # 글 있는 두 쪽 사이에만
+    text = "".join(re.findall(r"<hp:t>([^<]*)</hp:t>", sec))
+    assert all(t in text for t in info["texts"])

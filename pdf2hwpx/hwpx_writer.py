@@ -607,6 +607,8 @@ class HwpxWriter:
                 xs = full[:-1] + [int(max_w)]
                 k = ky
         ys = [int(round((y - t.y0) * ky)) for y in t.ys]
+        if t.memo:  # 메모 칸 표: 쪽 본문 높이에 맞춘다(원문 비율로 키우면 쪽을 넘는다)
+            ys = [0, self.img_max_h]
         cell_ov = {"line": 130} if t.text_pt else {}
         plain = S.add_border_fill() if t.lines else S.add_border_fill(sides_on=())
         rows: list[list[str]] = [[] for _ in range(len(t.ys) - 1)]
@@ -1003,7 +1005,9 @@ class HwpxWriter:
                 paras[0] = _new_columns(paras[0], 1 if wide else 2, page_break=top)
                 wide_mode = wide
                 self.stats["column_switches"] += 1
-            elif wide and top:  # 전폭 부분은 원문 쪽마다 새 쪽(작품 미리보기 / 출제 포인트 / 작품 정리)
+            elif top and (wide or self.doc.faithful):
+                # 전폭 부분은 원문 쪽마다 새 쪽(작품 미리보기 / 출제 포인트 / 작품 정리). 쪽 테두리가 있는 학원 자체 교재는
+                # 두 단 쪽도 원문 쪽마다 새 쪽(PDF 한 쪽 = 한글 한 쪽)
                 paras[0] = paras[0].replace('pageBreak="0"', 'pageBreak="1"', 1)
             body.extend(paras)
         self._set_width(False)
