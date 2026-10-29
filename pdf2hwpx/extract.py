@@ -167,6 +167,132 @@ def _plain_strokes(strokes: dict) -> None:
                 g.bold = False
 
 
+_PARTICLE = set("은을는를의이가에와과로으도만")
+
+
+def _jamo(c: str) -> tuple[int, int, int]:
+    k = ord(c) - 0xAC00
+    return k // 588, (k % 588) // 28, k % 28
+
+
+def _fix_by_vocab(frags: list, pages: list) -> int:
+    """OCR로 읽은 낱말이 문서 본문(글꼴 있는 글자)에 없고, 본문에 3번 넘게 나오는 낱말과 받침 ㅁ/ㅂ 하나만 다르면 그 낱말로
+    ("스놉 효과"를 "스놈"으로: OCR이 자주 헷갈리는 받침). 조사 음절이 다른 것, 본문 낱말의 앞부분(줄 끝에서 끊긴
+    "적절하")은 고치지 않는다(어미·끊긴 낱말까지 고치면 "설명한"을 "설명할"로 바꾼다). 고친 글자 수."""
+    ocr_ids = {id(g) for f in frags for g in f.glyphs}
+    vocab: Counter = Counter()
+    for pm in pages:
+        for ln in pm.lines:
+            word = ""
+            for g in ln.glyphs + [None]:
+                if g is not None and id(g) not in ocr_ids and "가" <= g.c <= "힣":
+                    word += g.c
+                    continue
+                if len(word) >= 2:
+                    vocab[word] += 1
+                word = ""
+    by_len: dict = defaultdict(list)
+    for w, n in vocab.items():
+        if n >= 3:
+            by_len[len(w)].append(w)
+    fixed = 0
+    for f in frags:
+        words: list[list] = [[]]
+        for a in f.glyphs:
+            if words[-1] and a.x0 - words[-1][-1].x1 > 0.05:
+                words.append([])
+            words[-1].append(a)
+        for gs in words:
+            run = [g for g in gs if "가" <= g.c <= "힣"]
+            w = "".join(g.c for g in run)
+            if len(w) < 2 or len(run) != len(gs) or vocab[w] or any(v.startswith(w) for v in vocab):
+                continue
+            cands = []
+            for v in by_len[len(w)]:
+                diff = [k for k in range(len(w)) if w[k] != v[k]]
+                if len(diff) == 1:
+                    a, b = w[diff[0]], v[diff[0]]
+                    if a not in _PARTICLE and b not in _PARTICLE and _jamo(a)[:2] == _jamo(b)[:2] \
+                            and {_jamo(a)[2], _jamo(b)[2]} == {16, 17}:  # 받침 ㅁ/ㅂ
+                        cands.append((v, diff[0]))
+            if len(cands) == 1:
+                v, k = cands[0]
+                run[k].c = v[k]
+                fixed += 1
+    return fixed
+
+
+def _body_vocab(pages: list, skip: set) -> Counter:
+    """문서 본문(글꼴 있는 글자) 낱말(한글만 이어진 것) 수."""
+    vocab: Counter = Counter()
+    for pm in pages:
+        for ln in pm.lines:
+            word = ""
+            for g in ln.glyphs + [None]:
+                if g is not None and id(g) not in skip and "가" <= g.c <= "힣":
+                    word += g.c
+                    continue
+                if word:
+                    vocab[word] += 1
+                word = ""
+    return vocab
+
+
+def _ocr_line_end_spaces(frags: list, pages: list) -> int:
+    """OCR로 읽은 줄은 텍스트 층의 줄 끝 공백 정보가 없어 다음 줄과 띄어 쓸지 모른다(한국어는 낱말 중간에서도 줄을 바꾼다:
+    "적절하/지 않은"). 앞줄 끝 낱말과 다음 줄 첫 낱말을 붙인 것이 본문에 있으면 붙이고, 둘이 따로 본문에 있으면 띄운다
+    ("이해한 것으로/적절하지"가 "것으로적절하지"로 붙었다). 다음 줄이 조사로 시작하면 붙이고, 앞 낱말이 조사·어미나
+    관형형(ㄴ·ㄹ 받침: "나눈/대화")으로 끝나면 띄운다. 띄운 줄 수."""
+    ocr_ids = {id(g) for f in frags for g in f.glyphs}
+    vocab = _body_vocab(pages, ocr_ids)
+
+    def edge_word(glyphs: list, last: bool) -> str:
+        seq = glyphs[::-1] if last else glyphs
+        out = ""
+        for g in seq:
+            if "가" <= g.c <= "힣":
+                out += g.c
+            elif out or not last:
+                break
+        return out[::-1] if last else out
+    n = 0
+    for pm in pages:
+        lines = [ln for ln in pm.lines if ln.glyphs]
+        for a in lines:
+            if a.trailing_space or not any(id(g) in ocr_ids for g in a.glyphs):
+                continue
+            h = a.y1 - a.y0
+            below = [b for b in lines if b is not a and b.col == a.col and 0.6 * h < b.y0 - a.y0 < 2.8 * h
+                     and min(a.x1, b.x1) - max(a.x0, b.x0) > 0 and any(id(g) in ocr_ids for g in b.glyphs)]
+            if not below:
+                continue
+            b = min(below, key=lambda b: b.y0)
+            w1, w2 = edge_word(a.glyphs, True), edge_word(b.glyphs, False)
+            if not w1 or not w2 or a.glyphs[-1].c not in w1[-1:]:
+                continue
+            joined = w1 + w2
+            if any(v.startswith(joined) for v in vocab):  # 낱말 중간에서 바뀐 줄
+                continue
+            if w2.startswith("으") or w2 in _JOSA:  # 다음 줄이 조사로 시작("반응/으로")
+                continue
+            ending = len(w1) >= 2 and (w1[-1] in _ENDING or _jamo(w1[-1])[2] in (4, 8))  # 조사·어미, 관형형 ㄴ·ㄹ
+            if ending or (vocab[w1] and any(v.startswith(w2) for v in vocab)):
+                a.trailing_space = True
+                n += 1
+    return n
+
+
+_JOSA = {"로", "을", "를", "은", "는", "이", "가", "에", "의", "와", "과", "도", "에서", "에게", "만", "부터", "까지"}
+_ENDING = set("을를은는의에로와과가이고며서도면게")
+
+
+def _shape_sig(d: dict) -> str:
+    """윤곽선 글자 도형의 모양(놓인 자리와 무관): 같은 글꼴·크기의 같은 글자는 같은 값."""
+    r = d["rect"]
+    return "|".join(it[0] + ",".join(f"{round((pt.x - r.x0) * 20)},{round((pt.y - r.y0) * 20)}"
+                                     for pt in it[1:] if isinstance(pt, fitz.Point)) for it in d.get("items", []))
+
+
 WHITE = "#FFFFFF"
 
 
@@ -254,7 +380,18 @@ def _page_fragments(page: fitz.Page, strokes: Optional[dict] = None) -> list[_Fr
             frags.append(_Frag(glyphs, min(g.x0 for g in solid), min(g.y0 for g in solid),
                                max(g.x1 for g in solid), max(g.y1 for g in solid),
                                statistics.median(g.size for g in solid)))
-    return frags
+    # 네모(□) 안에 겹쳐 찍은 글자("□"와 "A"를 따로 찍은 네모 친 A)는 글자 테두리를 친 그 글자 하나로
+    for f in frags:
+        for b in [g for g in f.glyphs if g.c == "□"]:
+            inner = [g for h in frags for g in h.glyphs if g is not b and not g.is_space and b.x0 - 0.5 <= g.x0
+                     and g.x1 <= b.x1 + 0.5 and b.y0 - 0.5 <= g.y0 and g.y1 <= b.y1 + 0.5]
+            if len(inner) == 1:
+                inner[0].boxed = True
+                inner[0].x0, inner[0].y0, inner[0].x1, inner[0].y1, inner[0].size = b.x0, b.y0, b.x1, b.y1, b.size
+                f.glyphs.remove(b)
+                for h in frags:  # 네모 안에서 시작하는 공백 글자(원래 글자 바로 뒤)도 뺀다
+                    h.glyphs = [g for g in h.glyphs if not (g.is_space and b.x0 <= g.x0 < b.x1 and b.y0 <= (g.y0 + g.y1) / 2 <= b.y1)]
+    return [f for f in frags if any(not g.is_space for g in f.glyphs)]
 
 
 # 출판사가 첫 쪽 등에 넣는 법정 고지문: "◇「콘텐츠산업 진흥법 시행령」제33조에 의한 표시 / 제작연월일 / …저작권법에 의하여…"
@@ -369,8 +506,25 @@ def _glyph_path(d: dict) -> bool:
     return len(ops) >= 8 or (len(ops) >= 6 and "c" in ops)
 
 
+def _symbol_path(d: dict) -> bool:
+    """획이 적어 글자 도형(_glyph_path)으로 치지 않은 기호: 진하게 칠한 '<' '>'(선분 몇 개), 마침표(작은 네모),
+    작은따옴표·쉼표(3pt 안팎의 작은 도형)."""
+    fill = d.get("fill")
+    if _glyph_path(d) or not fill or "f" not in (d.get("type") or "") or max(float(v) for v in fill[:3]) >= 0.4:
+        return False
+    r, its = d["rect"], d.get("items", [])
+    if its and all(it[0] == "re" for it in its):
+        return len(its) == 1 and 1.2 <= r.width <= 3.5 and 1.2 <= r.height <= 3.5 and abs(r.width - r.height) < 0.6
+    if len(its) >= 3 and 1.5 <= r.height < 4 and r.width <= 2.5:
+        return True
+    return len(its) >= 4 and 4 <= r.height <= 30 and r.width <= 1.2 * r.height
+
+
 def _outline_rows(drawings: list[dict]) -> list[list[float]]:
-    """윤곽선 글자를 같은 높이에 글자 폭 정도 간격으로 이어진 것끼리 묶은 줄 [x0, y0, x1, y1, 글자 수]."""
+    """윤곽선 글자를 같은 높이에 글자 폭 정도 간격으로 이어진 것끼리 묶은 줄 [x0, y0, x1, y1, 글자 수].
+    기호 도형('<' 등)은 글자 수에 넣지 않고, 줄 바로 앞뒤에 붙은 것은 줄에 넣고 글자 2개 넘는 두 줄 사이에 낀 것은 두 줄을
+    잇는다(빠지면 "때, <보기>"가 두 줄로 갈려 '<'를 잃었다)."""
+    sym = [fitz.Rect(d["rect"]) for d in drawings if _symbol_path(d) and d["rect"].height >= 4]
     rects = sorted((fitz.Rect(d["rect"]) for d in drawings if _glyph_path(d)), key=lambda r: (r.x0, r.y0))
     rows: list[list[fitz.Rect]] = []
     for r in rects:
@@ -384,7 +538,21 @@ def _outline_rows(drawings: list[dict]) -> list[list[float]]:
                 break
         else:
             rows.append([r])
-    return [[row[0].x0, min(r.y0 for r in row), row[-1].x1, max(r.y1 for r in row), len(row)] for row in rows]
+    out = [[row[0].x0, min(r.y0 for r in row), row[-1].x1, max(r.y1 for r in row), len(row)] for row in rows]
+
+    def beside(q, r) -> bool:
+        h = r[3] - r[1]
+        return min(q.y1, r[3]) - max(q.y0, r[1]) >= 0.4 * q.height and (0 <= q.x0 - r[2] <= 0.8 * h or 0 <= r[0] - q.x1 <= 0.8 * h)
+    for q in sym:
+        near = [r for r in out if r[4] >= 2 and beside(q, r)]
+        if len(near) == 2:  # 두 줄 사이에 낀 기호: 한 줄로
+            a, b = sorted(near, key=lambda r: r[0])
+            out.remove(b)
+            a[:] = [a[0], min(a[1], b[1], q.y0), b[2], max(a[3], b[3], q.y1), a[4] + b[4]]
+        elif len(near) == 1:
+            a = near[0]
+            a[:] = [min(a[0], q.x0), min(a[1], q.y0), max(a[2], q.x1), max(a[3], q.y1), a[4]]
+    return out
 
 
 LEAD_NUM = set("0123456789.。,·oOㅇlI|")  # 줄 맨 앞 번호를 OCR이 이렇게 읽기도 한다
@@ -392,7 +560,8 @@ LEAD_NUM = set("0123456789.。,·oOㅇlI|")  # 줄 맨 앞 번호를 OCR이 이�
 
 def _align(chars: list, shapes: list, size: float) -> list[tuple]:
     """OCR 글자와 원문 글자 도형을 왼쪽부터 순서를 지키며 짝짓는다(편집 거리: 짝은 가운데 거리, 건너뛰기는 글자 크기의 80%).
-    가운데가 글자 크기만큼 넘게 떨어진 짝은 짓지 않는다(OCR 상자는 단어를 나눈 것이라 반 글자쯤 어긋나기도 한다)."""
+    가운데가 글자 크기만큼 넘게 떨어진 짝은 짓지 않는다(OCR 상자는 단어를 나눈 것이라 반 글자쯤 어긋나기도 한다).
+    한글 글자는 글자 크기의 3분의 1보다 작은 도형(마침표·따옴표)과 짝짓지 않는다("이다."의 '다'를 마침표와 짝지었다)."""
     n, m = len(chars), len(shapes)
     skip, far = 0.8 * size, 1.0 * size
     # (단어 첫 글자에 단어 전체 상자가 붙어 나오기도 한다: '설 438.8~474.1' -> 왼쪽 끝에서 반 글자)
@@ -406,12 +575,16 @@ def _align(chars: list, shapes: list, size: float) -> list[tuple]:
     for i in range(1, n + 1):
         for j in range(1, m + 1):
             d = abs(cx[i - 1] - sx[j - 1])
+            if "가" <= chars[i - 1].c <= "힣" and max(shapes[j - 1].width, shapes[j - 1].height) < 0.34 * size:
+                d = float("inf")
             cost[i][j] = min(cost[i - 1][j] + skip, cost[i][j - 1] + skip,
                              cost[i - 1][j - 1] + d if d <= far else float("inf"))
     pairs = []
     i, j = n, m
     while i and j:
         d = abs(cx[i - 1] - sx[j - 1])
+        if "가" <= chars[i - 1].c <= "힣" and max(shapes[j - 1].width, shapes[j - 1].height) < 0.34 * size:
+            d = float("inf")
         if d <= far and cost[i][j] == cost[i - 1][j - 1] + d:
             pairs.append((chars[i - 1], shapes[j - 1]))
             i, j = i - 1, j - 1
@@ -420,6 +593,92 @@ def _align(chars: list, shapes: list, size: float) -> list[tuple]:
         else:
             j -= 1
     return pairs[::-1]
+
+
+def _reread_glyphs(page: fitz.Page, staged: list, straight: set, stats: Counter) -> None:
+    """원문 도형에 맞춘 OCR 줄에서 어느 글자 상자에도 들지 않은 도형(OCR이 놓친 글자: "33초"의 둘째 '3', "<보기>"의 '<')을
+    그 도형만 잘라(세로는 줄 높이) 다시 읽어 넣는다(쪽마다 한 번에). 글자 하나로 읽힌 것만."""
+    # [A] 표시: 글자 높이의 좁은 세로 도형 둘('[' ']') 사이에 글자 도형. 그 자리 OCR 글자는 버리고 '[', 영문 대문자, ']'로
+    brackets = []  # (줄 글자 목록, '[' 도형, ']' 도형, 가운데 글자 도형 영역)
+    for r, chars, real, own, size, snapped, _ in staged:
+        # (괄호 '( )'는 곡선이라 뺀다: "(가)"를 "[J]"로 읽었다)
+        narrow = [q for q in own if q.width <= 0.4 * q.height and q.height >= 0.75 * size and id(q) in straight]
+        for a, b in zip(narrow, narrow[1:]):
+            mid = [q for q in own if a.x1 - 0.2 <= q.x0 and q.x1 <= b.x0 + 0.2]
+            if mid and b.x0 - a.x1 <= 1.6 * size and len(_overlap_groups(mid)) == 1:
+                brackets.append((chars, a, b, _union(mid), r, own))
+    got = ocr.read_rows(page, [(m.x0 - 0.6, r[1], m.x1 + 0.6, r[3]) for _, _, _, m, r, _ in brackets],
+                        [[] for _ in brackets], allow="ABCDEFGHIJ") if brackets else []
+    for (chars, a, b, m, _, own), new in zip(brackets, got or []):
+        letter = "".join(c.c for c in new)
+        if not re.fullmatch(r"[A-J]", letter):
+            continue
+        conf = max(ocr.LOW_CONF, min(c.conf for c in new))
+        # 표시 자리와, 그 뒤 다음 글자 도형 앞까지 도형 없이 남은 OCR 기호(밀려난 ']'·'A')는 버린다
+        nxt = min((q.x0 for q in own if q.x0 > b.x1), default=b.x1 + 0.6 * (b.y1 - b.y0))
+
+        def bare(ch) -> bool:
+            return not any(ch.x0 - 0.3 <= (q.x0 + q.x1) / 2 <= ch.x1 + 0.3 for q in own)
+        chars[:] = sorted([ch for ch in chars if not (a.x0 - 0.5 <= (ch.x0 + ch.x1) / 2 <= b.x1 + 0.5
+                                                     or (b.x1 <= ch.x0 < nxt and not "가" <= ch.c <= "힣" and bare(ch)))]
+                          + [ocr.OcrChar("[", a.x0, a.y0, a.x1, a.y1, conf, -1),
+                             ocr.OcrChar(letter, m.x0, m.y0, m.x1, m.y1, conf, -1),
+                             ocr.OcrChar("]", b.x0, b.y0, b.x1, b.y1, conf, -1)], key=lambda ch: ch.x0)
+        stats["ocr_bracket_labels"] += 1
+    # 한글 아닌 낱자·숫자가 섞여 이어진 곳("‘TLCD’"를 "1ㄴ00"으로): 영문 대문자·숫자로 다시 읽는다
+    latin = []
+    for r, chars, real, own, size, snapped, _ in staged:
+        run: list = []
+        for ch in chars + [None]:
+            if ch is not None and (ch.c.isascii() and ch.c.isalnum() or "ㄱ" <= ch.c <= "ㅣ"):
+                run.append(ch)
+                continue
+            if len(run) >= 2 and any("ㄱ" <= c.c <= "ㅣ" for c in run) and run[0].x0 > r[0] + size:
+                latin.append((chars, run, r))
+            run = []
+    got = ocr.read_rows(page, [(run[0].x0 - 0.6, r[1], run[-1].x1 + 0.6, r[3]) for _, run, r in latin],
+                        [[] for _ in latin], allow="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") if latin else []
+    for (chars, run, _), new in zip(latin, got or []):
+        text = "".join(c.c for c in new)
+        if len(text) == len(run) and text.isalnum():
+            for ch, c in zip(run, text):
+                ch.c = c
+            stats["ocr_latin_reread"] += 1
+    targets = []  # (줄 글자 목록, 놓친 도형 영역, 줄 영역, 글자 크기)
+    for r, chars, real, own, size, snapped, _ in staged:
+        loose = [q for q in own if not any(ch.x0 - 0.3 <= (q.x0 + q.x1) / 2 <= ch.x1 + 0.3 for ch in chars)]
+        for gq in _overlap_groups(loose):
+            targets.append((chars, _union(gq), r, size))
+    if not targets:
+        return
+    got = ocr.read_rows(page, [(q.x0 - 0.6, r[1], q.x1 + 0.6, r[3]) for _, q, r, _ in targets], [[] for _ in targets])
+    for (chars, q, r, size), new in zip(targets, got or [[] for _ in targets]):
+        c = new[0].c if len(new) == 1 and not new[0].c.isspace() else None
+        if c is None and q.height <= 0.45 * size and q.width <= 0.4 * size:
+            # 못 읽은 작은 도형: 줄 위쪽이면 따옴표(방향은 뒤에서 간격으로), 아래쪽이면 쉼표
+            c = "'" if (q.y0 + q.y1) / 2 < (r[1] + r[3]) / 2 else "." if q.width >= 0.7 * q.height else ","
+        if c is not None:
+            chars.append(ocr.OcrChar(c, q.x0, q.y0, q.x1, q.y1, max(new[0].conf if new else 0.0, ocr.LOW_CONF), -1))
+            chars.sort(key=lambda ch: ch.x0)
+            stats["ocr_glyph_reread"] += 1
+
+
+def _union(rs: list) -> fitz.Rect:
+    out = fitz.Rect(rs[0])
+    for q in rs[1:]:
+        out |= q
+    return out
+
+
+def _overlap_groups(rs: list) -> list[list]:
+    """가로로 겹치는 도형끼리(글자 하나를 도형 여러 개로 그린 것)."""
+    groups: list[list] = []
+    for q in sorted(rs, key=lambda q: q.x0):
+        if groups and q.x0 < max(o.x1 for o in groups[-1]) - 0.2 * q.width:
+            groups[-1].append(q)
+        else:
+            groups.append([q])
+    return groups
 
 
 def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -> list[Optional[_Frag]]:
@@ -431,14 +690,50 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
     - 굵기는 줄 안 진짜 글자를 따르고, 없으면 굵게(발문)."""
     inside = [[g for f in kept for g in f.glyphs if not g.is_space
                and r[0] <= (g.x0 + g.x1) / 2 <= r[2] and r[1] <= (g.y0 + g.y1) / 2 <= r[3]] for r in rects]
-    rows = ocr.read_rows(page, rects, [[(g.x0, g.y0, g.x1, g.y1) for g in gs] for gs in inside])
-    if rows is None:
-        return [None] * len(rects)
     drawings = page.get_drawings()
-    shapes = [fitz.Rect(d["rect"]) for d in drawings if _glyph_path(d)]
+    # 줄 안의 가는 가로·세로 선(낱말 상자 테두리·밑줄)은 선 두께만큼 지우고 읽는다: 글자에 붙은 상자 오른쪽 선을
+    # 글자 획으로 읽어 "불구지천"이 "불구지첩"이 됐다
+    lines = []
+    for d in drawings:
+        its = d.get("items", [])
+        if len(its) == 1 and its[0][0] == "l" and "s" in (d.get("type") or "") and 0.2 <= float(d.get("width") or 0) <= 1.2:
+            a, b = its[0][1], its[0][2]
+            if abs(a.x - b.x) < 0.5 or abs(a.y - b.y) < 0.5:
+                lines.append((min(a.x, b.x), min(a.y, b.y), max(a.x, b.x), max(a.y, b.y), float(d["width"]) / 2 + 0.15))
+
+    glyph_drawings = [d for d in drawings if _glyph_path(d)]
+    shapes = [fitz.Rect(d["rect"]) for d in glyph_drawings]
+    # 획이 적어 글자 도형으로 치지 않은 기호('<' '>'): 글자와 짝짓는 데는 넣는다(빠지면 OCR 글자가 한 칸씩 밀려 짝지어진다)
+    symbol_drawings = [d for d in drawings if _symbol_path(d)]
+    symbols = [fitz.Rect(d["rect"]) for d in symbol_drawings]
+    # 곡선 없는 도형('[' ']'), 도형 점들의 세로 무게 중심(작은따옴표: 여는 ‘는 아래쪽 0.47, 닫는 ’는 위쪽 0.58)
+    sigs = {id(q): _shape_sig(d) for q, d in zip(shapes, glyph_drawings)}
+    straight = {id(q) for q, d in zip(shapes, glyph_drawings) if all(it[0] in ("l", "re") for it in d["items"])}
+    mass = {}
+    for q, d in zip(shapes + symbols, glyph_drawings + symbol_drawings):
+        pts = [pt for it in d["items"] for pt in it[1:] if isinstance(pt, fitz.Point)]
+        mass[id(q)] = (sum(pt.y for pt in pts) / len(pts) - q.y0) / max(q.height, 0.01) if pts else 0.5
     marks = [fitz.Rect(d["rect"]) for d in drawings if d.get("fill") and "f" in (d.get("type") or "")
              and max(float(v) for v in d["fill"][:3]) < 0.4 and not _glyph_path(d)]
-    owns =[sorted((q for q in shapes if r[0] <= (q.x0 + q.x1) / 2 <= r[2] and r[1] <= (q.y0 + q.y1) / 2 <= r[3]),
+
+    def masks(gs, r) -> list:
+        # 진짜 글자는 잉크가 상자보다 조금 커서 1.5pt 넓게 지우되, 옆 윤곽선 글자 도형은 건드리지 않는다
+        # (붙어 있는 "㉠의"의 'ㅇ'까지 지워 "㉠기"로 읽었다)
+        row = [q for q in shapes + symbols if q.x0 < r[2] and q.x1 > r[0] and q.y0 < r[3] and q.y1 > r[1]]
+        out = []
+        for g in gs:
+            x0, x1 = g.x0 - 1.5, g.x1 + 1.5
+            for q in row:
+                if g.x1 - 1.0 <= q.x0 < x1:
+                    x1 = q.x0 - 0.1
+                if x0 < q.x1 <= g.x0 + 1.0:
+                    x0 = q.x1 + 0.1
+            out.append((x0, g.y0 - 1.5, x1, g.y1 + 1.5, 0.0))
+        return out + [m for m in lines if m[0] < r[2] and m[2] > r[0] and m[1] < r[3] and m[3] > r[1]]
+    rows = ocr.read_rows(page, rects, [masks(gs, r) for gs, r in zip(inside, rects)])
+    if rows is None:
+        return [None] * len(rects)
+    owns =[sorted((q for q in shapes + symbols if r[0] <= (q.x0 + q.x1) / 2 <= r[2] and r[1] <= (q.y0 + q.y1) / 2 <= r[3]),
                    key=lambda q: q.x0) for r in rects]
 
     def missed(chars, own) -> int:  # 읽은 글자 상자가 덮지 못한 원문 글자 도형 수
@@ -447,7 +742,7 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
     # ("1. 윗글에서 언급된 …"을 큰 "1." 때문에 여러 글줄로 쪼개 읽어 앞부분을 잃었다)
     for k, (chars, own, real) in enumerate(zip(rows, owns, inside)):
         if len(own) >= 4 and missed(chars, own) > max(2, 0.15 * len(own)):
-            again = ocr.read_rows(page, [rects[k]], [[(g.x0, g.y0, g.x1, g.y1) for g in real]], line=True)
+            again = ocr.read_rows(page, [rects[k]], [masks(real, rects[k])], line=True)
             if again and missed(again[0], own) < missed(chars, own):
                 rows[k] = again[0]
                 stats["ocr_line_retry"] += 1
@@ -469,7 +764,10 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
                 if ch.conf < 90 and ch.c.isascii() and ch.c.isalnum() and g.x0 <= ch.x0 < g.x1 + 0.2 * g.size:
                     return True
             return False
-        rows[k] = [ch for ch in chars if not stray(ch)]
+        # 확신도가 아주 낮은 괄호·세로줄은 상자 테두리 등을 읽은 것('[A]' 표시는 원문 도형에서 따로 만든다)
+        # 확신도가 아주 낮은 한글 아닌 글자(지운 자리·테두리의 자국 "4 ^ 6 !")도 버린다(맨 앞 번호 자리는 따로 다시 읽는다)
+        rows[k] = [ch for n, ch in enumerate(chars) if not stray(ch) and not (ch.c in "[]|^" and ch.conf < 30)
+                   and not (n >= 2 and ch.conf < 20 and not "가" <= ch.c <= "힣")]
     # 맨 앞 번호, '[' 뒤 표시 글자는 그 글자들만 다시 읽는다
     redo: dict[tuple[int, str], tuple] = {}
     for k, chars in enumerate(rows):
@@ -482,10 +780,12 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
         if n and (n == len(chars) or chars[n].c not in LEAD_NUM or chars[n].x0 >= stop
                   or chars[n].x0 - chars[n - 1].x1 >= 0.6 * (rects[k][3] - rects[k][1])):
             redo[(k, "0123456789.")] = (rects[k][0], rects[k][1], chars[n - 1].x1 + 1.0, rects[k][3])
-        elif not n and len(owns[k]) >= 4:
+        elif not chars and 0 < len(owns[k]) <= 2:  # 큰 번호만 있는 줄(진짜 글자 발문 앞 "4.")을 못 읽음: 숫자로
+            redo[(k, "0123456789.")] = rects[k]
+        elif not n and len([q for q in owns[k] if q.height >= 4]) >= 4:
             # 맨 앞이 줄 글자보다 큰 도형(큰 문제 번호)이고 크게 띄었는데 숫자로 못 읽은 줄("4. <보기>는"의 "4. <"를
             # ":"로 읽어 문제로 잡히지 않았다): 번호 도형 자리를 숫자로 다시 읽는다
-            own = owns[k]
+            own = [q for q in owns[k] if q.height >= 4]  # (번호 뒤 마침표 같은 작은 기호는 빼고)
             rest = sorted(q.height for q in own[1:])
             big = [q for q in own if q.height >= 1.15 * rest[int(0.75 * (len(rest) - 1))]]
             m = 0
@@ -497,6 +797,8 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
             if ch.c == "[":
                 h = ch.y1 - ch.y0
                 close = next((c for c in chars[n + 1:n + 4] if c.c == "]"), None)
+                if close is not None and close.x1 - ch.x0 > 2.2 * h:  # 괄호 안이 여러 글자("[과학]")
+                    break
                 redo[(k, "[]ABCDEFGH")] = (ch.x0 - 1.0, rects[k][1], close.x1 + 1.0 if close else ch.x0 + 1.7 * h, rects[k][3])
                 break
     for allow in ("0123456789.", "[]ABCDEFGH"):
@@ -529,11 +831,11 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
     page_sizes = [row_size(chars, own) for chars, own in zip(rows, owns) if chars and not few(own)] \
         or [row_size(chars, own) for chars, own in zip(rows, owns) if chars]
     page_size = statistics.median(page_sizes) if page_sizes else 0.0
-    out: list[Optional[_Frag]] = []
+    staged: list = []
     for r, chars, real, own in zip(rects, rows, inside, owns):
         # 확신도 낮은 글자가 많은 줄(무늬·밑줄이 겹친 줄 등)은 잘못 읽은 것이 많아 그림으로 둔다
         if not chars or sum(ch.conf < ocr.LOW_CONF for ch in chars) > 0.25 * len(chars):
-            out.append(None)
+            staged.append(None)
             continue
         size = row_size(chars, own)
         # 도형이 적은 짧은 줄("은?")은 OCR 상자로 재서 6pt처럼 크게 어긋나기도 한다: 쪽의 발문 크기로
@@ -555,19 +857,52 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
         # (안 합치면 글자 폭이 좁게 잡혀 '설 명'처럼 단어 안이 띄어진다)
         used = {id(q) for q in pairs.values()}
         snapped_chars = [ch for ch in chars if id(ch) in pairs]
+        # (짝지은 도형과 가로로 겹치는 도형만: OCR 상자가 "33"을 한 글자로 덮어도 둘째 '3'은 따로 남긴다)
         for q in own:
             if id(q) in used or q.width > 1.2 * size:
                 continue
             best = max(snapped_chars, key=lambda ch: min(ch.x1, q.x1) - max(ch.x0, q.x0), default=None)
-            if best is not None and min(best.x1, q.x1) - max(best.x0, q.x0) > 0.3 * q.width:
+            if best is not None and min(best.x1, q.x1) - max(best.x0, q.x0) > 0.3 * q.width \
+                    and (not snapped or min(pairs[id(best)].x1, q.x1) - max(pairs[id(best)].x0, q.x0) > 0):
                 best.x0, best.x1 = min(best.x0, q.x0), max(best.x1, q.x1)
+        staged.append((r, chars, real, own, size, snapped, pairs))
+    _reread_glyphs(page, [st for st in staged if st is not None and st[5]], straight, stats)
+    out: list[Optional[_Frag]] = []
+    seen: list = []  # (한글 글자, 짝지은 원문 도형 모양)
+    for st in staged:
+        if st is None:
+            out.append(None)
+            continue
+        r, chars, real, own, size, snapped, pairs = st
         # 단어 안 글자 간격은 붙이고 단어 사이만 띄운다. 원문 도형에 맞춘 줄은 잉크 사이 간격이 단어 안(글자 높이의 0.2배
         # 이하)과 단어 사이(0.4배 이상)로 뚜렷이 나뉘어 글자 크기의 28%로, OCR 상자 그대로인 줄은 줄 안 보통 간격보다
         # 글자 크기의 20% 넘게(그리고 38% 넘게) 넓은 곳
+        # 따옴표 방향은 앞뒤 간격으로(OCR은 방향 없는 "'"로 읽기도 해 닫는 따옴표로 보고 앞을 붙였다: "회사의‘구매")
+        # 작은따옴표 도형(글자 크기의 절반보다 작고 줄 위쪽)이면 그 모양으로, 아니면 앞뒤 간격으로
+        quotes: dict[int, str] = {}
+        if snapped:
+            for k, ch in enumerate(chars):
+                if ch.c not in "'‘’`\"“”:：":
+                    continue
+                q = next((q for q in own if ch.x0 - 0.3 <= (q.x0 + q.x1) / 2 <= ch.x1 + 0.3), None)
+                top = q is not None and q.height <= 0.45 * size and q.width <= 0.3 * size                     and (q.y0 + q.y1) / 2 < (r[1] + r[3]) / 2
+                if top and abs(mass.get(id(q), 0.5) - 0.525) > 0.03:  # 여닫는 모양이 다른 글꼴
+                    quotes[id(ch)] = "‘" if mass[id(q)] < 0.525 else "’"
+                elif (top or ch.c not in ":：") and 0 < k < len(chars) - 1:  # 같은 모양이면 앞뒤 간격으로
+                    before, after = ch.x0 - chars[k - 1].x1, chars[k + 1].x0 - ch.x1
+                    double = ch.c in "\"“”"
+                    if before > after + 0.1 * size:
+                        quotes[id(ch)] = "“" if double else "‘"
+                    elif after > before + 0.1 * size:
+                        quotes[id(ch)] = "”" if double else "’"
+                if id(ch) in quotes:
+                    ch.c = quotes[id(ch)]
         gaps = [b.x0 - a.x1 for a, b in zip(chars, chars[1:])]
         base = statistics.median(gaps) if gaps else 0.0
         # (글자를 옮기지 않고 앞 글자 상자 폭만 바꾼다: 줄 안의 진짜 글자와 순서가 섞이지 않게)
         for a, b, gap in zip(chars, chars[1:], gaps):
+            if any(a.x1 - 0.5 <= (g.x0 + g.x1) / 2 <= b.x0 + 0.5 for g in real):
+                continue  # 사이에 진짜 글자("3. ㉠, ㉡"의 ㉠): 띄어쓰기는 진짜 글자와의 간격으로 정해진다
             limit = 0.28 * size if snapped else max(base + 0.2 * size, 0.38 * size)
             word = gap > limit and b.c not in "?.,!)’'”>:" and a.c not in "‘“(<"
             if not word and gap > 0:
@@ -575,6 +910,9 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
             elif word and gap < 0.35 * size:
                 a.x1 = max(a.x0 + 0.1, b.x0 - 0.35 * size)
         chars = ocr.fix_chars(chars)
+        for ch in chars:
+            if id(ch) in quotes:
+                ch.c = quotes[id(ch)]
         bold = statistics.mode(g.bold for g in real) if real else True
         glyphs = []
         for k, ch in enumerate(chars):
@@ -588,18 +926,36 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
             if ch.conf < ocr.LOW_CONF:  # 수만 센다(음영을 넣으면 원문에 없는 형광펜처럼 보인다)
                 stats["ocr_low_chars"] += 1
             glyphs.append(g)
-        # 진짜 글자 둘 사이에 작게 칠한 가로 도형은 물결표("ⓐ~ⓔ", "㉠~㉤"의 '~'가 글자 도형보다 작아 빠졌다)
-        reals = sorted(real, key=lambda g: g.x0)
+            q = pairs.get(id(ch))
+            if q is not None and "가" <= ch.c <= "힣" and id(q) in sigs:
+                seen.append((g, sigs[id(q)]))
+        # 진짜 글자·'[A]' 표시 둘 사이에 작게 칠한 가로 도형은 물결표("ⓐ~ⓔ", "㉠~㉤", "[A]~[E]"의 '~'가 글자 도형보다
+        # 작아 빠졌다)
+        reals = sorted(real + [g for g in glyphs if g.c in "[]"], key=lambda g: g.x0)
         for a, b in zip(reals, reals[1:]):
+            if a.c == "[" or b.c == "]":
+                continue
             gc, gh = (a.y0 + a.y1) / 2, a.y1 - a.y0
-            q = next((q for q in marks if a.x1 - 0.5 <= q.x0 and q.x1 <= b.x0 + 0.5 and q.width >= 1.5 * q.height
+            q = next((q for q in marks if (a.x0 + a.x1) / 2 < q.x0 and q.x1 < (b.x0 + b.x1) / 2 and q.width >= 1.5 * q.height
                       and q.height <= 0.35 * gh and q.width <= gh and abs((q.y0 + q.y1) / 2 - gc) <= 0.35 * gh), None)
+            if q is not None:  # 그 자리를 다른 기호("“" "ㆍ")로 읽은 것은 버린다
+                glyphs = [g for g in glyphs if not (q.x0 - 0.5 <= (g.x0 + g.x1) / 2 <= q.x1 + 0.5 and not "가" <= g.c <= "힣")]
             if q is not None and not any(a.x1 <= (g.x0 + g.x1) / 2 <= b.x0 for g in glyphs):
                 glyphs.append(Glyph("~", q.x0, gc - 0.6 * size, q.x1, gc + 0.6 * size, size, bold))
                 stats["ocr_tilde"] += 1
         glyphs.sort(key=lambda g: g.x0)
         stats["ocr_rows"] += 1
         out.append(_Frag(glyphs, glyphs[0].x0, min(g.y0 for g in glyphs), glyphs[-1].x1, max(g.y1 for g in glyphs), size))
+    # 한 쪽 안에서 같은 모양 도형을 같은 한글로 2번 넘게(다르게 읽은 것의 2배 넘게) 읽었으면, 다르게 읽은 것은 그 글자로
+    # (차례의 "[사회]" 셋 중 하나를 "[사외]"로)
+    votes: dict = defaultdict(Counter)
+    for g, sig in seen:
+        votes[sig][g.c] += 1
+    for g, sig in seen:
+        best, n = votes[sig].most_common(1)[0]
+        if best != g.c and n >= 2 and n >= 2 * votes[sig][g.c] and n >= 0.6 * sum(votes[sig].values()):
+            g.c = best
+            stats["ocr_page_consensus"] += 1
     return out
 
 
@@ -1198,6 +1554,7 @@ def extract(pdf_path: str) -> Extraction:
     stats = Counter()
 
     bracket_id = 0
+    ocr_frags: list[_Frag] = []  # OCR로 읽은 윤곽선 글자 줄(문서 어휘로 고친다: _fix_by_vocab)
     wide_ids: set[int] = set()
     pill_order: dict[str, int] = {}  # 알약 번호 그림 해시 -> 처음 나온 차례(1, 2, ...)
     pill_glyphs: list[tuple[Glyph, int]] = []
@@ -1237,6 +1594,7 @@ def extract(pdf_path: str) -> Extraction:
             # 글자로 읽을 수 있으면(OCR) 글 조각으로, 사이에 낀 진짜 글자는 그대로 두고 그 자리는 지우고 읽는다
             read = _ocr_rows(doc[pno - 1], outline_rects, kept, stats)
             kept += [f for f in read if f is not None]
+            ocr_frags += [f for f in read if f is not None]
             outline_rects = [r for r, f in zip(outline_rects, read) if f is None]
         if outline_rects:
             stats["outline_text_rows"] += len(outline_rects)
@@ -1814,6 +2172,10 @@ def extract(pdf_path: str) -> Extraction:
                     stats["box_continuations"] += 1
                     continue
             flow.append(it)
+
+    if ocr_frags:
+        stats["ocr_vocab_fixed"] += _fix_by_vocab(ocr_frags, pages)
+        stats["ocr_line_end_spaces"] += _ocr_line_end_spaces(ocr_frags, pages)
 
     if pill_glyphs:
         word = _pill_word(pages)

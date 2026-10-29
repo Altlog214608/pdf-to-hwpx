@@ -1385,3 +1385,167 @@ def test_big_number_tight_pitch_lines_do_not_overlap(tmp_path):
     doc = build_document(extract(str(pdf)))
     stems = [q.stem for q in doc.questions] + [it for it in doc.items if isinstance(it, Para) and it.text.startswith("4.")]
     assert stems and all(p.line_pct >= 120 for p in stems), [p.line_pct for p in stems]
+
+
+def test_ocr_masks_are_page_aligned(tmp_path):
+    """잘라 낸 줄 그림의 픽셀 좌표는 쪽 기준이라, 지울 영역(진짜 글자 자리·상자 선)을 0 기준으로 계산하면 하나도 지워지지
+    않았다(㉠ 자리를 "ㅇ"·"3"으로 읽고, 낱말 상자의 오른쪽 선을 글자 획으로 읽어 "불구지천"이 "불구지첩")."""
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+
+    if not ocr.available():
+        pytest.skip("Tesseract 한국어 모델 없음")
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=200)
+    page.insert_text((210, 120), "가나다라마바사", fontname="korea", fontsize=16)
+    rect = (200, 100, 360, 128)
+    full = "".join(c.c for c in ocr.read_rows(page, [rect], [[]])[0])
+    cut = "".join(c.c for c in ocr.read_rows(page, [rect], [[(208, 100, 360, 128, 0.0)]])[0])
+    assert len(full) >= 5 and cut == ""
+
+
+def test_outline_rows_joined_by_symbol():
+    """'<'처럼 획이 적어 글자 도형으로 치지 않는 기호가 끼면 "할 때, <보기>의"가 두 줄로 갈려 '<'를 잃었다 → 기호는 글자
+    2개 넘는 두 줄을 잇고(글자 수에는 넣지 않는다)."""
+    import pymupdf as fitz
+
+    from pdf2hwpx.extract import _outline_rows
+    from tests.synth_pdf import _outline_glyph
+
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=100)
+    for k in range(4):
+        _outline_glyph(page, 20 + 9 * k, 20, 8, 9)
+    sh = page.new_shape()  # '<' (선분 6개로 칠한 기호), 앞 줄 끝에서 13pt
+    sh.draw_polyline([fitz.Point(60, 24.5), fitz.Point(65, 21), fitz.Point(65, 22.5), fitz.Point(62, 24.5),
+                      fitz.Point(65, 26.5), fitz.Point(65, 28), fitz.Point(60, 24.5)])
+    sh.finish(color=None, fill=(0, 0, 0), closePath=True)
+    sh.commit()
+    for k in range(4):  # 앞 줄과 15pt(줄로 잇는 1.5배 넘게) 떨어진 다음 줄
+        _outline_glyph(page, 70 + 9 * k, 20, 8, 9)
+    rows = _outline_rows(page.get_drawings())
+    assert len(rows) == 1 and rows[0][4] == 8 and rows[0][0] <= 20 and rows[0][2] >= 105
+
+
+def test_align_keeps_hangul_off_tiny_marks():
+    """OCR 상자가 어긋나면 "이다."의 '다'를 마침표 도형과 짝지어, 남은 '다' 도형을 다시 읽어 "이이다"가 됐다 → 한글 글자는
+    글자 크기의 3분의 1보다 작은 도형과 짝짓지 않는다."""
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+    from pdf2hwpx.extract import _align
+
+    shapes = [fitz.Rect(217.7, 112, 225.3, 121), fitz.Rect(226.7, 112, 234.7, 121), fitz.Rect(235.4, 119, 236.8, 120.3)]
+    chars = [ocr.OcrChar("이", 222, 112, 228, 121, 33.0, 0), ocr.OcrChar("다", 231, 112, 237, 121, 33.0, 0)]
+    pairs = {ch.c: q for ch, q in _align(chars, shapes, 10.0)}
+    assert pairs["다"] is shapes[1] and all(q is not shapes[2] for q in pairs.values())
+
+
+def test_reread_bracket_labels_marks_and_latin(monkeypatch):
+    """윤곽선 발문의 '[A]' 표시('[' ']'는 좁은 직선 도형)는 그 사이 도형을 영문 대문자로 읽어 "[A]"로(OCR은 "[시", "[ A",
+    "[4 ]티^["로), OCR이 놓친 작은 도형은 위쪽이면 따옴표·아래쪽 네모면 마침표로, 한글 아닌 낱자가 섞인 곳("1ㄴ00")은
+    영문 대문자·숫자로 다시 읽는다("TLCD")."""
+    from collections import Counter
+
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+    from pdf2hwpx.extract import _reread_glyphs
+
+    page = fitz.open().new_page(width=400, height=200)
+    lb, a, rb = fitz.Rect(65.6, 106, 68.0, 114.8), fitz.Rect(68.5, 106.8, 74.9, 114.0), fitz.Rect(75.1, 106, 77.5, 114.8)
+    reul = fitz.Rect(78.7, 106.2, 87.0, 114.7)
+    dot = fitz.Rect(88.0, 112.5, 89.6, 114.1)
+    tl = [fitz.Rect(100 + 7 * k, 106, 106 + 7 * k, 114.8) for k in range(4)]
+    own = [lb, a, rb, reul, dot] + tl
+    chars = [ocr.OcrChar("[", 65, 106, 70, 115, 0.0, 0), ocr.OcrChar("시", 70, 106, 78, 115, 40.0, 0),
+             ocr.OcrChar("를", 78.7, 106, 87, 115, 93.0, 0)]
+    chars += [ocr.OcrChar(c, q.x0, q.y0, q.x1, q.y1, 90.0, 1) for c, q in zip("1ㄴ00", tl)]
+
+    def read_rows(page, rects, masks, allow="", line=False):
+        if allow == "ABCDEFGHIJ":
+            return [[ocr.OcrChar("A", 0, 0, 1, 1, 90.0, 0)] for _ in rects]
+        if "Z" in allow:
+            return [[ocr.OcrChar(c, 0, 0, 1, 1, 90.0, 0) for c in "TLCD"] for _ in rects]
+        return [[] for _ in rects]
+    monkeypatch.setattr(ocr, "read_rows", read_rows)
+    staged = [((60, 104, 140, 117), chars, [], own, 10.0, True, {})]
+    _reread_glyphs(page, staged, {id(lb), id(rb)}, Counter())
+    assert "".join(ch.c for ch in chars) == "[A]를.TLCD"
+
+
+def test_reread_skips_parentheses_and_multi_glyph_brackets(monkeypatch):
+    """괄호 '(가)'(곡선)와 '[과학]'(괄호 안 여러 글자)은 '[A]' 표시가 아니다("[J]", "[H]"로 읽었다)."""
+    from collections import Counter
+
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+    from pdf2hwpx.extract import _reread_glyphs
+
+    page = fitz.open().new_page(width=400, height=200)
+    lb, g1, g2, rb = (fitz.Rect(65.6, 106, 68.0, 114.8), fitz.Rect(69, 106, 77, 114.8), fitz.Rect(78, 106, 86, 114.8),
+                      fitz.Rect(87, 106, 89.4, 114.8))
+
+    def read_rows(page, rects, masks, allow="", line=False):
+        return [[ocr.OcrChar("H", 0, 0, 1, 1, 90.0, 0)] for _ in rects]
+    monkeypatch.setattr(ocr, "read_rows", read_rows)
+    chars = [ocr.OcrChar(c, q.x0, q.y0, q.x1, q.y1, 95.0, 0) for c, q in zip("[과학]", (lb, g1, g2, rb))]
+    _reread_glyphs(page, [((60, 104, 140, 117), chars, [], [lb, g1, g2, rb], 10.0, True, {})], {id(lb), id(rb)}, Counter())
+    assert "".join(ch.c for ch in chars) == "[과학]"
+    paren = [ocr.OcrChar(c, q.x0, q.y0, q.x1, q.y1, 95.0, 0) for c, q in zip("(가)", (lb, g1, rb))]
+    _reread_glyphs(page, [((60, 104, 140, 117), paren, [], [lb, g1, rb], 10.0, True, {})], set(), Counter())
+    assert "".join(ch.c for ch in paren) == "(가)"
+
+
+def test_vocab_fixes_and_line_end_spaces():
+    """OCR 낱말이 본문에 없고 본문에 여러 번 나오는 낱말과 받침 ㅁ/ㅂ만 다르면 고친다("스놈"→"스놉"; "설명한"→"설명할"처럼
+    다른 받침은 건드리지 않는다). OCR 줄 끝은 본문 어휘로 띄어쓰기를 정한다: 붙인 말이 본문에 있으면 붙이고("적절하/지"),
+    다음 줄이 조사면 붙이고("반응/으로"), 앞 낱말이 조사·어미·관형형으로 끝나면 띄운다("것으로/적절하지")."""
+    from pdf2hwpx.extract import PageModel, _Frag, _fix_by_vocab, _ocr_line_end_spaces
+    from pdf2hwpx.model import Glyph, Line, PageInfo
+
+    def glyphs(text, x, y):
+        out, cx = [], x
+        for c in text:
+            if c == " ":
+                out.append(Glyph(" ", cx, y, cx + 3, y + 10, 10.0))
+                cx += 3
+                continue
+            out.append(Glyph(c, cx, y, cx + 9, y + 10, 10.0))
+            cx += 9
+        return out
+
+    def line(gs):
+        return Line(1, 0, gs, gs[0].x0, gs[0].y0, gs[-1].x1, gs[-1].y1, 10.0, 10.0)
+    body = [line(glyphs("스놉 효과 스놉 효과 스놉 효과 설명할 설명할 설명할 적절하지 대화의 것으로 반응", 40, 300))]
+    texts = ["스놈 설명한 적절하", "지 않은", "이해한 것으로", "적절하지 않은", "보인 반응", "으로 적절한"]
+    gss = [glyphs(t, 40, 100 + 14 * k + 12 * (k // 2)) for k, t in enumerate(texts)]
+    frags = [_Frag([g for g in gs if not g.is_space], gs[0].x0, gs[0].y0, gs[-1].x1, gs[-1].y1, 10.0) for gs in gss]
+    ocr_lines = [line(gs) for gs in gss]
+    pm = PageModel(PageInfo(1, 595, 842, 297, 0, 842, (36, 280), (300, 560)), ocr_lines + body, [], [])
+    assert _fix_by_vocab(frags, [pm]) == 1
+    assert "".join(g.c for g in gss[0] if not g.is_space) == "스놉설명한적절하"
+    _ocr_line_end_spaces(frags, [pm])
+    assert [ln.trailing_space for ln in ocr_lines[::2]] == [False, True, False]
+
+
+def test_boxed_letter_and_fullwidth_punct():
+    """네모(□) 안에 따로 찍은 글자("□"+"A")는 글자 테두리를 친 그 글자 하나로("□A 에게"가 "A에게"). OCR의 전각 쉼표는 보통 쉼표로."""
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+    from pdf2hwpx.extract import _page_fragments
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=100)
+    page.insert_text((20, 50), "□", fontname="korea", fontsize=10)
+    page.insert_text((22.2, 48), "A", fontname="helv", fontsize=6)
+    page.insert_text((31, 50), "에게", fontname="korea", fontsize=10)
+    frags = _page_fragments(page)
+    gs = sorted((g for f in frags for g in f.glyphs if not g.is_space), key=lambda g: g.x0)
+    assert [g.c for g in gs] == ["A", "에", "게"]
+    assert gs[0].boxed and gs[0].size == 10.0
+    chars = [ocr.OcrChar(c, k, 0, k + 1, 1, 90.0, 0) for k, c in enumerate("때，세")]
+    assert "".join(c.c for c in ocr.fix_chars(chars)) == "때,세"

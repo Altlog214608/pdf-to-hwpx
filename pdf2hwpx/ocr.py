@@ -78,7 +78,7 @@ def read_rows(page: fitz.Page, rects: list[tuple[float, float, float, float]],
               masks: list[list[tuple[float, float, float, float]]], allow: str = "",
               line: bool = False) -> Optional[list[list[OcrChar]]]:
     """쪽의 줄 영역들을 읽어 줄마다 글자 목록(원문 좌표). masks: 줄마다 흰색으로 지울 영역(진짜 글자가 이미 있는 곳,
-    원문자는 잉크가 글자 상자보다 조금 커서 1.5pt 넓게). allow: 이 글자들만(문제 번호·[A] 표시를 다시 읽을 때).
+    원문자는 잉크가 글자 상자보다 조금 커서 1.5pt 넓게. 다섯째 값이 있으면 그만큼만 넓게). allow: 이 글자들만(문제 번호·[A] 표시를 다시 읽을 때).
     line: 줄 하나만 한 글줄로 읽는다(여러 줄을 이어 붙여 읽으면 큰 번호 때문에 한 줄을 여러 글줄로 쪼개 읽기도 한다)."""
     lang = "eng" if allow else "kor"  # 한국어 모델은 글자를 좁혀 주면 영문 대문자를 내지 못한다
     if not rects or lang not in _langs():
@@ -87,8 +87,11 @@ def read_rows(page: fitz.Page, rects: list[tuple[float, float, float, float]],
     for r, ms in zip(rects, masks):
         pix = page.get_pixmap(clip=fitz.Rect(r), matrix=fitz.Matrix(ZOOM, ZOOM), colorspace=fitz.csGRAY, alpha=False)
         for m in ms:
-            ir = fitz.IRect(int((m[0] - 1.5 - r[0]) * ZOOM), int((m[1] - 1.5 - r[1]) * ZOOM),
-                            int((m[2] + 1.5 - r[0]) * ZOOM), int((m[3] + 1.5 - r[1]) * ZOOM)) & pix.irect
+            pad = m[4] if len(m) > 4 else 1.5  # 다섯째 값: 지울 때 둘레 여유(가는 선은 선 두께만큼만)
+            # (잘라 낸 그림의 픽셀 좌표는 쪽 기준이라 그림 왼쪽 위(pix.x, pix.y)를 더한다)
+            ir = fitz.IRect(pix.x + int((m[0] - pad - r[0]) * ZOOM), pix.y + int((m[1] - pad - r[1]) * ZOOM),
+                            pix.x + int((m[2] + pad - r[0]) * ZOOM + 0.999),
+                            pix.y + int((m[3] + pad - r[1]) * ZOOM + 0.999)) & pix.irect
             if not ir.is_empty:
                 pix.set_rect(ir, (255,))
         pixes.append(pix)
@@ -150,7 +153,11 @@ _GIJANG = re.compile(r"[기거]장(?=적절|유사|가까운|큰|중요)")
 
 def fix_chars(chars: list[OcrChar]) -> list[OcrChar]:
     """줄 하나의 글자 교정. 번호 뒤 군더더기 점("3.。", "1..")은 빼고, 따옴표는 한국어 시험지의 홑따옴표 ‘ ’로."""
-    chars = [ch for k, ch in enumerate(chars) if not (ch.c in "。,·." and k > 0 and chars[k - 1].c == "." and k <= 3)]
+    # (번호 점에 붙은 것만: 떨어진 쉼표는 "3. ㉠, ㉡"의 쉼표)
+    chars = [ch for k, ch in enumerate(chars) if not (ch.c in "。,·." and k > 0 and chars[k - 1].c == "." and k <= 3
+                                                      and (ch.c != "," or ch.x0 - chars[k - 1].x1 < 0.5 * (ch.y1 - ch.y0 + 1)))]
+    for ch in chars:  # 전각 문장부호는 보통 것으로
+        ch.c = {"，": ",", "．": ".", "？": "?"}.get(ch.c, ch.c)
     text = "".join(ch.c for ch in chars)
     m = _WITGEUL.match(text)
     if m:
