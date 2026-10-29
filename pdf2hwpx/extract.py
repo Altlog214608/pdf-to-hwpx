@@ -191,6 +191,11 @@ def _dark(color: Optional[str]) -> bool:
 # Wingdings 글꼴은 일반 글자 자리에 기호를 그린다(예: 'ü'가 체크 표시). 문제집에 자주 나오는 것만 같은 모양의 유니코드로.
 WINGDINGS = {"ü": "✓", "û": "✗", "ý": "☒", "þ": "☑", "è": "→", "ç": "←", "é": "↑", "ê": "↓",
              "ð": "⇨", "ï": "⇦", "ñ": "⇧", "ò": "⇩", "l": "●", "n": "■", "u": "◆", "§": "▪", "o": "□", "¡": "○"}
+# 한글 수식(HancomEQN 글꼴)은 글자를 사용자 영역(U+E000~)에 매긴다: 영문 대문자 E000~, 숫자 E033~, '/' E054
+# (그대로 두면 한글에서 빈칸·엉뚱한 기호로 나온다: "L²"이 "'"로). 작게 올려 쓴 숫자는 위첨자로
+HANCOM_EQN = {**{chr(0xE000 + k): chr(65 + k) for k in range(26)}, **{chr(0xE033 + k): str(k) for k in range(10)},
+              chr(0xE054): "/"}
+SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
 MISMAPPED_SPACE = "$%#&@\ufffd"  # \ufffd: 글자 정보가 없는 글자
 
 
@@ -208,6 +213,7 @@ def _page_fragments(page: fitz.Page, strokes: Optional[dict] = None) -> list[_Fr
             continue
         for line in block.get("lines", []):
             glyphs: list[Glyph] = []
+            sup: list[int] = []  # 수식 글자 자리
             for span in line.get("spans", []):
                 size = float(span.get("size") or 0)
                 if size < HIDDEN_TEXT_MAX_SIZE:
@@ -216,6 +222,7 @@ def _page_fragments(page: fitz.Page, strokes: Optional[dict] = None) -> list[_Fr
                 bold = _is_bold(font, flags, cflags)
                 color = _color(int(span.get("color") or 0))
                 wingdings = "wingdings" in font.lower()
+                eqn = "hancomeqn" in font.lower()
                 st = strokes.setdefault(font, [0, 0, []]) if strokes is not None else None
                 stroked = (cflags & 48) == 48
                 for ch in span.get("chars", []):
@@ -224,6 +231,9 @@ def _page_fragments(page: fitz.Page, strokes: Optional[dict] = None) -> list[_Fr
                         continue
                     if wingdings:
                         c = WINGDINGS.get(c, c)
+                    if eqn:
+                        c = HANCOM_EQN.get(c, c)
+                        sup.append(len(glyphs))
                     x0, y0, x1, y1 = ch["bbox"]
                     if c == " " or _mismapped_space(c, x1 - x0, size):
                         c = " "
@@ -235,6 +245,11 @@ def _page_fragments(page: fitz.Page, strokes: Optional[dict] = None) -> list[_Fr
                             st[2].append(glyphs[-1])
             if not glyphs or all(g.is_space for g in glyphs):
                 continue
+            body = max(g.size for g in glyphs)
+            for k in sup:  # 줄 글자보다 작은 수식 숫자는 위첨자(크기는 줄 글자대로)
+                g = glyphs[k]
+                if g.c.isdigit() and g.size < 0.8 * body:
+                    g.c, g.size = g.c.translate(SUPERSCRIPT), body
             solid = [g for g in glyphs if not g.is_space]
             frags.append(_Frag(glyphs, min(g.x0 for g in solid), min(g.y0 for g in solid),
                                max(g.x1 for g in solid), max(g.y1 for g in solid),
@@ -362,7 +377,9 @@ def _outline_rows(drawings: list[dict]) -> list[list[float]]:
         for row in rows:
             last = row[-1]
             h = max(r.height, last.height)
-            if min(r.y1, last.y1) - max(r.y0, last.y0) >= 0.4 * min(r.height, last.height) and -2 <= r.x0 - last.x1 <= 1.5 * h:
+            # 맨 앞 큰 문제 번호 뒤는 더 넓게 띄기도 한다("4.  <보기>는": 번호가 따로 떨어져 줄에서 빠졌다)
+            gap = 2.5 * h if len(row) == 1 and last.height >= 1.15 * r.height else 1.5 * h
+            if min(r.y1, last.y1) - max(r.y0, last.y0) >= 0.4 * min(r.height, last.height) and -2 <= r.x0 - last.x1 <= gap:
                 row.append(r)
                 break
         else:
@@ -417,6 +434,23 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
     rows = ocr.read_rows(page, rects, [[(g.x0, g.y0, g.x1, g.y1) for g in gs] for gs in inside])
     if rows is None:
         return [None] * len(rects)
+    drawings = page.get_drawings()
+    shapes = [fitz.Rect(d["rect"]) for d in drawings if _glyph_path(d)]
+    marks = [fitz.Rect(d["rect"]) for d in drawings if d.get("fill") and "f" in (d.get("type") or "")
+             and max(float(v) for v in d["fill"][:3]) < 0.4 and not _glyph_path(d)]
+    owns =[sorted((q for q in shapes if r[0] <= (q.x0 + q.x1) / 2 <= r[2] and r[1] <= (q.y0 + q.y1) / 2 <= r[3]),
+                   key=lambda q: q.x0) for r in rects]
+
+    def missed(chars, own) -> int:  # 읽은 글자 상자가 덮지 못한 원문 글자 도형 수
+        return sum(not any(ch.x0 - 1.0 <= (q.x0 + q.x1) / 2 <= ch.x1 + 1.0 for ch in chars) for q in own)
+    # 원문 글자 도형을 여럿 놓친 줄은 그 줄만 한 글줄로 다시 읽어, 더 많이 덮으면 그것으로
+    # ("1. 윗글에서 언급된 …"을 큰 "1." 때문에 여러 글줄로 쪼개 읽어 앞부분을 잃었다)
+    for k, (chars, own, real) in enumerate(zip(rows, owns, inside)):
+        if len(own) >= 4 and missed(chars, own) > max(2, 0.15 * len(own)):
+            again = ocr.read_rows(page, [rects[k]], [[(g.x0, g.y0, g.x1, g.y1) for g in real]], line=True)
+            if again and missed(again[0], own) < missed(chars, own):
+                rows[k] = again[0]
+                stats["ocr_line_retry"] += 1
     for k, (chars, real) in enumerate(zip(rows, inside)):
         # 진짜 글자 자리(지운 자리의 자국)의 OCR 글자, 그 바로 옆의 확신도 낮은 기호는 버린다
         def stray(ch) -> bool:
@@ -431,16 +465,34 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
                     return True
                 if ch.conf < 70 and not "가" <= ch.c <= "힣" and g.x0 - 0.8 * g.size <= cx <= g.x1 + 0.8 * g.size:
                     return True
+                # 지운 자리에서 시작하는 숫자·영문(지운 ⓐ의 자국을 "3"으로)
+                if ch.conf < 90 and ch.c.isascii() and ch.c.isalnum() and g.x0 <= ch.x0 < g.x1 + 0.2 * g.size:
+                    return True
             return False
         rows[k] = [ch for ch in chars if not stray(ch)]
     # 맨 앞 번호, '[' 뒤 표시 글자는 그 글자들만 다시 읽는다
     redo: dict[tuple[int, str], tuple] = {}
     for k, chars in enumerate(rows):
+        # 번호는 첫 진짜 글자 앞에서, 크게 띈 곳 앞에서 끝난다(지운 ⓐ 자리를 "3"으로 읽어 "5.3"을 번호로 다시 읽었다)
+        stop = min((g.x0 for g in inside[k]), default=rects[k][2])
         n = 0
-        while n < len(chars) and chars[n].c in LEAD_NUM:
+        while n < len(chars) and chars[n].c in LEAD_NUM and chars[n].x0 < stop \
+                and (not n or chars[n].x0 - chars[n - 1].x1 < 0.6 * (rects[k][3] - rects[k][1])):
             n += 1
-        if n and (n == len(chars) or chars[n].c not in LEAD_NUM):
+        if n and (n == len(chars) or chars[n].c not in LEAD_NUM or chars[n].x0 >= stop
+                  or chars[n].x0 - chars[n - 1].x1 >= 0.6 * (rects[k][3] - rects[k][1])):
             redo[(k, "0123456789.")] = (rects[k][0], rects[k][1], chars[n - 1].x1 + 1.0, rects[k][3])
+        elif not n and len(owns[k]) >= 4:
+            # 맨 앞이 줄 글자보다 큰 도형(큰 문제 번호)이고 크게 띄었는데 숫자로 못 읽은 줄("4. <보기>는"의 "4. <"를
+            # ":"로 읽어 문제로 잡히지 않았다): 번호 도형 자리를 숫자로 다시 읽는다
+            own = owns[k]
+            rest = sorted(q.height for q in own[1:])
+            big = [q for q in own if q.height >= 1.15 * rest[int(0.75 * (len(rest) - 1))]]
+            m = 0
+            while m < len(own) and own[m] in big and (not m or own[m].x0 - own[m - 1].x1 < 0.5 * own[m].height):
+                m += 1
+            if 0 < m < len(own) and own[m].x0 - own[m - 1].x1 >= 0.8 * own[0].height:
+                redo[(k, "0123456789.")] = (rects[k][0], rects[k][1], own[m].x0 - 1.0, rects[k][3])
         for n, ch in enumerate(chars):
             if ch.c == "[":
                 h = ch.y1 - ch.y0
@@ -462,10 +514,6 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
             elif not (allow[0] == "[" and re.fullmatch(r"\[[A-H]\]?", text)):
                 continue
             rows[k] = sorted([ch for ch in rows[k] if ch not in old] + new, key=lambda ch: ch.x0)
-    shapes = [fitz.Rect(d["rect"]) for d in page.get_drawings() if _glyph_path(d)]
-
-    owns = [sorted((q for q in shapes if r[0] <= (q.x0 + q.x1) / 2 <= r[2] and r[1] <= (q.y0 + q.y1) / 2 <= r[3]),
-                   key=lambda q: q.x0) for r in rects]
 
     def row_size(chars, own) -> float:
         # 원문 글자 도형 높이로 잰다(OCR은 단어 끝 글자에 단어 상자 높이를 붙이기도 해서, 그런 글자가 많은 짧은 줄은
@@ -476,7 +524,10 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
         hangul = [ch.y1 - ch.y0 for ch in chars if "가" <= ch.c <= "힣"]
         return statistics.median(hangul) / 0.88 if hangul else statistics.median(ch.y1 - ch.y0 for ch in chars) / 0.8
     # 한 쪽의 발문은 같은 크기: 줄마다 잰 크기가 쪽 가운데값과 12% 안이면 가운데값으로("은?"처럼 짧은 줄은 잰 값이 흔들린다)
-    page_sizes = [row_size(chars, own) for chars, own in zip(rows, owns) if chars]
+    def few(own) -> bool:  # 크기를 잴 글자 도형이 셋도 안 되는 짧은 줄
+        return sum(q.height >= 0.6 * max(o.height for o in own) for q in own) < 3 if own else True
+    page_sizes = [row_size(chars, own) for chars, own in zip(rows, owns) if chars and not few(own)] \
+        or [row_size(chars, own) for chars, own in zip(rows, owns) if chars]
     page_size = statistics.median(page_sizes) if page_sizes else 0.0
     out: list[Optional[_Frag]] = []
     for r, chars, real, own in zip(rects, rows, inside, owns):
@@ -485,7 +536,8 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
             out.append(None)
             continue
         size = row_size(chars, own)
-        if abs(size - page_size) < 0.12 * page_size:
+        # 도형이 적은 짧은 줄("은?")은 OCR 상자로 재서 6pt처럼 크게 어긋나기도 한다: 쪽의 발문 크기로
+        if abs(size - page_size) < 0.12 * page_size or (few(own) and page_size):
             size = page_size
         # 글자 위치는 원문 윤곽선 글자 도형에 맞춘다(글자 하나 = 도형 하나, OCR 상자는 단어를 나눈 것이라 부정확):
         # 띄어쓰기를 원문 간격 그대로 잴 수 있다
@@ -529,11 +581,23 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
             sz = size
             if ch.c.isdigit() and all(c.c.isdigit() for c in chars[:k]):  # 맨 앞 번호
                 sz = max(size, (ch.y1 - ch.y0) / 0.72)
+            elif ch.c == "." and k and all(c.c.isdigit() for c in chars[:k]):  # 번호 뒤 마침표는 번호 크기로
+                sz = glyphs[-1].size
             cy = (ch.y0 + ch.y1) / 2 if sz > size else (r[1] + r[3]) / 2
             g = Glyph(ch.c, ch.x0, cy - 0.6 * sz, ch.x1, cy + 0.6 * sz, sz, bold)
             if ch.conf < ocr.LOW_CONF:  # 수만 센다(음영을 넣으면 원문에 없는 형광펜처럼 보인다)
                 stats["ocr_low_chars"] += 1
             glyphs.append(g)
+        # 진짜 글자 둘 사이에 작게 칠한 가로 도형은 물결표("ⓐ~ⓔ", "㉠~㉤"의 '~'가 글자 도형보다 작아 빠졌다)
+        reals = sorted(real, key=lambda g: g.x0)
+        for a, b in zip(reals, reals[1:]):
+            gc, gh = (a.y0 + a.y1) / 2, a.y1 - a.y0
+            q = next((q for q in marks if a.x1 - 0.5 <= q.x0 and q.x1 <= b.x0 + 0.5 and q.width >= 1.5 * q.height
+                      and q.height <= 0.35 * gh and q.width <= gh and abs((q.y0 + q.y1) / 2 - gc) <= 0.35 * gh), None)
+            if q is not None and not any(a.x1 <= (g.x0 + g.x1) / 2 <= b.x0 for g in glyphs):
+                glyphs.append(Glyph("~", q.x0, gc - 0.6 * size, q.x1, gc + 0.6 * size, size, bold))
+                stats["ocr_tilde"] += 1
+        glyphs.sort(key=lambda g: g.x0)
         stats["ocr_rows"] += 1
         out.append(_Frag(glyphs, glyphs[0].x0, min(g.y0 for g in glyphs), glyphs[-1].x1, max(g.y1 for g in glyphs), size))
     return out
@@ -560,11 +624,16 @@ def _merge_outline_rows(rows: list[list[float]], frags: list[_Frag]) -> list[tup
                     continue
                 ivs = sorted((g.x0, g.x1) for f in frags for g in f.glyphs if not g.is_space
                              and a[2] - 2 <= g.x0 and g.x1 <= b[0] + 2 and max(a[1], b[1]) - 2 <= (g.y0 + g.y1) / 2 <= min(a[3], b[3]) + 2)
+                # 진짜 글자가 이어 주면 간격은 큰 줄 높이로 잰다(맨 앞 큰 번호가 든 줄: "<보기>의 ㉮~㉰에"의 ㉮·㉰ 사이가
+                # 작은 줄 높이로는 넘쳤다)
+                gap = 1.5 * (max(a[3] - a[1], b[3] - b[1]) if ivs else h)
+                # 맨 앞 큰 번호 하나뿐인 줄 뒤는 더 넓게 띄기도 한다("3.  ⓐ~ⓒ에")
+                first = 2.5 * (a[3] - a[1]) if a[4] <= 2 and a[3] - a[1] >= 1.15 * (b[3] - b[1]) else gap
                 cur = a[2]
                 for x0, x1 in ivs:
-                    if x0 - cur <= 1.5 * h:
+                    if x0 - cur <= (first if cur == a[2] else gap):
                         cur = max(cur, x1)
-                if b[0] - cur <= 1.5 * h:
+                if b[0] - cur <= gap:
                     a[:] = [a[0], min(a[1], b[1]), b[2], max(a[3], b[3]), a[4] + b[4]]
                     rows.remove(b)
                     merged = True
@@ -572,10 +641,18 @@ def _merge_outline_rows(rows: list[list[float]], frags: list[_Frag]) -> list[tup
             if merged:
                 break
     rows.sort(key=lambda r: r[1])
+
+    def lead(r) -> bool:
+        # 진짜 글자 줄 맨 앞에 윤곽선으로만 그린 큰 번호("4. <보기>의 …"의 "4"): 바로 오른쪽에 같은 줄 진짜 글자가 있고
+        # 왼쪽에는 없다(번호를 빼면 문제로 잡히지 않는다)
+        h = r[3] - r[1]
+        same = [g for f in frags for g in f.glyphs if not g.is_space and r[1] - 0.5 * h <= (g.y0 + g.y1) / 2 <= r[3] + 0.5 * h]
+        return r[4] <= 2 and h >= 0.9 * max((g.size for g in same), default=h) \
+            and any(0 <= g.x0 - r[2] <= 2.5 * h for g in same) and not any(r[0] - 1.5 * h <= g.x1 <= r[0] for g in same)
     keep: list[list[float]] = []
     for r in rows:
         h = r[3] - r[1]
-        if r[4] >= 3 or any(0 <= r[1] - k[3] <= 1.8 * h and k[0] - 2 * h <= r[0] <= k[2] for k in keep):
+        if r[4] >= 3 or any(0 <= r[1] - k[3] <= 1.8 * h and k[0] - 2 * h <= r[0] <= k[2] for k in keep) or lead(r):
             keep.append(r)
     out = []
     for x0, y0, x1, y1, _ in keep:
@@ -734,7 +811,6 @@ def _linked_boxes(rects: list[tuple[float, float, float, float]], segs: list[_Se
     links = [s for s in segs if (s.horizontal or s.vertical) and max(s.x1 - s.x0, s.y1 - s.y0) >= 8 and not on_edge(s)
              and not inside((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2) and not inside(s.x0, s.y0) and not inside(s.x1, s.y1)]
     n = len(top)
-    parent = list(range(n + len(links)))
 
     def find(i: int) -> int:
         while parent[i] != i:
@@ -753,7 +829,28 @@ def _linked_boxes(rects: list[tuple[float, float, float, float]], segs: list[_Se
     def near_seg(px: float, py: float, s: _Seg) -> bool:
         return s.x0 - 3 <= px <= s.x1 + 3 and s.y0 - 3 <= py <= s.y1 + 3
 
-    for k, s in enumerate(links):
+    # 비스듬한 선은 양 끝이 서로 다른 두 상자의 변에 닿을 때만 잇는 선이다((가) 1문단 아래 변 -> 2문단 위 변).
+    # 선은 좌표를 작은 값·큰 값으로 담아 두어 두 대각선 중 어느 쪽인지 모르므로 둘 다 본다
+    def on_side(px: float, py: float, r) -> bool:
+        return r[0] - 8 <= px <= r[2] + 8 and r[1] - 8 <= py <= r[3] + 8 \
+            and not (r[0] + 3 < px < r[2] - 3 and r[1] + 3 < py < r[3] - 3)
+
+    def diag_ends(s: _Seg) -> Optional[tuple[int, int]]:
+        for a, b in (((s.x0, s.y0), (s.x1, s.y1)), ((s.x0, s.y1), (s.x1, s.y0))):
+            i = next((i for i, r in enumerate(top) if on_side(*a, r)), None)
+            j = next((j for j, r in enumerate(top) if on_side(*b, r)), None)
+            if i is not None and j is not None and i != j:
+                return i, j
+        return None
+    diags = [s for s in segs if not (s.horizontal or s.vertical) and max(s.x1 - s.x0, s.y1 - s.y0) >= 15
+             and not inside((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2)]
+    diags = [(s, ij) for s in diags if (ij := diag_ends(s)) is not None]
+    links += [s for s, _ in diags]
+    parent = list(range(n + len(links)))
+    for k, (s, (i, j)) in enumerate(diags, start=len(links) - len(diags)):
+        parent[find(n + k)] = find(i)
+        parent[find(n + k)] = find(j)
+    for k, s in enumerate(links[:len(links) - len(diags)]):
         ends = ((s.x0, s.y0), (s.x1, s.y1))
         for i, r in enumerate(top):
             if any(touches(s, px, py, r) for px, py in ends):
@@ -1660,6 +1757,16 @@ def extract(pdf_path: str) -> Extraction:
             inner = [it for it in free if not crosses(it)]
             div_y0 = min((it.y0 for it in inner), default=bottom)
             div_y1 = max((it.y1 for it in inner), default=bottom)
+            # 한쪽 단에만 있고 다른 단 내용보다 아래이며 바로 아래 가로지르는 상자에 붙은 것(구조도 위 '지문 구조' 칸)은
+            # 아래 전폭 구간: 두 단에 두면 한글이 단 높이를 맞추며 오른쪽 단 맨 위로 옮긴다
+            ends = [max((it.y1 for it in inner if it.col == c), default=top) for c in (0, 1)]
+            edge = min((it.y0 for it in free if crosses(it) and it.y0 >= min(ends) - 3), default=None)
+            if edge is not None:
+                for it in sorted((it for it in inner if it.y0 >= ends[1 - it.col] + 3 and it.y1 <= edge + 3),
+                                 key=lambda it: -it.y1):
+                    if edge - it.y1 > 30:
+                        break
+                    edge = div_y1 = it.y0
         if not single and (best_len or any(crosses(it) for it in free)):
             up = [it for it in free if it.y1 <= div_y0 + 3]
             down = [it for it in free if it.y0 >= div_y1 - 3]

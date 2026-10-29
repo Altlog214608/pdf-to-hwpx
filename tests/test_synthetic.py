@@ -1165,3 +1165,223 @@ def test_stroke_on_every_char_is_not_bold():
     _plain_strokes({"Batang": [302, 300, every], "Eulyoo1945-Regular": [1200, 50, some]})
     assert not any(g.bold for g in every)
     assert all(g.bold for g in some)
+
+
+def test_linked_chart_diagonal_lines():
+    """실사용(교재 '플라톤' 지문 구조): 상자를 비스듬한 선으로 이은 구조도((가) 1문단 아래 변 -> 2문단 위 변 -> 3문단 아래 변)가
+    가로·세로 선만 보던 탓에 묶이지 않아, 상자 넷이 글 상자로 흩어지고 선이 사라졌다 → 양 끝이 서로 다른 상자 변에 닿는
+    비스듬한 선도 잇는 선. 한쪽 끝만 상자에 닿은 비스듬한 선(그래프 선 등)은 아니다."""
+    from pdf2hwpx.extract import _Seg, _linked_boxes
+
+    one, two, three, four = (46, 399, 178, 478), (142, 502, 273, 582), (273, 399, 405, 478), (403, 502, 535, 582)
+    segs = [_Seg(112, 477, 202, 502, 0.36, None), _Seg(208, 478, 333, 503, 0.36, None),
+            _Seg(339, 477, 464, 502, 0.36, None)]
+    out = _linked_boxes([one, two, three, four], segs, None)
+    assert len(out) == 1
+    x0, y0, x1, y1 = out[0]
+    assert x0 <= 46 and y0 <= 399 and x1 >= 535 and y1 >= 582
+    assert _linked_boxes([one, two], [_Seg(100, 477, 112, 520, 0.36, None)], None) == []
+
+
+def test_ocr_rereads_row_alone_when_glyphs_missed(monkeypatch):
+    """실사용: 발문 줄 여러 개를 한 장에 이어 읽으면 큰 번호 "1." 때문에 한 줄을 여러 글줄로 쪼개 읽어 앞부분을 잃었다
+    ("1. 윗글에서 언급된 …" -> "급된 내용이 아닌 것것은?") → 원문 글자 도형을 여럿 덮지 못한 줄은 그 줄만 한 글줄로 다시 읽는다."""
+    from collections import Counter
+
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+    from pdf2hwpx.extract import _ocr_rows
+    from tests.synth_pdf import _outline_glyph
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=60)
+    text = "윗글에서언급된것"
+    xs = [20 + 12 * k for k in range(len(text))]
+    for x in xs:
+        _outline_glyph(page, x, 20, 10, 10)
+
+    def chars(part):
+        return [ocr.OcrChar(c, xs[k], 20, xs[k] + 10, 30, 95.0, 0) for k, c in enumerate(text) if k in part]
+    calls = []
+
+    def read_rows(page, rects, masks, allow="", line=False):
+        calls.append(line)
+        if allow:
+            return [[] for _ in rects]
+        return [chars(range(len(text)) if line else range(5, len(text)))]
+    monkeypatch.setattr(ocr, "read_rows", read_rows)
+    stats = Counter()
+    frag = _ocr_rows(page, [(15, 15, 120, 35)], [], stats)[0]
+    assert stats["ocr_line_retry"] == 1 and True in calls
+    assert "".join(g.c for g in frag.glyphs if not g.is_space) == text
+
+
+def test_heading_above_wide_chart_leaves_columns(tmp_path):
+    """실사용(교재 '플라톤' 정리 쪽): 짧은 두 단(핵심 정리) 아래 왼쪽에 '지문 구조' 칸, 그 바로 아래 쪽 너비 구조도.
+    소제목 칸을 두 단의 왼쪽 단 끝에 두니 한글이 단 높이를 맞추며 오른쪽 단 맨 위로 옮겼다 → 다른 단 내용보다 아래에서
+    가로지르는 상자에 붙은 한쪽 단 항목은 아래 전폭 구간으로."""
+    import pymupdf as fitz
+
+    from pdf2hwpx.extract import extract
+    from tests.synth_pdf import Writer
+
+    w = Writer()
+    w.doc.delete_page(-1)
+    w.new_page(divider=False)
+    page = w.page
+    page.draw_line(fitz.Point(297.6, 140), fitz.Point(297.6, 240), width=0.3)  # 정리 부분에만 짧은 구분선
+    for k in range(4):
+        w.text(70, 150 + 25 * k, f"왼쪽 단 정리 내용 {k + 1}번째 줄입니다 가나다라마")
+        w.text(320, 150 + 25 * k, f"오른쪽 단 정리 내용 {k + 1}번째 줄입니다 가나다")
+    page.draw_rect(fitz.Rect(69, 300, 146, 322), color=(0, 0, 0), width=0.8)
+    w.text(80, 316, "지문 구조", 11)
+    a, b = fitz.Rect(70, 340, 230, 400), fitz.Rect(370, 340, 530, 400)
+    for r in (a, b):
+        page.draw_rect(r, color=(0, 0, 0), width=0.9)
+        w.text(r.x0 + 40, r.y0 + 30, "문단 요약", 10)
+    page.draw_line(fitz.Point(230, 370), fitz.Point(370, 370), width=0.4)
+    pdf = tmp_path / "wide_head.pdf"
+    w.doc.save(str(pdf))
+    ex = extract(str(pdf))
+    head = next(it for it in ex.flow if it.page == 1 and abs(it.y0 - 300) < 3)
+    assert id(head) in ex.wide_ids
+    right = [it for it in ex.flow if getattr(it, "col", None) == 1 and it.y0 < 260]
+    assert right and ex.flow.index(head) > max(ex.flow.index(it) for it in right)
+
+
+def test_ocr_big_question_number_kept_with_stem():
+    """실사용(교재 발문): 윤곽선으로 그린 큰 문제 번호가 문제로 잡히지 않았다 → 번호를 발문 줄에 넣는다.
+    ① "4.  <보기>는 …": 번호 뒤를 넓게 띄어 번호만 따로 떨어진 줄이 됐다(글자 하나 줄은 버림)
+    ② "4. <보기>의 …"처럼 번호만 윤곽선이고 발문은 진짜 글자: 번호가 통째로 빠졌다
+    ③ "3.  ⓐ~ⓒ에 …": 번호와 진짜 글자 ⓐ 사이가 넓어 번호 줄과 발문 줄이 합쳐지지 않았다"""
+    import pymupdf as fitz
+
+    from pdf2hwpx.extract import _Frag, _merge_outline_rows, _outline_rows
+    from pdf2hwpx.model import Glyph
+    from tests.synth_pdf import _outline_glyph
+
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=200)
+    _outline_glyph(page, 312.6, 20, 7, 11)  # ① 큰 번호, 19pt 띄고 발문
+    for k in range(6):
+        _outline_glyph(page, 338.6 + 9 * k, 22, 8, 9)
+    rows = _outline_rows(page.get_drawings())
+    assert [round(r[0], 1) for r in rows] == [312.6] and rows[0][4] == 7
+
+    def frag(cs, x, y, w=9.6):
+        gs = [Glyph(c, x + w * k, y, x + w * (k + 1), y + 10, 10.0, False) for k, c in enumerate(cs)]
+        return _Frag(gs, gs[0].x0, y, gs[-1].x1, y + 10, 10.0)
+    left = frag("왼쪽단글", 240, 110)  # 왼쪽 단 글(번호 왼쪽으로 1.5배 넘게 떨어짐)
+    out = _merge_outline_rows([[312.6, 109.6, 319.7, 120.4, 1]], [left, frag("보기의문장", 336, 110)])
+    assert len(out) == 1 and out[0][0] < 312.6  # ② 번호만 윤곽선
+    assert _merge_outline_rows([[312.6, 109.6, 319.7, 120.4, 1]], [left]) == []  # 뒤에 글이 없는 외톨이 도형은 아니다
+    reals = [frag("ⓐ", 338.9, 488), frag("ⓒ", 352.1, 488)]  # ③
+    out = _merge_outline_rows([[312.6, 485.3, 319.6, 496.6, 1], [361.6, 488.3, 521.7, 497.2, 16]], reals)
+    assert len(out) == 1 and out[0][0] < 312.6 and out[0][2] > 521
+
+
+def test_ocr_tilde_between_real_glyphs(monkeypatch):
+    """실사용: "ⓐ~ⓔ의", "㉠~㉤의"의 '~'가 글자 도형보다 작게 칠한 도형이라 읽히지 않아 "ⓐ ⓔ의"가 됐다 →
+    OCR 줄 안 진짜 글자 둘 사이 가운데 높이의 작은 가로 도형은 '~'."""
+    from collections import Counter
+
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+    from pdf2hwpx.extract import _Frag, _ocr_rows
+    from pdf2hwpx.model import Glyph
+    from tests.synth_pdf import _outline_glyph
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=60)
+    xs = [95 + 9 * k for k in range(4)]
+    for x in xs:
+        _outline_glyph(page, x, 21, 8, 9)
+    page.draw_rect(fitz.Rect(75.7, 23.7, 80.2, 25.7), color=None, fill=(0, 0, 0))
+    a = Glyph("ⓐ", 65, 22.4, 74.6, 32.3, 10.0, True)
+    e = Glyph("ⓔ", 82.4, 22.4, 92.0, 32.3, 10.0, True)
+    kept = [_Frag([a], a.x0, a.y0, a.x1, a.y1, 10.0), _Frag([e], e.x0, e.y0, e.x1, e.y1, 10.0)]
+
+    def read_rows(page, rects, masks, allow="", line=False):
+        if allow:
+            return [[] for _ in rects]
+        return [[ocr.OcrChar(c, x, 21, x + 8, 30, 95.0, 0) for c, x in zip("의사전적", xs)]]
+    monkeypatch.setattr(ocr, "read_rows", read_rows)
+    stats = Counter()
+    frag = _ocr_rows(page, [(60, 18, 135, 35)], kept, stats)[0]
+    assert stats["ocr_tilde"] == 1
+    assert "".join(g.c for g in frag.glyphs if not g.is_space) == "~의사전적"
+    t = next(g for g in frag.glyphs if g.c == "~")
+    assert a.x1 <= t.x0 and t.x1 <= e.x0
+
+
+def test_ocr_fix_gajang():
+    """발문의 '가장 적절한'을 OCR이 '기장'으로 읽는 것을 고친다(다른 '기장'은 그대로)."""
+    from pdf2hwpx import ocr
+
+    def chars(s):
+        return [ocr.OcrChar(c, k, 0, k + 1, 1, 90.0, 0) for k, c in enumerate(s)]
+    assert "".join(c.c for c in ocr.fix_chars(chars("1.윗글에대한설명으로기장적절한것은?"))).endswith("가장적절한것은?")
+    assert "".join(c.c for c in ocr.fix_chars(chars("기장이말했다"))) == "기장이말했다"
+
+
+def test_hancom_equation_font_chars():
+    """실사용(교재 '크기의 과학'): 한글 수식 글꼴(HancomEQN)은 글자를 사용자 영역에 매겨 "L², 1/12³"이 한글에서 "'"처럼
+    깨졌다 → 영문 대문자·숫자·'/'로 바꾸고, 작게 올려 쓴 숫자는 위첨자로."""
+    from pdf2hwpx.extract import HANCOM_EQN, SUPERSCRIPT
+
+    assert "".join(HANCOM_EQN[c] for c in "") == "L1/123"
+    assert "23".translate(SUPERSCRIPT) == "²³"
+
+
+def test_ocr_short_row_takes_page_stem_size(monkeypatch):
+    """실사용: 발문 둘째 줄 "은?"처럼 도형이 두셋뿐인 짧은 줄은 OCR 상자로 크기를 재 6pt가 됐다 → 쪽의 발문 크기로.
+    받침을 놓친 "으?"는 "은?"으로."""
+    from collections import Counter
+
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+    from pdf2hwpx.extract import _ocr_rows
+    from tests.synth_pdf import _outline_glyph
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=100)
+    long_xs = [20 + 10 * k for k in range(8)]
+    for x in long_xs:
+        _outline_glyph(page, x, 20, 8.8, 8.8)
+    for x in (20, 30):
+        _outline_glyph(page, x, 50, 8.8, 8.8)
+
+    def read_rows(page, rects, masks, allow="", line=False):
+        if allow:
+            return [[] for _ in rects]
+        return [[ocr.OcrChar(c, x, 20, x + 8.8, 28.8, 95.0, 0) for c, x in zip("윗글에서알수있는", long_xs)],
+                [ocr.OcrChar("으", 20, 51, 28, 56, 95.0, 0), ocr.OcrChar("?", 30, 51, 34, 56, 95.0, 0)]]
+    monkeypatch.setattr(ocr, "read_rows", read_rows)
+    a, b = _ocr_rows(page, [(15, 17, 105, 32), (15, 47, 45, 62)], [], Counter())
+    assert abs(b.size - a.size) < 0.01 and a.size > 9
+    assert "".join(g.c for g in b.glyphs if not g.is_space) == "은?"
+
+
+def test_big_number_tight_pitch_lines_do_not_overlap(tmp_path):
+    """실사용: 큰 문제 번호(15pt)가 든 발문을 원문 줄 간격(13pt)으로 재면 번호 기준 95%가 되어 한글에서 둘째 줄이 첫 줄에
+    겹쳤다 → 번호보다 좁은 간격은 본문 크기 기준(130%)."""
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.ir import build_document
+    from pdf2hwpx.model import Para
+    from tests.synth_pdf import Writer
+
+    w = Writer()
+    page = w.page
+    page.insert_text((60, 120), "4.", fontname="korea", fontsize=15)
+    w.text(78, 120, "<보기>의 문장들을 표준 형식의 명제로 고친 것으로", 10)
+    w.text(78, 128, "적절하지 않은 것은?", 10)
+    for k in range(5):
+        w.text(78, 155 + 16 * k, f"{'①②③④⑤'[k]} 선택지 내용 {k + 1}", 10)
+    pdf = tmp_path / "tight.pdf"
+    w.doc.save(str(pdf))
+    doc = build_document(extract(str(pdf)))
+    stems = [q.stem for q in doc.questions] + [it for it in doc.items if isinstance(it, Para) and it.text.startswith("4.")]
+    assert stems and all(p.line_pct >= 120 for p in stems), [p.line_pct for p in stems]

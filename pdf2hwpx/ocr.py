@@ -75,9 +75,11 @@ def available() -> bool:
 
 
 def read_rows(page: fitz.Page, rects: list[tuple[float, float, float, float]],
-              masks: list[list[tuple[float, float, float, float]]], allow: str = "") -> Optional[list[list[OcrChar]]]:
+              masks: list[list[tuple[float, float, float, float]]], allow: str = "",
+              line: bool = False) -> Optional[list[list[OcrChar]]]:
     """쪽의 줄 영역들을 읽어 줄마다 글자 목록(원문 좌표). masks: 줄마다 흰색으로 지울 영역(진짜 글자가 이미 있는 곳,
-    원문자는 잉크가 글자 상자보다 조금 커서 1.5pt 넓게). allow: 이 글자들만(문제 번호·[A] 표시를 다시 읽을 때)."""
+    원문자는 잉크가 글자 상자보다 조금 커서 1.5pt 넓게). allow: 이 글자들만(문제 번호·[A] 표시를 다시 읽을 때).
+    line: 줄 하나만 한 글줄로 읽는다(여러 줄을 이어 붙여 읽으면 큰 번호 때문에 한 줄을 여러 글줄로 쪼개 읽기도 한다)."""
     lang = "eng" if allow else "kor"  # 한국어 모델은 글자를 좁혀 주면 영문 대문자를 내지 못한다
     if not rects or lang not in _langs():
         return None
@@ -103,7 +105,7 @@ def read_rows(page: fitz.Page, rects: list[tuple[float, float, float, float]],
         sheet.copy(p, p.irect)
     try:
         opts = ["-l", lang] + (["-c", f"tessedit_char_whitelist={allow}"] if allow else [])
-        r = subprocess.run(_cmd() + ["stdin", "stdout", *opts, "--psm", "6", "-c", "tessedit_create_tsv=1"],
+        r = subprocess.run(_cmd() + ["stdin", "stdout", *opts, "--psm", "7" if line else "6", "-c", "tessedit_create_tsv=1"],
                            input=sheet.tobytes("png"), capture_output=True, timeout=120)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -143,6 +145,7 @@ def read_rows(page: fitz.Page, rects: list[tuple[float, float, float, float]],
 
 # 시험 발문에서 자주 틀리게 읽는 것: 맨 앞 '윗글'(받침 ㅅ이 작아 '워글'·'원글'로)
 _WITGEUL = re.compile(r"^(\d{1,2}\.)[워원윈왼웟웠윘](?=글)")
+_GIJANG = re.compile(r"[기거]장(?=적절|유사|가까운|큰|중요)")
 
 
 def fix_chars(chars: list[OcrChar]) -> list[OcrChar]:
@@ -152,12 +155,18 @@ def fix_chars(chars: list[OcrChar]) -> list[OcrChar]:
     m = _WITGEUL.match(text)
     if m:
         chars[m.end(1)].c = "윗"
+    for m in _GIJANG.finditer(text):  # 발문의 '가장 적절한'을 '기장'으로
+        chars[m.start()].c = "가"
+    if text.startswith("으?"):  # 발문 둘째 줄 "은?"의 받침을 놓친 것("…것" + "으?")
+        chars[0].c = "은"
     for k, ch in enumerate(chars):  # 단어 앞에 띄어 붙은 ':'는 여는 따옴표를 잘못 읽은 것("：음악 해석’")
         nxt = chars[k + 1] if k + 1 < len(chars) else None
-        if ch.c in ":：" and nxt is not None and "가" <= nxt.c <= "힣"                 and (k == 0 or ch.x0 - chars[k - 1].x1 > 0.25 * (ch.y1 - ch.y0)):
+        if ch.c in ":：" and nxt is not None and "가" <= nxt.c <= "힣" \
+                and (k == 0 or ch.x0 - chars[k - 1].x1 > 0.25 * (ch.y1 - ch.y0)):
             ch.c = "'"
     for k, ch in enumerate(chars):  # '<보기>'의 '<'를 따옴표로 읽은 것
-        if ch.c in "“\"'‘`" and "".join(c.c for c in chars[k + 1:k + 4]).startswith("보기")                 and any(c.c == ">" for c in chars[k + 3:k + 6]):
+        if ch.c in "“\"'‘`" and "".join(c.c for c in chars[k + 1:k + 4]).startswith("보기") \
+                and any(c.c == ">" for c in chars[k + 3:k + 6]):
             ch.c = "<"
     opening = True  # 줄 안의 따옴표는 여는 것과 닫는 것이 번갈아 나온다
     for k, ch in enumerate(chars):

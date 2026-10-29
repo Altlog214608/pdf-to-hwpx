@@ -390,6 +390,9 @@ class Builder:
             # 한글은 줄 간격 %를 그 줄에서 가장 큰 글자에 곱한다: 첫 줄의 큰 문제 번호("3.") 기준으로 재야 원문 간격이 된다
             big = max((g.size for g in lines[0].glyphs if not g.is_space and not g.icon), default=size)
             p.line_pct = round(statistics.median(pitches) / max(size, big) * 100)
+            # 큰 번호보다 좁은 간격(원문은 번호가 줄 위로 튀어나온 것)은 본문 크기로 잰다: 95%로 두면 둘째 줄이 첫 줄에 겹쳤다
+            if p.line_pct < 105:
+                p.line_pct = round(statistics.median(pitches) / size * 100)
         last = lines[-1]
         p.src = (lines[0].page, lines[0].y0, last.y0 + (p.line_pct or DEFAULT_LINE_PCT) / 100 * size, last.page)
         return p
