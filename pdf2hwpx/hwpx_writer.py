@@ -575,7 +575,7 @@ class HwpxWriter:
             if p.kind == "blank":
                 out.append(self._note_p(S.derive(base, **ov), '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>'))
             elif p.kind == "image" and p.image is not None:
-                out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER"}), self._pic(p.image, inner_w)))
+                out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER", **self._source_ov(p)}), self._pic(p.image, inner_w)))
             elif p.kind == "table" and p.table is not None:
                 out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER"}), self._table(p.table, inner_w)))
             elif p.kind == "tablerow":
@@ -588,6 +588,7 @@ class HwpxWriter:
                     o["intent"] = _indent_hwp(p.indent_pt)
                 if p.left_pt:  # 원문 위치만큼 왼쪽 여백(칸 폭을 넘지 않게)
                     o["left"] = min(int(p.left_pt * left_k), max(0, inner_w - 3000))
+                o.update(self._source_ov(p))
                 out.append(self._note_p(S.derive(base, **o), self._runs_xml(p.runs, base_bold=p.role == "heading",
                                                                                spacing=p.spacing, font_space=font_space)))
         return "".join(out) or self._note_p(base, '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>')
@@ -951,10 +952,14 @@ class HwpxWriter:
         if isinstance(it, AuxBlock):
             return self._aux(it, True)
         if isinstance(it, Para):
+            src = self._source_ov(it)
             if it.kind == "image":
-                return [self._p(PP["plain"], self._pic(it.image, self.img_max_free))]
+                ov = {**src, "align": it.align} if src else {}
+                if src and it.left_pt:
+                    ov["left"] = int(it.left_pt * PT_TO_HWP)
+                return [self._p(S0.derive(PP["plain"], **ov) if ov else PP["plain"], self._pic(it.image, self.img_max_free))]
             if it.kind == "table":
-                return [self._p(S0.derive(PP["plain"], align="CENTER"), self._table(it.table, self.col_w - 300))]
+                return [self._p(S0.derive(PP["plain"], align="CENTER", **src), self._table(it.table, self.col_w - 300))]
             if it.kind == "tablerow":
                 return [self._p(S0.derive(PP["plain"], align="CENTER"), self._tablerow(it, self.col_w - 300))]
             if it.kind == "bracket":
@@ -965,10 +970,22 @@ class HwpxWriter:
                 ov = {"align": it.align} if it.align in ("RIGHT", "CENTER") else {"intent": _indent_hwp(it.indent_pt)}
                 if self._keep_next:
                     ov["keep_next"] = 1
-                return [self._p(S0.derive(PP["plain"], **ov) if it.wide else PP["plain"], self._runs_xml(it.runs, spacing=it.spacing))]
+                ov.update(src)
+                return [self._p(S0.derive(PP["plain"], **ov) if it.wide or src else PP["plain"], self._runs_xml(it.runs, spacing=it.spacing))]
             if it.kind == "blank" and it.wide:
                 return [self._empty(PP["plain"])]
         return []
+
+    def _source_ov(self, p: Para) -> dict:
+        """원문 위치를 따르는 교재: 원문 줄 간격(여러 줄 문단)과 앞 내용과의 원문 간격(문단 앞 간격)."""
+        if not self.doc.faithful:
+            return {}
+        ov = {}
+        if p.line_pct:
+            ov["line"] = p.line_pct
+        if p.gap > 0:
+            ov["prev"] = int(p.gap * self.style.body_size * 100)  # 본문 글자 크기 단위 -> pt -> HWPUNIT
+        return ov
 
     def _set_width(self, wide: bool) -> None:
         """전폭 내용은 쪽 본문 폭 전체, 나머지는 한 단 폭으로 표·그림 크기를 맞춘다."""

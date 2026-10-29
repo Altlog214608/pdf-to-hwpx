@@ -217,6 +217,10 @@ class Para:
     spacing: int = 0  # 원문 자간(%): 한글 글자 사이 간격으로 잰 값(원문 모양을 살리는 문제 밖 내용에만 쓴다)
     wide: bool = False  # 전폭 쪽(PageInfo.single)의 문제 밖 내용: 새 쪽에 한 단(가운데 선 없음)으로
     top: bool = False  # 원문 쪽의 첫 내용(전폭 부분은 여기서 쪽을 나눈다)
+    # 원문 위치를 따르는 교재(Document.faithful)에서만 쓰는 값
+    src: Optional[tuple] = None  # (쪽, 첫 줄 위 y, 다음 내용이 원래 시작할 y): 앞 내용과의 간격을 잴 때
+    line_pct: int = 0  # 원문 줄 간격(글자 크기 대비 %), 여러 줄 문단만
+    gap: float = 0.0  # 앞 내용과의 원문 간격 중 기본 줄 간격을 넘는 만큼(본문 글자 크기 단위)
 
     @property
     def text(self) -> str:

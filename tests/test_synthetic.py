@@ -930,7 +930,7 @@ def test_punctuation_fragment_inside_long_fragment():
     assert _build_line(1, 0, groups[0]).text == "는 경우가 많다. 왜 이런 것일까? 이는"
 
 
-def test_linked_box_chart_and_outline_text_rows(tmp_path):
+def test_linked_box_chart_and_outline_text_rows(tmp_path, monkeypatch):
     """실사용(학원 자체 교재): ① 지문 구조도(상자를 화살표로 이음)는 쪽 테두리에 묻혀 쪽째 그림이 됐는데, 테두리를 빼면 상자가
     흩어지고 나란한 상자 속 글이 한 줄로 섞인다 → 선으로 이어진 상자 묶음은 테두리 없는 상자 하나(도형으로 세어 그림).
     ② 발문을 글꼴 없이 윤곽선으로 그려 글자가 없어 통째로 빠졌다 → 윤곽선 글자 줄은 그 영역을 그림으로 넣고,
@@ -938,8 +938,10 @@ def test_linked_box_chart_and_outline_text_rows(tmp_path):
     from pdf2hwpx.extract import OUTLINE_TEXT, extract
     from pdf2hwpx.ir import build_document
     from pdf2hwpx.model import AuxBlock
+    from pdf2hwpx import ocr
     from tests.synth_pdf import build_flow_outline
 
+    monkeypatch.setattr(ocr, "_langs", lambda: frozenset())  # OCR이 없는 환경(그림으로 남는 경우)
     pdf = tmp_path / "flow.pdf"
     info = build_flow_outline(str(pdf))
     ex = extract(str(pdf))
@@ -990,3 +992,40 @@ def test_memo_column_pages_follow_source_pages(tmp_path):
     assert len(re.findall(r'<hp:p [^>]*pageBreak="1"', sec)) == 1  # 글 있는 두 쪽 사이에만
     text = "".join(re.findall(r"<hp:t>([^<]*)</hp:t>", sec))
     assert all(t in text for t in info["texts"])
+
+
+def test_ocr_fix_chars():
+    """OCR 글자 교정: 맨 앞 '윗글'(받침이 작아 '워글'로), 번호 뒤 군더더기 점, 따옴표는 여닫음을 번갈아 홑따옴표로,
+    '<보기>'의 '<'를 따옴표로 읽은 것, 닫는 따옴표를 ':'로 읽은 것."""
+    from pdf2hwpx.ocr import OcrChar, fix_chars
+
+    def chars(text: str) -> list:
+        return [OcrChar(c, 10.0 * k, 0.0, 10.0 * k + 9.0, 10.0, 90.0) for k, c in enumerate(text)]
+
+    fix = lambda t: "".join(ch.c for ch in fix_chars(chars(t)))
+    assert fix("1.워글에서") == "1.윗글에서"
+    assert fix("3.。윗글을") == "3.윗글을"
+    assert fix("“음악해석'에") == "‘음악해석’에"
+    assert fix("'보기>를") == "<보기>를"
+    assert fix("(나)의'아리스토텔레스:의") == "(나)의‘아리스토텔레스’의"
+
+
+def test_ocr_reads_korean_stem(tmp_path):
+    """Tesseract(한국어 모델)가 있으면: 글꼴 없이 그림으로 된 발문 줄을 글자로 읽는다(없는 환경에서는 건너뜀)."""
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+
+    if not ocr.available():
+        pytest.skip("Tesseract 한국어 모델 없음")
+    src = fitz.open()
+    sp = src.new_page(width=400, height=40)
+    sp.insert_text((10, 26), "1. 윗글에서 언급한 내용이 아닌 것은?", fontname="korea", fontsize=16)
+    png = sp.get_pixmap(dpi=300, alpha=False).tobytes("png")
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=40)
+    page.insert_image(page.rect, stream=png)
+    rows = ocr.read_rows(page, [(0, 0, 400, 40)], [[]])
+    text = "".join(ch.c for ch in ocr.fix_chars(rows[0]))
+    assert "윗글에서언급한내용이아닌것은?" in text, text
+

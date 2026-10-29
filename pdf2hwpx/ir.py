@@ -217,7 +217,7 @@ class Builder:
         for e in entries:
             if isinstance(e, ImageEl):
                 flush()
-                paras.append(Para(kind="image", image=e, align="CENTER"))
+                paras.append(Para(kind="image", image=e, align="CENTER", src=(e.page, e.y0, e.y1, e.page)))
                 continue
             if isinstance(e, TableEl):
                 flush()
@@ -229,7 +229,7 @@ class Builder:
                         paras[-1] = prev_t = Para(kind="tablerow", children=[prev_t], align="CENTER")
                     prev_t.children.append(Para(kind="table", table=self.table(e), align="CENTER"))
                     continue
-                paras.append(Para(kind="table", table=self.table(e), align="CENTER"))
+                paras.append(Para(kind="table", table=self.table(e), align="CENTER", src=(e.page, e.y0, e.y1, e.page)))
                 continue
             if isinstance(e, _BracketGroup):
                 flush()
@@ -380,7 +380,33 @@ class Builder:
             p.indent_pt = 0.0
         if LABEL_RE.match(p.text):
             p.role = "label"
+        size = statistics.median(l.size for l in whole)
+        pitches = [b.y0 - a.y0 for a, b in zip(lines, lines[1:]) if (a.page, a.col) == (b.page, b.col) and b.y0 > a.y0]
+        if pitches:
+            p.line_pct = round(statistics.median(pitches) / size * 100)
+        last = lines[-1]
+        p.src = (lines[0].page, lines[0].y0, last.y0 + (p.line_pct or DEFAULT_LINE_PCT) / 100 * size, last.page)
         return p
+
+    def faithful_box(self, box: Box) -> Optional[Para]:
+        """원문 위치를 따르는 교재의 전폭 쪽: 선으로 이은 상자 묶음(구조도)과 색을 칠한 짧은 제목 칸(검은 제목 띠,
+        노란 '핵심 정리' 칸)은 원문 모양 그대로 그림으로(한글 문단 테두리로는 폭·여백이 원문과 달라진다)."""
+        if not self.ex.faithful or box.parts:
+            return None
+        lines = [x for x in box.items if isinstance(x, Line)]
+        chart = not box.border and not box.fill and box.inner_drawings >= 4
+        label = box.fill and 1 <= len(lines) <= 2 and len("".join(l.text for l in lines).strip()) <= 20             and box.y1 - box.y0 < 60 and len(lines) == len(box.items)
+        if not (chart or label):
+            return None
+        pad = 1.5
+        img = ImageEl(box.page, box.col, box.x0 - pad, box.y0 - pad, box.x1 + pad, box.y1 + pad, "faithful", 0)
+        img.png = self.ex.render(box.page, (img.x0, img.y0, img.x1, img.y1), sharp=True)
+        self.image_only_lines.extend(lines)
+        info = self.ex.pages[box.page - 1].info
+        left, right = info.col_left
+        centered = abs((box.x0 + box.x1) / 2 - info.width / 2) < 0.04 * info.width  # 쪽 가운데(검은 제목 띠)
+        return Para(kind="image", image=img, align="CENTER" if centered else "LEFT",
+                    left_pt=0.0 if centered else max(0.0, box.x0 - left), src=(box.page, box.y0, box.y1, box.page))
 
     def single_para(self, lines: list[Line], bold: bool = False) -> Para:
         """문제 발문/선택지처럼 한 문단으로 묶이는 줄들."""
@@ -652,6 +678,23 @@ def _is_question_header(ln: Line, expected: int, body: float) -> bool:
     return _question_number(ln, body) == expected
 
 
+DEFAULT_LINE_PCT = 155  # 본문 문단(plain)의 한글 줄 간격(%)
+
+
+def _source_gaps(items: list, body: float) -> None:
+    """원문 위치를 따르는 교재: 같은 쪽에서 앞 문단 다음 줄이 원래 올 자리보다 아래에서 시작하는 문단은 그 차이를
+    문단 앞 간격(Para.gap, 본문 글자 크기 단위)으로."""
+    prev = None
+    for it in items:
+        src = getattr(it, "src", None)
+        if src is None:
+            prev = None
+            continue
+        if prev is not None and prev[3] == src[0] and src[1] > prev[2]:
+            it.gap = round((src[1] - prev[2]) / body, 2)
+        prev = src
+
+
 def build_document(ex: Extraction) -> Document:
     flow = ex.flow
     body = ex.body_size
@@ -702,6 +745,13 @@ def build_document(ex: Extraction) -> Document:
         if best is None or len(found[0]) > len(best[0]):
             best = found
     headers, header_numbers, skipped = best
+    restarted = False
+    if ex.faithful:
+        # 원문 쪽을 따르는 교재(학원 자체 교재)는 단원마다 번호가 1번부터 다시 시작하기도 한다: 이어지는 번호로 찾은 문제가
+        # 문제 머리 모양 줄의 절반이 안 되면 일부만 문제로 묶지 않고(구조가 섞인다) 원문 번호 그대로 둔다
+        heads = sum(1 for it in flow[:answer_idx] if isinstance(it, Line) and _question_number(it, body) is not None)
+        if heads and len(headers) < 0.5 * heads:
+            headers, header_numbers, skipped, restarted = [], [], [], True
 
     # 원문자 아이콘 판별 후 치환
     labels = _label_icons(ex, headers, answer_idx)
@@ -721,6 +771,12 @@ def build_document(ex: Extraction) -> Document:
                    source_fixes=b.source_fixes)
     if unresolved:
         doc.warnings.append(f"판별하지 못한 원문자 아이콘 {unresolved}개를 ○로 표시함")
+    if restarted:
+        doc.warnings.append("문제 번호가 단원마다 다시 시작하는 교재 — 자동 번호 대신 원문 번호를 그대로 넣었습니다")
+    if ex.stats.get("ocr_rows"):
+        low = ex.stats.get("ocr_low_chars", 0)
+        doc.warnings.append(f"글꼴 없이 그려진 글자 {ex.stats['ocr_rows']}줄을 OCR로 읽었습니다"
+                            + (f" — 확신이 낮은 글자 {low}개는 노란 음영으로 표시(확인 후 음영 지우기)" if low else ""))
 
     header_set = set(headers)
     single_pages = {pm.info.number for pm in ex.pages if pm.info.single}
@@ -777,7 +833,8 @@ def build_document(ex: Extraction) -> Document:
                 out = [Para(kind="table", table=b.table(t), align="CENTER")]
                 j = i + 2
             else:
-                out = [b.aux_from_box(it, wide=True)] if isinstance(it, Box) else b.paragraphs(flow[i:j])
+                fb = b.faithful_box(it) if isinstance(it, Box) else None
+                out = [fb] if fb else [b.aux_from_box(it, wide=True)] if isinstance(it, Box) else b.paragraphs(flow[i:j])
             for x in out:
                 x.wide = True
             doc.items.extend(out)
@@ -801,6 +858,12 @@ def build_document(ex: Extraction) -> Document:
     for k, fi in marks.items():
         if k < len(doc.items) and (fi == 0 or flow[fi - 1].page != flow[fi].page):
             doc.items[k].top = True
+    if ex.faithful:
+        _source_gaps(doc.items, b.size)
+        for it in doc.items:
+            if isinstance(it, Para) and it.kind == "table" and it.table is not None and it.table.memo:
+                for cl in it.table.cells:
+                    _source_gaps(cl.paras, b.size)
 
     # 정답/해설
     ans_lines: list[Line] = []
