@@ -249,6 +249,10 @@ class Builder:
             brk = False
             blank = False
             same_area = (prev.page, prev.col) == (e.page, e.col)
+            # 번호 붙은 줄("2. 윗글을 …")의 내어 쓴 다음 줄("은?"): 줄 간격이 본문보다 넓은 발문도 한 문단으로
+            hang = same_area and re.match(r"\s*\d{1,2}\s?\.\s", cur[0].text) is not None and self._is_full(prev) \
+                and 0.8 * e.size <= self.rx(e) - self.rx(cur[0]) <= 3 * e.size and 0 < e.y0 - prev.y0 <= 3 * e.size \
+                and (len(cur) == 1 or abs(self.rx(e) - self.rx(cur[1])) < 0.4 * e.size)
             if _same_row(prev, e) and re.fullmatch(r"\(.{0,6}\)", e.text.strip()):
                 # 같은 줄 오른쪽 끝에 떨어져 놓인 "( ✕ )" 같은 표시: 그 줄 문단 끝에 붙인다
                 cur.append(e)
@@ -256,7 +260,7 @@ class Builder:
                 continue
             if same_area:
                 dy = e.y0 - prev.y0
-                if dy > 1.3 * pitch:
+                if dy > 1.3 * pitch and not hang:
                     brk = True
                     blank = stanza and dy > 1.7 * pitch
             elif stanza and self._cross_area_blank(prev, e, pitch):
@@ -273,7 +277,7 @@ class Builder:
                 brk = True
             if e.frame != prev.frame:  # 띠 테두리 줄(낱말 띠)은 따로 한 문단
                 brk = True
-            if abs(e.size - prev.size) > 0.15 * max(e.size, prev.size):  # 글자 크기가 바뀌면(본문 -> 작은 해설) 새 문단
+            if abs(e.size - prev.size) > 0.15 * max(e.size, prev.size) and not hang:  # 글자 크기가 바뀌면(본문 -> 작은 해설) 새 문단
                 brk = True
             # (단이 바뀌면 단 왼쪽 경계가 몇 pt 다를 수 있어 여유를 더 둔다)
             if len(cur) >= 2 and self.rx(e) > self.rx(cur[1]) + (0.4 if same_area else 1.0) * e.size:
@@ -383,7 +387,9 @@ class Builder:
         size = statistics.median(l.size for l in whole)
         pitches = [b.y0 - a.y0 for a, b in zip(lines, lines[1:]) if (a.page, a.col) == (b.page, b.col) and b.y0 > a.y0]
         if pitches:
-            p.line_pct = round(statistics.median(pitches) / size * 100)
+            # 한글은 줄 간격 %를 그 줄에서 가장 큰 글자에 곱한다: 첫 줄의 큰 문제 번호("3.") 기준으로 재야 원문 간격이 된다
+            big = max((g.size for g in lines[0].glyphs if not g.is_space and not g.icon), default=size)
+            p.line_pct = round(statistics.median(pitches) / max(size, big) * 100)
         last = lines[-1]
         p.src = (lines[0].page, lines[0].y0, last.y0 + (p.line_pct or DEFAULT_LINE_PCT) / 100 * size, last.page)
         return p
@@ -391,11 +397,13 @@ class Builder:
     def faithful_box(self, box: Box) -> Optional[Para]:
         """원문 위치를 따르는 교재의 전폭 쪽: 선으로 이은 상자 묶음(구조도)과 색을 칠한 짧은 제목 칸(검은 제목 띠,
         노란 '핵심 정리' 칸)은 원문 모양 그대로 그림으로(한글 문단 테두리로는 폭·여백이 원문과 달라진다)."""
-        if not self.ex.faithful or box.parts:
+        if not self.ex.faithful:
             return None
         lines = [x for x in box.items if isinstance(x, Line)]
-        chart = not box.border and not box.fill and box.inner_drawings >= 4
-        label = box.fill and 1 <= len(lines) <= 2 and len("".join(l.text for l in lines).strip()) <= 20             and box.y1 - box.y0 < 60 and len(lines) == len(box.items)
+        chart = not box.border and not box.fill and box.inner_drawings >= 4  # (안에 겹테두리 칸이 따로 잡혀도)
+        # 칠한 제목 칸: 두 줄 제목 띠("‘포틀래치 관습’과 / ‘레비스트로스 구조주의’")까지
+        label = box.fill and not box.parts and 1 <= len(lines) <= 3 and len("".join(l.text for l in lines).strip()) <= 20 * len(lines) \
+            and box.y1 - box.y0 < 25 * len(lines) + 10 and len(lines) == len(box.items)
         if not (chart or label):
             return None
         pad = 1.5
@@ -683,7 +691,8 @@ DEFAULT_LINE_PCT = 155  # 본문 문단(plain)의 한글 줄 간격(%)
 
 def _source_gaps(items: list, body: float) -> None:
     """원문 위치를 따르는 교재: 같은 쪽에서 앞 문단 다음 줄이 원래 올 자리보다 아래에서 시작하는 문단은 그 차이를
-    문단 앞 간격(Para.gap, 본문 글자 크기 단위)으로."""
+    문단 앞 간격(Para.gap, 본문 글자 크기 단위)으로.
+    두 단 쪽에서 앞 문단보다 한참 위에서 시작하는 문단은 원문 오른쪽 단의 첫 문단: 한글에서도 단을 나눈다."""
     prev = None
     for it in items:
         src = getattr(it, "src", None)
@@ -692,6 +701,12 @@ def _source_gaps(items: list, body: float) -> None:
             continue
         if prev is not None and prev[3] == src[0] and src[1] > prev[2]:
             it.gap = round((src[1] - prev[2]) / body, 2)
+            if not getattr(it, "wide", False):
+                # 두 단 쪽의 문제 사이 큰 빈칸은 3줄까지만: 한글에서 지문이 원문보다 한두 줄 길어지면 그 빈칸이 그대로
+                # 더해져 단이 넘친다(문제가 단 맨 위에서 시작하는 것은 단 나눔이 지킨다)
+                it.gap = min(it.gap, 3.0)
+        elif prev is not None and prev[3] == src[0] and src[1] < prev[2] - 3 * body and not getattr(it, "wide", False):
+            it.col_break = True
         prev = src
 
 
@@ -776,7 +791,7 @@ def build_document(ex: Extraction) -> Document:
     if ex.stats.get("ocr_rows"):
         low = ex.stats.get("ocr_low_chars", 0)
         doc.warnings.append(f"글꼴 없이 그려진 글자 {ex.stats['ocr_rows']}줄을 OCR로 읽었습니다"
-                            + (f" — 확신이 낮은 글자 {low}개는 노란 음영으로 표시(확인 후 음영 지우기)" if low else ""))
+                            + (f" — 확신이 낮은 글자 {low}개(발문을 원문과 한 번 대조해 주세요)" if low else ""))
 
     header_set = set(headers)
     single_pages = {pm.info.number for pm in ex.pages if pm.info.single}
@@ -859,6 +874,16 @@ def build_document(ex: Extraction) -> Document:
         if k < len(doc.items) and (fi == 0 or flow[fi - 1].page != flow[fi].page):
             doc.items[k].top = True
     if ex.faithful:
+        # 빈 문단(연 구분)은 빼고 원문 간격으로 띄운다(빈 문단이 있으면 간격을 잴 앞 문단을 잃는다)
+        items = []
+        for it in doc.items:
+            if isinstance(it, Para) and it.kind == "blank":
+                continue
+            items.append(it)
+        for k, it in enumerate(doc.items):  # 쪽 첫 내용 표시는 다음 항목으로 옮긴다
+            if it.top and isinstance(it, Para) and it.kind == "blank" and k + 1 < len(doc.items):
+                doc.items[k + 1].top = True
+        doc.items = items
         _source_gaps(doc.items, b.size)
         for it in doc.items:
             if isinstance(it, Para) and it.kind == "table" and it.table is not None and it.table.memo:

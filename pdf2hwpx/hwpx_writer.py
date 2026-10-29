@@ -20,6 +20,7 @@ from xml.sax.saxutils import escape
 
 from .master_template import apply_template
 from .masterpage import MARGINS_WITH_MASTER, NS as MASTER_NS, PAPER_H, PAPER_W, Logo, MasterIds, build_masterpage
+from .ir import DEFAULT_LINE_PCT
 from .model import BLANK_BOX, AnswerEntry, AuxBlock, Document, ImageEl, Para, Passage, Question, Run, TableEl
 from .style import DocStyle
 
@@ -331,6 +332,7 @@ class HwpxWriter:
         self.img_max_free = col_w - 600
         m = self.margins  # 그림이 한 쪽 본문 높이를 넘지 않게(전폭 쪽의 큰 도식 그림)
         self.img_max_h = PAPER_H - m["top"] - m["bottom"] - m["header"] - m["footer"] - 3000
+        self._fscale = 1.0  # 원문 쪽을 따르는 교재에서 지금 쓰는 쪽의 그림·간격 축소 비율(_page_scales)
         self.master_ids: Optional[MasterIds] = None
         self.logo: Optional[Logo] = None
         self.master_tpl: Optional[tuple[str, str]] = None  # 가져온 바탕쪽 (masterPage 속성, 안쪽 XML)
@@ -514,8 +516,8 @@ class HwpxWriter:
         name = f"image{idx}"
         self.images.append((name, img.png))
         self.stats["pictures"] += 1
-        w = int(img.width * PT_TO_HWP)
-        h = int(img.height * PT_TO_HWP)
+        w = int(img.width * PT_TO_HWP * self._fscale)
+        h = int(img.height * PT_TO_HWP * self._fscale)
         if w > max_w:
             h = int(h * max_w / w)
             w = max_w
@@ -954,8 +956,11 @@ class HwpxWriter:
         if isinstance(it, Para):
             src = self._source_ov(it)
             if it.kind == "image":
-                ov = {**src, "align": it.align} if src else {}
-                if src and it.left_pt:
+                # (쪽 첫 그림은 앞 간격이 없어 src가 비어도 원문 정렬을 따른다: 가운데 제목 띠)
+                ov = {**src, "align": it.align} if src or self.doc.faithful else {}
+                if self.doc.faithful:  # 글자처럼 놓인 그림은 줄 간격 %가 그림 높이에 곱해진다: 원문 높이 그대로(100%)
+                    ov["line"] = 100
+                if ov and it.left_pt:
                     ov["left"] = int(it.left_pt * PT_TO_HWP)
                 return [self._p(S0.derive(PP["plain"], **ov) if ov else PP["plain"], self._pic(it.image, self.img_max_free))]
             if it.kind == "table":
@@ -976,6 +981,27 @@ class HwpxWriter:
                 return [self._empty(PP["plain"])]
         return []
 
+    def _page_scales(self, items: list) -> list[float]:
+        """원문 쪽을 따르는 교재: 원문 내용 높이가 한글 본문 높이보다 크면(원문 쪽 테두리 안이 한글 쪽 본문보다 길다)
+        그 쪽의 그림 크기·문단 앞 간격·줄 간격을 같은 비율로 줄여 한 쪽에 들어가게 한다(글자 크기는 그대로)."""
+        out = [1.0] * len(items)
+        if not self.doc.faithful:
+            return out
+        m = self.margins
+        avail = 0.92 * (PAPER_H - m["top"] - m["bottom"] - m["header"] - m["footer"]) / PT_TO_HWP
+        k = 0
+        while k < len(items):
+            j = k + 1
+            while j < len(items) and not getattr(items[j], "top", False):
+                j += 1
+            srcs = [it.src for it in items[k:j] if isinstance(it, Para) and it.src]
+            if srcs:
+                span = max(s[2] for s in srcs) - min(s[1] for s in srcs)
+                if span > avail:
+                    out[k:j] = [avail / span] * (j - k)
+            k = j
+        return out
+
     def _source_ov(self, p: Para) -> dict:
         """원문 위치를 따르는 교재: 원문 줄 간격(여러 줄 문단)과 앞 내용과의 원문 간격(문단 앞 간격)."""
         if not self.doc.faithful:
@@ -983,8 +1009,10 @@ class HwpxWriter:
         ov = {}
         if p.line_pct:
             ov["line"] = p.line_pct
+        if self._fscale < 1.0 and p.kind == "text":  # 원문이 한글 본문보다 긴 쪽: 줄 간격도 줄인다
+            ov["line"] = max(100, round((p.line_pct or DEFAULT_LINE_PCT) * self._fscale))
         if p.gap > 0:
-            ov["prev"] = int(p.gap * self.style.body_size * 100)  # 본문 글자 크기 단위 -> pt -> HWPUNIT
+            ov["prev"] = int(p.gap * self.style.body_size * 100 * self._fscale)  # 본문 글자 크기 단위 -> pt -> HWPUNIT
         return ov
 
     def _set_width(self, wide: bool) -> None:
@@ -1000,7 +1028,9 @@ class HwpxWriter:
         items = self.doc.items
         first_wide = bool(items) and getattr(items[0], "wide", False)
         wide_mode = first_wide
+        scales = self._page_scales(items)
         for k, it in enumerate(items):
+            self._fscale = scales[k]
             wide = getattr(it, "wide", False)
             self._set_width(wide)
             self._styled = not isinstance(it, (Passage, Question))
@@ -1026,7 +1056,10 @@ class HwpxWriter:
                 # 전폭 부분은 원문 쪽마다 새 쪽(작품 미리보기 / 출제 포인트 / 작품 정리). 쪽 테두리가 있는 학원 자체 교재는
                 # 두 단 쪽도 원문 쪽마다 새 쪽(PDF 한 쪽 = 한글 한 쪽)
                 paras[0] = paras[0].replace('pageBreak="0"', 'pageBreak="1"', 1)
+            elif getattr(it, "col_break", False) and not wide_mode:  # 원문 오른쪽 단의 첫 문단
+                paras[0] = paras[0].replace('columnBreak="0"', 'columnBreak="1"', 1)
             body.extend(paras)
+        self._fscale = 1.0
         self._set_width(False)
         mp = self.master_ids is not None or self.master_tpl is not None
         sections = [self.section_xml(body, "masterpage0" if mp else None, cols=1 if first_wide else 2)]

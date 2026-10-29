@@ -1029,3 +1029,77 @@ def test_ocr_reads_korean_stem(tmp_path):
     text = "".join(ch.c for ch in ocr.fix_chars(rows[0]))
     assert "윗글에서언급한내용이아닌것은?" in text, text
 
+
+
+def test_semibold_body_font_is_not_bold():
+    """SemiBold·DemiBold(글꼴 굵게 표시가 켜져 있어도)는 본문 굵기: 교재 본문 전체가 굵게 되면 글자가 넓어져 쪽이 넘친다."""
+    from pdf2hwpx.extract import _is_bold
+
+    assert not _is_bold("AAAAAI+Eulyoo1945-SemiBold", 20, 16)
+    assert not _is_bold("NotoSans-DemiBold", 20)
+    assert _is_bold("HCRDotum-Bold", 20, 16)
+    assert _is_bold("NanumSquareEB", 4)
+
+
+def test_blank_image_mask_is_not_an_icon(tmp_path):
+    """아무것도 칠하지 않는 그림(투명도가 모두 0인 이미지 마스크, 흰 그림)은 원문자 아이콘(○)으로 만들지 않는다."""
+    import pymupdf as fitz
+
+    from pdf2hwpx.extract import _blank_image
+
+    doc = fitz.open()
+    page = doc.new_page(width=100, height=100)
+    white = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)
+    white.set_rect(white.irect, (255, 255, 255))
+    dark = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)
+    dark.set_rect(dark.irect, (0, 0, 0))
+    clear = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), True)
+    clear.set_rect(clear.irect, (0, 0, 0, 0))
+    xw = page.insert_image(fitz.Rect(10, 10, 20, 20), pixmap=white)
+    xd = page.insert_image(fitz.Rect(30, 10, 40, 20), pixmap=dark)
+    xc = page.insert_image(fitz.Rect(50, 10, 60, 20), pixmap=clear)
+    assert _blank_image(doc, xw) and _blank_image(doc, xc)
+    assert not _blank_image(doc, xd)
+
+
+def test_linked_chart_absorbs_overlapping_boxes():
+    """잇는 선이 우연히 닫힌 네모를 이루면 그 네모가 상자로 잡힌다: 거기에 걸친 상자(2·3문단)도 구조도 묶음에 넣어
+    그림이 잘리지 않게 한다."""
+    from pdf2hwpx.extract import _Seg, _linked_boxes
+
+    one, two, three, four = (69, 459, 201, 539), (244, 382, 376, 461), (244, 542, 376, 622), (422, 459, 554, 539)
+    loop = (222, 422, 399, 582)  # 1문단 오른쪽에서 갈라져 2·3문단으로 가는 선과 4문단으로 모이는 선이 이룬 네모
+    segs = [_Seg(201, 499, 222, 499, 0.5, None), _Seg(399, 499, 417, 499, 0.5, None)]
+    out = _linked_boxes([one, two, three, four, loop], segs, None)
+    assert len(out) == 1
+    x0, y0, x1, y1 = out[0]
+    assert y0 <= 382 and y1 >= 622 and x0 <= 69 and x1 >= 554
+
+
+def test_ocr_align_wide_first_char_box():
+    """OCR이 단어 첫 글자에 단어 전체 상자를 붙여도('설' 438.8~474) 원문 글자 도형과 짝지어 '설 명'처럼 띄지 않는다."""
+    import pymupdf as fitz
+
+    from pdf2hwpx.extract import _align
+    from pdf2hwpx.ocr import OcrChar
+
+    chars = [OcrChar("설", 438.8, 0, 474.1, 9, 93), OcrChar("명", 447.8, 0, 456.6, 9, 91)]
+    shapes = [fitz.Rect(438.8, 0, 447.0, 9), fitz.Rect(448.3, 0, 455.9, 9)]
+    pairs = _align(chars, shapes, 9.94)
+    assert [(c.c, q.x0) for c, q in pairs] == [("설", 438.8), ("명", 448.3)]
+
+
+def test_source_gaps_column_break_and_cap():
+    """원문 쪽을 따르는 교재: 두 단 쪽에서 한참 위로 돌아가는 문단은 오른쪽 단의 첫 문단(단 나눔), 문제 사이 큰 빈칸은
+    3줄까지만(한글에서 지문이 길어지면 단이 넘친다). 전폭 쪽(표지)은 원문 간격 그대로."""
+    from pdf2hwpx.ir import _source_gaps
+    from pdf2hwpx.model import Para
+
+    a = Para(src=(1, 100, 290, 1))
+    b = Para(src=(1, 370, 390, 1))  # 80pt 아래: 8줄 -> 3줄
+    c = Para(src=(1, 105, 150, 1))  # 오른쪽 단 맨 위
+    w1, w2 = Para(src=(2, 100, 200, 2), wide=True), Para(src=(2, 300, 320, 2), wide=True)
+    _source_gaps([a, b, c, w1, w2], 10.0)
+    assert b.gap == 3.0 and not b.col_break
+    assert c.col_break and c.gap == 0.0
+    assert w2.gap == 10.0

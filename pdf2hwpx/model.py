@@ -221,6 +221,7 @@ class Para:
     src: Optional[tuple] = None  # (쪽, 첫 줄 위 y, 다음 내용이 원래 시작할 y): 앞 내용과의 간격을 잴 때
     line_pct: int = 0  # 원문 줄 간격(글자 크기 대비 %), 여러 줄 문단만
     gap: float = 0.0  # 앞 내용과의 원문 간격 중 기본 줄 간격을 넘는 만큼(본문 글자 크기 단위)
+    col_break: bool = False  # 원문 쪽을 따르는 교재: 원문에서 오른쪽 단 맨 위에서 시작하는 문단(한글에서 단 나눔)
 
     @property
     def text(self) -> str:

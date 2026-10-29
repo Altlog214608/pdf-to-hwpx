@@ -122,9 +122,38 @@ def _resample(pix: fitz.Pixmap, n: int) -> list[int]:
 
 # --------------------------------------------------------------------------
 
+def _blank_image(doc: fitz.Document, xref: int) -> bool:
+    """아무것도 칠하지 않는 그림: 투명도가 모두 0(빈 이미지 마스크)이거나 모든 점이 흰색."""
+    try:
+        pix = fitz.Pixmap(doc, xref)
+    except Exception:  # 인라인 그림(xref 0) 등
+        return False
+    if pix.alpha:
+        a = pix.samples[pix.n - 1::pix.n]
+        if max(a, default=0) == 0:
+            return True
+    kind, smask = doc.xref_get_key(xref, "SMask")  # 투명도를 따로 둔 그림: 투명도가 모두 0이면 안 보인다
+    if kind == "xref":
+        try:
+            if max(fitz.Pixmap(doc, int(smask.split()[0])).samples, default=0) == 0:
+                return True
+        except Exception:
+            pass
+    if pix.colorspace is None:
+        return False
+    if pix.n - pix.alpha != 1:
+        pix = fitz.Pixmap(fitz.csGRAY, pix)
+    color = pix.samples if not pix.alpha else bytes(pix.samples[k] for k in range(0, len(pix.samples), pix.n))
+    return min(color, default=0) > 235
+
+
 def _is_bold(font: str, flags: int, char_flags: int = 0) -> bool:
-    """굵은 글꼴 이름(…Bold, 나눔스퀘어 B/EB 등)이거나, 글자를 칠하고 테두리까지 그린 가짜 굵게(한글이 내보내는 진하게)."""
-    return ("bold" in font.lower() or bool(flags & 16) or bool(re.search(r"[a-z](?:EB|XB|B)$", font))
+    """굵은 글꼴 이름(…Bold, 나눔스퀘어 B/EB 등)이거나, 글자를 칠하고 테두리까지 그린 가짜 굵게(한글이 내보내는 진하게).
+    SemiBold·DemiBold는 본문용 굵기다(을유1945 SemiBold로 쓴 교재 본문 전체가 굵게 되면 글자가 넓어져 쪽이 넘친다)."""
+    name = font.lower()
+    if "semibold" in name or "demibold" in name:  # (글꼴 굵게 표시도 켜져 있다)
+        return (char_flags & 48) == 48
+    return ("bold" in name or bool(flags & 16) or bool(re.search(r"[a-z](?:EB|XB|B)$", font))
             or (char_flags & 48) == 48)
 
 
@@ -322,9 +351,6 @@ def _outline_rows(drawings: list[dict]) -> list[list[float]]:
     return [[row[0].x0, min(r.y0 for r in row), row[-1].x1, max(r.y1 for r in row), len(row)] for row in rows]
 
 
-OCR_SHADE = "#FFE699"  # OCR 확신도가 낮은 글자 음영(한글에서 '확인 필요')
-
-
 LEAD_NUM = set("0123456789.。,·oOㅇlI|")  # 줄 맨 앞 번호를 OCR이 이렇게 읽기도 한다
 
 
@@ -333,7 +359,8 @@ def _align(chars: list, shapes: list, size: float) -> list[tuple]:
     가운데가 글자 크기만큼 넘게 떨어진 짝은 짓지 않는다(OCR 상자는 단어를 나눈 것이라 반 글자쯤 어긋나기도 한다)."""
     n, m = len(chars), len(shapes)
     skip, far = 0.8 * size, 1.0 * size
-    cx = [(c.x0 + c.x1) / 2 for c in chars]
+    # (단어 첫 글자에 단어 전체 상자가 붙어 나오기도 한다: '설 438.8~474.1' -> 왼쪽 끝에서 반 글자)
+    cx = [c.x0 + min(c.x1 - c.x0, size) / 2 for c in chars]
     sx = [(q.x0 + q.x1) / 2 for q in shapes]
     cost = [[0.0] * (m + 1) for _ in range(n + 1)]
     for i in range(1, n + 1):
@@ -412,14 +439,22 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
                 continue
             rows[k] = sorted([ch for ch in rows[k] if ch not in old] + new, key=lambda ch: ch.x0)
     shapes = [fitz.Rect(d["rect"]) for d in page.get_drawings() if _glyph_path(d)]
+
+    def row_size(chars) -> float:
+        hangul = [ch.y1 - ch.y0 for ch in chars if "가" <= ch.c <= "힣"]
+        return statistics.median(hangul) / 0.88 if hangul else statistics.median(ch.y1 - ch.y0 for ch in chars) / 0.8
+    # 한 쪽의 발문은 같은 크기: 줄마다 잰 크기가 쪽 가운데값과 12% 안이면 가운데값으로("은?"처럼 짧은 줄은 잰 값이 흔들린다)
+    page_sizes = [row_size(chars) for chars in rows if chars]
+    page_size = statistics.median(page_sizes) if page_sizes else 0.0
     out: list[Optional[_Frag]] = []
     for r, chars, real in zip(rects, rows, inside):
         # 확신도 낮은 글자가 많은 줄(무늬·밑줄이 겹친 줄 등)은 잘못 읽은 것이 많아 그림으로 둔다
         if not chars or sum(ch.conf < ocr.LOW_CONF for ch in chars) > 0.25 * len(chars):
             out.append(None)
             continue
-        hangul = [ch.y1 - ch.y0 for ch in chars if "가" <= ch.c <= "힣"]
-        size = statistics.median(hangul) / 0.88 if hangul else statistics.median(ch.y1 - ch.y0 for ch in chars) / 0.8
+        size = row_size(chars)
+        if abs(size - page_size) < 0.12 * page_size:
+            size = page_size
         # 글자 위치는 원문 윤곽선 글자 도형에 맞춘다(글자 하나 = 도형 하나, OCR 상자는 단어를 나눈 것이라 부정확):
         # 띄어쓰기를 원문 간격 그대로 잴 수 있다
         own = sorted((q for q in shapes if r[0] <= (q.x0 + q.x1) / 2 <= r[2] and r[1] <= (q.y0 + q.y1) / 2 <= r[3]),
@@ -434,6 +469,16 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
                 w = min(ch.x1 - ch.x0, 0.6 * size)
                 ch.x0 = max(ch.x0, chars[k - 1].x1 + 0.01)
                 ch.x1 = ch.x0 + w
+        # 글자 하나를 도형 여러 개로 그린 것('설'의 받침 ㄹ 등): 짝 없는 도형은 가로로 겹치는 글자 상자에 합친다
+        # (안 합치면 글자 폭이 좁게 잡혀 '설 명'처럼 단어 안이 띄어진다)
+        used = {id(q) for q in pairs.values()}
+        snapped_chars = [ch for ch in chars if id(ch) in pairs]
+        for q in own:
+            if id(q) in used or q.width > 1.2 * size:
+                continue
+            best = max(snapped_chars, key=lambda ch: min(ch.x1, q.x1) - max(ch.x0, q.x0), default=None)
+            if best is not None and min(best.x1, q.x1) - max(best.x0, q.x0) > 0.3 * q.width:
+                best.x0, best.x1 = min(best.x0, q.x0), max(best.x1, q.x1)
         # 단어 안 글자 간격은 붙이고 단어 사이만 띄운다. 원문 도형에 맞춘 줄은 잉크 사이 간격이 단어 안(글자 높이의 0.2배
         # 이하)과 단어 사이(0.4배 이상)로 뚜렷이 나뉘어 글자 크기의 28%로, OCR 상자 그대로인 줄은 줄 안 보통 간격보다
         # 글자 크기의 20% 넘게(그리고 38% 넘게) 넓은 곳
@@ -456,8 +501,7 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
                 sz = max(size, (ch.y1 - ch.y0) / 0.72)
             cy = (ch.y0 + ch.y1) / 2 if sz > size else (r[1] + r[3]) / 2
             g = Glyph(ch.c, ch.x0, cy - 0.6 * sz, ch.x1, cy + 0.6 * sz, sz, bold)
-            if ch.conf < ocr.LOW_CONF:
-                g.shade = OCR_SHADE
+            if ch.conf < ocr.LOW_CONF:  # 수만 센다(음영을 넣으면 원문에 없는 형광펜처럼 보인다)
                 stats["ocr_low_chars"] += 1
             glyphs.append(g)
         stats["ocr_rows"] += 1
@@ -513,10 +557,16 @@ def _merge_outline_rows(rows: list[list[float]], frags: list[_Frag]) -> list[tup
 def _page_segments(page: fitz.Page, drawings: Optional[list[dict]] = None) -> tuple[list[_Seg], int]:
     segs: list[_Seg] = []
     others = []
-    for d in page.get_drawings() if drawings is None else drawings:
+    drawings = page.get_drawings() if drawings is None else drawings
+    rows = [fitz.Rect(r[:4]) + (-1.0, -1.0, 1.0, 1.0) for r in _outline_rows(drawings)]
+    for d in drawings:
         if _invisible(d):  # 선 없이 흰색으로만 칠한 사각형(한글이 문단 배경으로 내보냄)은 보이지 않으므로 테두리가 아니다
             continue
         if _glyph_path(d):  # 윤곽선 글자의 획은 테두리·도형이 아니다
+            continue
+        # 윤곽선 글자 줄 안에 든 도형도 글자의 일부다: 따로 그린 가로획(으·은·보의 'ㅡ'), 굵게 보이려고 같은 글자를
+        # 선으로 한 번 더 그린 것(칠하지 않은 윤곽). 밑줄·테두리로 잡지 않는다
+        if any(r.contains(d["rect"]) for r in rows):
             continue
         w = float(d.get("width") or 0.0)
         sc = d.get("color")
@@ -694,6 +744,16 @@ def _linked_boxes(rects: list[tuple[float, float, float, float]], segs: list[_Se
         y0 = min([r[1] for r in bs] + [s.y0 for s in ls]) - 2
         x1 = max([r[2] for r in bs] + [s.x1 for s in ls]) + 2
         y1 = max([r[3] for r in bs] + [s.y1 for s in ls]) + 2
+        # 묶음에 걸친 상자도 넣는다(잇는 선이 우연히 닫힌 네모를 이루면 그 '네모'가 상자로 잡히고, 거기에 붙은
+        # 상자들은 그 네모의 변에 닿아 선으로 이어지지 않는다)
+        grown = True
+        while grown:
+            grown = False
+            for r in top:
+                if r[0] < x1 - 2 and r[2] > x0 + 2 and r[1] < y1 - 2 and r[3] > y0 + 2 \
+                        and r[2] - r[0] < x1 - x0 and r[3] - r[1] < y1 - y0 and not (x0 <= r[0] and r[2] <= x1 and y0 <= r[1] and r[3] <= y1):
+                    x0, y0, x1, y1 = min(x0, r[0] - 2), min(y0, r[1] - 2), max(x1, r[2] + 2), max(y1, r[3] + 2)
+                    grown = True
         if colsep is not None and x0 < colsep - 10 < colsep + 10 < x1:
             continue
         out.append((x0, y0, x1, y1))
@@ -1174,6 +1234,10 @@ def extract(pdf_path: str) -> Extraction:
                 stats["pill_labels"] += 1
                 continue
             if 4 <= w <= 16 and 4 <= h <= 16 and 0.75 <= w / h <= 1.33:
+                # 보이지 않는 빈 그림(발문 띄어쓰기 자리에 놓인 흰 네모 등)은 원문자 아이콘이 아니다
+                if _blank_image(doc, xref):
+                    stats["dropped_decorative_image"] += 1
+                    continue
                 ch = icon_digests.setdefault(digest, chr(ICON_PUA_BASE + len(icon_digests)))
                 kept.append(_Frag([Glyph(ch, x0, y0, x1, y1, h * 1.08, False, icon=digest)], x0, y0, x1, y1, h * 1.08))
                 stats["icons"] += 1
