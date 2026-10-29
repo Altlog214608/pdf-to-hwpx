@@ -26,7 +26,7 @@ EXPL_RE = re.compile(r"^\s*\[\s*해설\s*\]")
 LABEL_RE = re.compile(r"^\s*(\([가-힣A-Za-z]\)|\[[A-Z가-힣]\]|<[가-힣]\>)\s*$")
 # 줄 머리에 오면 새 문단을 시작하는 표지 (원문자/목록/화자/섹션 라벨 등)
 MARKER_RE = re.compile(
-    r"^\s*(?:[①-⑳]|[㉠-㉻ⓐ-ⓩ](?=\s)|\([가-힣A-Za-z0-9]\)(?=\s|$)|[ㄱ-ㅎ]\s*\.|[A-Z]\s*\.|\d{1,2}\s*\.(?!\d)"
+    r"^\s*(?:[①-⑳]|[㉠-㉻ⓐ-ⓩ](?=\s|:)|\([가-힣A-Za-z0-9]\)(?=\s|$)|[ㄱ-ㅎ]\s*\.|[A-Z]\s*\.|\d{1,2}\s*\.(?!\d)"
     r"|[-–—•·▪◦○●□■◇◆※]\s|[가-힣A-Za-z]{1,6}\s?:|S#|\[[^\]]{1,20}\])")
 
 BodyBounds = Callable[[Line], tuple[float, float]]
@@ -103,6 +103,15 @@ def _hangul_spacing(lines: list[Line]) -> int:
         return 0
     v = round(min(vals) * 100)
     return max(-20, v) if v <= -2 else 0
+
+
+def _side_by_side(a: ImageEl, b: ImageEl) -> bool:
+    """같은 쪽·단에서 세로로 절반 넘게 겹치고 가로로는 대부분 떨어진 두 그림(여백 때문에 상자가 조금 겹치기도 한다)."""
+    if (a.page, a.col) != (b.page, b.col):
+        return False
+    ov_y = min(a.y1, b.y1) - max(a.y0, b.y0)
+    ov_x = min(a.x1, b.x1) - max(a.x0, b.x0)
+    return ov_y > 0.5 * min(a.y1 - a.y0, b.y1 - b.y0) and ov_x < 0.25 * min(a.x1 - a.x0, b.x1 - b.x0)
 
 
 def _same_row(prev: Line, ln: Line) -> bool:
@@ -439,6 +448,12 @@ class Builder:
             items = items[1:]
         kind = "조건" if "조건" in title else ("보기" if "보기" in title or not title else "기타")
         blk = AuxBlock(title=title, kind=kind, fill=box.fill, border_color=box.border_color, border=box.border)
+        for part in [box] + box.parts:  # 상자 안 그림은 상자 안쪽만(여백이 넓은 그림 영역이 테두리 선까지 잘라 왔다)
+            for im in part.items:
+                if isinstance(im, ImageEl) and im.page == part.page and part.y0 < im.y1 < part.y1 + 12:
+                    im.y1 = min(im.y1, part.y1 - 1.0)
+                    im.y0 = max(im.y0, part.y0 + 1.0)
+                    im.x0, im.x1 = max(im.x0, part.x0 + 1.0), min(im.x1, part.x1 - 1.0)
         drawings = box.inner_drawings + sum(p.inner_drawings for p in box.parts)
         diagram = drawings >= 4
         n_imgs = sum(1 for x in items if isinstance(x, ImageEl))
@@ -915,6 +930,7 @@ def build_document(ex: Extraction) -> Document:
     for r in _iter_runs(doc):  # 원문 본문 크기 대비 글자 크기(문제 밖 내용의 작은 설명 글 등)
         r.rel = round(r.size / body, 2) if r.size and body else 1.0
 
+    _image_rows(doc, b)
     # 그림 렌더링 (박스 안/지문/문제 그림)
     for img in _iter_images(doc):
         if img.png is None:
@@ -1097,7 +1113,9 @@ def _build_question(b: Builder, number: int, items: list, passage: Optional[Pass
             elif state == "choices" and choice_lines:
                 prev = choice_lines[-1][-1]
                 far = (prev.page, prev.col) != (ln.page, ln.col) or ln.y0 - prev.y0 > 2.5 * ln.size
-                if len(choice_lines) >= 5 and (far or not b._is_full(prev)):
+                # (다섯째 선택지 아래 들여 쓴 표지 줄 "⑤ ⓐ: … / ⓑ: …"의 ⓑ 줄은 그 선택지)
+                sub = not far and re.match(r"\s*[㉠-㉻ⓐ-ⓩ]", t) is not None and ln.x0 > choice_lines[-1][0].x0 + 0.5 * ln.size
+                if len(choice_lines) >= 5 and (far or not b._is_full(prev)) and not sub:
                     state = "after"
                     pending.append(ln)
                 else:
@@ -1249,6 +1267,51 @@ def _iter_runs(doc: Document):
         yield from from_paras([a.head] + a.paras)
 
 
+def _merge_image_row(paras: list, b: "Builder") -> list:
+    """같은 높이에 나란히 놓인 그림 문단((가) | (나))을 한 문단으로(왼쪽부터). 겹친 곳(왼쪽 그림의 여백)은 왼쪽 그림에서
+    잘라 내고, 원문에서 상자·단 왼쪽에 붙어 있으면 왼쪽 정렬(위 "(가)  (나)" 표시와 맞게)."""
+    out: list = []
+    for p in paras:
+        prev = out[-1] if out else None
+        if isinstance(p, Para) and p.kind == "image" and p.image is not None and not p.children                 and isinstance(prev, Para) and prev.kind == "image" and prev.image is not None:
+            row = prev.children or [Para(kind="image", image=prev.image, align="CENTER")]
+            if all(_side_by_side(r.image, p.image) for r in row):
+                row = sorted(row + [Para(kind="image", image=p.image, align="CENTER")], key=lambda r: r.image.x0)
+                for x, y in zip(row, row[1:]):
+                    if x.image.x1 > y.image.x0:
+                        x.image.x1 = y.image.x0 - 0.5
+                prev.children, prev.image = row, row[0].image
+                first = row[0].image
+                box = b.box_by_id.get(first.box) if first.box is not None else None
+                left = box.x0 if box is not None else b.col_bounds(first)[0]
+                prev.align = "LEFT" if first.x0 - left <= 1.5 * b.size else "CENTER"
+                continue
+        out.append(p)
+    return out
+
+
+def _image_rows(doc: Document, b: "Builder") -> None:
+    def fix(ps: list) -> list:
+        ps = _merge_image_row(ps, b)
+        for p in ps:
+            if isinstance(p, Para) and p.kind in ("bracket", "tablerow"):
+                p.children = fix(p.children)
+            elif isinstance(p, Para) and p.kind == "table" and p.table is not None:
+                for cl in p.table.cells:
+                    cl.paras = fix(cl.paras)
+        return ps
+    for it in doc.items:
+        if isinstance(it, (Passage, AuxBlock)):
+            it.paras = fix(it.paras)
+        elif isinstance(it, Question):
+            it.blocks = fix(it.blocks)
+            it.after = fix(it.after)
+            for x in it.blocks + it.after:
+                if isinstance(x, AuxBlock):
+                    x.paras = fix(x.paras)
+    doc.items = fix(doc.items)
+
+
 def _iter_images(doc: Document):
     def from_paras(ps):
         for p in ps:
@@ -1256,6 +1319,9 @@ def _iter_images(doc: Document):
                 continue
             if p.kind == "image" and p.image is not None:
                 yield p.image
+                for c in p.children:
+                    if c.image is not None and c.image is not p.image:
+                        yield c.image
             elif p.kind == "table" and p.table is not None:
                 for cl in p.table.cells:
                     yield from from_paras(cl.paras)

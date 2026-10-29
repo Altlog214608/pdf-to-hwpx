@@ -1549,3 +1549,101 @@ def test_boxed_letter_and_fullwidth_punct():
     assert gs[0].boxed and gs[0].size == 10.0
     chars = [ocr.OcrChar(c, k, 0, k + 1, 1, 90.0, 0) for k, c in enumerate("때，세")]
     assert "".join(c.c for c in ocr.fix_chars(chars)) == "때,세"
+
+
+def test_side_by_side_pictures_in_one_row(tmp_path):
+    """실사용(교재 '추상회화' 2번): <보기> 안 (가)·(나) 그림이 나란히 있는데 세로로 쌓이고 (나)가 먼저 나왔다(그림 영역이
+    여백 때문에 10pt 겹쳤다) → 같은 높이의 그림은 한 문단에 왼쪽부터 나란히, 겹친 곳은 왼쪽 그림에서 잘라 낸다."""
+    import zipfile
+
+    import pymupdf as fitz
+
+    from tests.synth_pdf import Writer, _picture_png
+
+    w = Writer()
+    page = w.page
+    w.text(70, 100, "1. 다음 두 그림을 보고 답하시오.", 10)
+    page.insert_image(fitz.Rect(180, 120, 290, 200), stream=_picture_png(60, 40, (0.2, 0.4, 0.8)), keep_proportion=False)
+    page.insert_image(fitz.Rect(60, 120, 190, 210), stream=_picture_png(60, 40, (0.8, 0.3, 0.2)), keep_proportion=False)
+    for k, c in enumerate("①②③④⑤"):
+        w.text(70, 230 + 16 * k, f"{c} 선택지 {k + 1}번 내용입니다", 10)
+    pdf = tmp_path / "row.pdf"
+    w.doc.save(str(pdf))
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    with zipfile.ZipFile(res["hwpx"]) as z:
+        sec = z.read("Contents/section0.xml").decode("utf-8")
+    paras = [p for p in re.findall(r"<hp:p [^>]*>.*?</hp:p>", sec, re.S) if "<hp:pic " in p]
+    assert len(paras) == 1 and paras[0].count("<hp:pic ") == 2
+
+
+def test_box_continuation_needs_same_fill():
+    """실사용: 차례 쪽의 쪽보다 큰 빨간 배경 상자가 다음 쪽 맨 위 검은 제목 띠를 '이어지는 상자'로 삼켜 제목 띠가 차례 쪽
+    끝에 붙었다 → 둘 다 칠해져 있고 색이 다르면 잇지 않는다(한쪽만 칠 정보가 있으면 예전처럼 잇는다)."""
+    import inspect
+
+    from pdf2hwpx import extract as E
+
+    src = inspect.getsource(E.extract)
+    assert "not (last.fill and it.fill and last.fill != it.fill)" in src
+
+
+def test_empty_paragraph_dropped_before_page_break():
+    """앞 쪽이 꽉 찬 뒤 쪽을 나누는 문단 앞의 빈 문단은 그것만 다음 쪽으로 넘어가 빈 쪽이 생겼다 → 뺀다(테두리 있는 빈
+    문단은 상자의 일부라 둔다)."""
+    from pdf2hwpx.hwpx_writer import _empty_p
+
+    empty = '<hp:p id="0" paraPrIDRef="3" styleIDRef="0" pageBreak="0"><hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>' \
+            '<hp:linesegarray><hp:lineseg textpos="0"/></hp:linesegarray></hp:p>'
+    text = empty.replace("<hp:t></hp:t>", "<hp:t>글</hp:t>")
+    pic = empty.replace("<hp:t></hp:t>", '<hp:pic id="1"/>')
+    assert _empty_p(empty) and not _empty_p(text) and not _empty_p(pic)
+
+
+def test_bubble_text_and_wrap_text_around_pictures():
+    """실사용: ① 대화 그림(얼굴 + 말풍선) 위에 글자로 찍은 말풍선 글이 그림 아래 다시 나왔다 → 그림 안에 다 들고 한쪽에
+    빈 띠(얼굴 자리)를 남기면 그림에 넣는다. ② 그림 옆을 감싸 흐르는 본문("역할을 / 한다 / . / 삼각형")은 낱말마다 짧게
+    찍혀 그래프 라벨로 흡수돼 그림이 본문까지 넓어졌다 → 본문 줄 시작 자리에서 이어진 조각은 본문. ③ 그림 바로 아래
+    여러 조각으로 찍은 캡션 "<…>"은 그림에 넣는다."""
+    from collections import Counter
+
+    from pdf2hwpx.extract import _Frag, _absorb_chart_labels
+    from pdf2hwpx.model import Glyph, ImageEl
+
+    def frag(text, x, y, size=10.0):
+        gs = [Glyph(c, x + k * size, y, x + (k + 1) * size, y + size, size) for k, c in enumerate(text)]
+        return _Frag(gs, x, y, gs[-1].x1, y + size, size)
+    bubble = ImageEl(1, 1, 309, 157, 557, 526, "x", 0)
+    talk = [frag("가격과성능", 378, 185), frag("이비슷한제품", 378, 200), frag("심리적갈등", 379, 250)]
+    body = [frag("본문줄이다길게이어지는글", 40, 600 + 12 * k) for k in range(4)]
+    left = _absorb_chart_labels([bubble], talk + body, Counter())
+    assert all(f not in left for f in talk) and all(f in left for f in body)
+
+    fig = ImageEl(1, 1, 426, 248, 530, 357, "y", 0)
+    wrap = [frag("역할을", 317, 244), frag("한다", 356, 244), frag("삼각형", 389, 244)]
+    long = [frag("본문줄이다길게이어진", 317, 380 + 12 * k) for k in range(3)] + [frag("본문줄이다길게이어진", 317, 244)]
+    label = frag("코어", 440, 300)
+    cap = [frag("<", 426, 364, 8.0), frag("아웃리거", 431, 364, 8.0), frag("구조>", 470, 364, 8.0)]
+    left = _absorb_chart_labels([fig], wrap + long + [label] + cap, Counter())
+    assert all(f in left for f in wrap) and label not in left and all(f not in left for f in cap)
+    assert fig.x0 >= 420 and fig.y1 >= 372
+
+
+def test_brace_marker_and_marker_sublines(tmp_path):
+    """실사용(교재 4번 "ⓐ, ⓑ의 의미로 쓰인 예"): 선택지마다 두 줄(ⓐ: … / ⓑ: …)을 괄호로 묶고 번호는 괄호 왼쪽 가운데라
+    읽는 순서가 "ⓐ… / ① / ⓑ…"가 됐다 → 번호는 위 줄 앞에 붙이고, ⓑ 줄은 그 선택지의 아랫줄(다섯째 선택지 것도)."""
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.ir import MARKER_RE
+    from tests.synth_pdf import Writer
+
+    w = Writer()
+    w.text(46, 110, "4. ⓐ, ⓑ의 의미로 쓰인 예가 바르게 짝지어진 것은?", 10)
+    for k, c in enumerate("①②③④⑤"):
+        y = 135 + 32 * k
+        w.text(78, y, f"ⓐ: 첫째 예문 {k + 1}입니다.", 10)
+        w.text(48, y + 9, c, 10)
+        w.text(78, y + 16, f"ⓑ: 둘째 예문 {k + 1}입니다.", 10)
+    pdf = tmp_path / "brace.pdf"
+    w.doc.save(str(pdf))
+    texts = [ln.text for ln in extract(str(pdf)).flow]
+    assert texts[1:] == [t for k, c in enumerate("①②③④⑤") for t in (f"{c} ⓐ: 첫째 예문 {k + 1}입니다.", f"ⓑ: 둘째 예문 {k + 1}입니다.")]
+    assert MARKER_RE.match("ⓑ: 둘째") and not MARKER_RE.match("ⓑ둘째")

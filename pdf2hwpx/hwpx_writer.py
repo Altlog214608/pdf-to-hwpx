@@ -80,6 +80,12 @@ def _new_columns(p_xml: str, cols: int, page_break: bool) -> str:
     return head + f'<hp:run charPrIDRef="0"><hp:ctrl>{_colpr(cols)}</hp:ctrl></hp:run>' + p_xml[m.end():]
 
 
+def _empty_p(p_xml: str) -> bool:
+    """글자·표·그림·조판 부호 없는 빈 문단."""
+    return not any(t.strip() for t in re.findall(r"<hp:t>([^<]*)</hp:t>", p_xml)) \
+        and not re.search(r"<hp:(tbl|pic|ctrl|rect|line|container|equation)[ >/]", p_xml)
+
+
 def _tpl(name: str) -> str:
     return resources.files("pdf2hwpx").joinpath("template", name).read_text(encoding="utf-8")
 
@@ -509,6 +515,29 @@ class HwpxWriter:
     def _empty(self, pp: int) -> str:
         return self._p(pp, '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>')
 
+    def _plain_border(self, p_xml: str) -> bool:
+        """문단 테두리가 일반 문단과 같다(상자 테두리를 문단 테두리로 그린 빈 문단은 상자의 일부라 빼면 안 된다)."""
+        def border(pid: int) -> str:
+            m = re.search(r'<hh:border [^>]*/>', self.styles.para_xml.get(pid, ""))
+            return m.group(0) if m else ""
+        m = re.search(r'paraPrIDRef="(\d+)"', p_xml)
+        return m is not None and border(int(m.group(1))) == border(PP["plain"])
+
+    @staticmethod
+    def _pic_align(p: Para) -> str:
+        """그림 문단 정렬: 나란히 놓인 그림 줄은 원문대로(왼쪽에 붙은 것), 그림 하나는 가운데."""
+        return p.align if p.children and p.align in ("LEFT", "CENTER") else "CENTER"
+
+    def _pics(self, p: Para, max_w: int) -> str:
+        """그림 문단: 나란히 놓인 그림들(p.children)은 한 줄에 원본 폭 비율로 이어 붙인다."""
+        if not p.children:
+            return self._pic(p.image, max_w)
+        imgs = [c.image for c in p.children]
+        tw = sum(i.width for i in imgs) or 1.0
+        gap = '<hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run>'
+        avail = max_w - 500 * (len(imgs) - 1)
+        return gap.join(self._pic(i, int(avail * i.width / tw)) for i in imgs)
+
     def _pic(self, img: ImageEl, max_w: int) -> str:
         if img.png is None:
             raise ValueError("image has no PNG data")
@@ -577,7 +606,7 @@ class HwpxWriter:
             if p.kind == "blank":
                 out.append(self._note_p(S.derive(base, **ov), '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>'))
             elif p.kind == "image" and p.image is not None:
-                out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER", **self._source_ov(p)}), self._pic(p.image, inner_w)))
+                out.append(self._note_p(S.derive(base, **{**ov, "align": self._pic_align(p), **self._source_ov(p)}), self._pics(p, inner_w)))
             elif p.kind == "table" and p.table is not None:
                 out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER"}), self._table(p.table, inner_w)))
             elif p.kind == "tablerow":
@@ -688,7 +717,7 @@ class HwpxWriter:
                 out.append(self._empty(S.derive(base, **ov)))
                 continue
             if p.kind == "image":
-                out.append(self._p(S.derive(base, align="CENTER", **ov), self._pic(p.image, self.img_max_in_box)))
+                out.append(self._p(S.derive(base, align=self._pic_align(p), **ov), self._pics(p, self.img_max_in_box)))
                 continue
             if p.kind == "table":
                 out.append(self._p(S.derive(base, align="CENTER", **ov), self._table(p.table, self.col_w - 300)))
@@ -748,7 +777,7 @@ class HwpxWriter:
             if i == 0 and not blk.title:
                 ov.update(prev=280, offset_top=120)
             if p.kind == "image":
-                out.append(self._p(S.derive(base, align="CENTER", intent=0, **ov), self._pic(p.image, self.img_max_in_box)))
+                out.append(self._p(S.derive(base, align=self._pic_align(p), intent=0, **ov), self._pics(p, self.img_max_in_box)))
                 continue
             if p.kind == "table":
                 out.append(self._p(S.derive(base, align="CENTER", intent=0, **ov), self._table(p.table, self.col_w - 1300)))
@@ -896,7 +925,7 @@ class HwpxWriter:
         if isinstance(b, AuxBlock):
             return self._aux(b, last)
         if b.kind == "image":
-            return [self._p(S.derive(PP["choice"], align="CENTER", left=0, intent=0), self._pic(b.image, self.img_max_free))]
+            return [self._p(S.derive(PP["choice"], align="CENTER", left=0, intent=0), self._pics(b, self.img_max_free))]
         if b.kind == "table":
             return [self._p(S.derive(PP["choice"], align="CENTER", left=0, intent=0), self._table(b.table, self.col_w - 300))]
         if b.kind == "bracket":
@@ -962,7 +991,7 @@ class HwpxWriter:
                     ov["line"] = 100
                 if ov and it.left_pt:
                     ov["left"] = int(it.left_pt * PT_TO_HWP)
-                return [self._p(S0.derive(PP["plain"], **ov) if ov else PP["plain"], self._pic(it.image, self.img_max_free))]
+                return [self._p(S0.derive(PP["plain"], **ov) if ov else PP["plain"], self._pics(it, self.img_max_free))]
             if it.kind == "table":
                 return [self._p(S0.derive(PP["plain"], align="CENTER", **src), self._table(it.table, self.col_w - 300))]
             if it.kind == "tablerow":
@@ -1058,6 +1087,10 @@ class HwpxWriter:
                 paras[0] = paras[0].replace('pageBreak="0"', 'pageBreak="1"', 1)
             elif getattr(it, "col_break", False) and not wide_mode:  # 원문 오른쪽 단의 첫 문단
                 paras[0] = paras[0].replace('columnBreak="0"', 'columnBreak="1"', 1)
+            if re.match(r'<hp:p [^>]*pageBreak="1"', paras[0]):
+                # 쪽을 나누는 문단 앞의 빈 문단은 뺀다(앞 쪽이 꽉 차면 빈 문단만 다음 쪽으로 넘어가 빈 쪽이 생겼다)
+                while body and _empty_p(body[-1]) and self._plain_border(body[-1]):
+                    body.pop()
             body.extend(paras)
         self._fscale = 1.0
         self._set_width(False)

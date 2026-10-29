@@ -885,7 +885,8 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
                 if ch.c not in "'‘’`\"“”:：":
                     continue
                 q = next((q for q in own if ch.x0 - 0.3 <= (q.x0 + q.x1) / 2 <= ch.x1 + 0.3), None)
-                top = q is not None and q.height <= 0.45 * size and q.width <= 0.3 * size                     and (q.y0 + q.y1) / 2 < (r[1] + r[3]) / 2
+                top = q is not None and q.height <= 0.45 * size and q.width <= 0.3 * size \
+                        and (q.y0 + q.y1) / 2 < (r[1] + r[3]) / 2
                 if top and abs(mass.get(id(q), 0.5) - 0.525) > 0.03:  # 여닫는 모양이 다른 글꼴
                     quotes[id(ch)] = "‘" if mass[id(q)] < 0.525 else "’"
                 elif (top or ch.c not in ":：") and 0 < k < len(chars) - 1:  # 같은 모양이면 앞뒤 간격으로
@@ -1748,6 +1749,8 @@ def extract(pdf_path: str) -> Extraction:
             col = 0 if (x0 + x1) / 2 < split_x else 1
             content_imgs.append(ImageEl(pno, col, x0, y0, x1, y1, digest, xref))
         kept = _absorb_chart_labels(content_imgs, kept, stats)
+        for key in list(cell_frags):  # 표 칸(메모 칸 쪽의 글 칸) 안 그림의 라벨도
+            cell_frags[key] = _absorb_chart_labels(content_imgs, cell_frags[key], stats)
         for x0, y0, x1, y1 in outline_rects:
             content_imgs.append(ImageEl(pno, 0 if (x0 + x1) / 2 < split_x else 1, x0, y0, x1, y1, OUTLINE_TEXT, 0))
 
@@ -2150,6 +2153,8 @@ def extract(pdf_path: str) -> Extraction:
             items.sort(key=lambda it: (it.y0, it.x0))
             flow.extend(items)
         flow.extend(sorted(below, key=lambda it: (it.y0, it.x0)))
+        flow = _attach_brace_markers(flow)
+        lines = [ln for ln in lines if ln.glyphs]
         pm = PageModel(info, lines, content_imgs, boxes, flow)
         pages.append(pm)
 
@@ -2164,7 +2169,9 @@ def extract(pdf_path: str) -> Extraction:
             if isinstance(it, Box) and isinstance(prev, Box):
                 last = prev.parts[-1] if prev.parts else prev
                 pinfo, cinfo = info_by_page[last.page], info_by_page[it.page]
+                # (칠한 색이 다른 상자는 잇지 않는다: 차례 쪽 빨간 배경 상자가 다음 쪽 맨 위 검은 제목 띠를 삼켰다)
                 if (last.page, last.col) != (it.page, it.col) and pinfo.single == cinfo.single \
+                        and not (last.fill and it.fill and last.fill != it.fill) \
                         and last.y1 >= pinfo.content_bottom - 4 * body_size \
                         and it.y0 <= cinfo.content_top + 4 * body_size \
                         and not _starts_with_title(it):
@@ -2210,6 +2217,9 @@ def _absorb_chart_labels(imgs: list[ImageEl], kept: list[_Frag], stats: Counter)
     def inside(f: _Frag, im) -> bool:
         return im.x0 <= (f.x0 + f.x1) / 2 <= im.x1 and im.y0 <= (f.y0 + f.y1) / 2 <= im.y1
 
+    # 본문 줄이 시작하는 자리(긴 조각이 3번 넘게 시작하는 x): 거기서 시작하는 조각은 라벨이 아니라 그림 옆을 감싸 흐르는 본문
+    starts = Counter(round(f.x0) for f in kept if not short(f))
+    body_x = [x for x, n in starts.items() if n >= 3]
     for im in imgs:
         if im.x1 - im.x0 < 40 or im.y1 - im.y0 < 40 or not any(short(f) and inside(f, im) for f in kept):
             continue
@@ -2218,7 +2228,7 @@ def _absorb_chart_labels(imgs: list[ImageEl], kept: list[_Frag], stats: Counter)
         while grew:
             grew = False
             for f in kept:
-                if f in taken or not short(f):
+                if f in taken or not short(f) or any(abs(f.x0 - x) <= 1.0 for x in body_x):
                     continue
                 m = 1.5 * f.size
                 if not (im.x0 - m <= f.x1 and f.x0 <= im.x1 + m and im.y0 - m <= f.y1 and f.y0 <= im.y1 + m):
@@ -2226,13 +2236,68 @@ def _absorb_chart_labels(imgs: list[ImageEl], kept: list[_Frag], stats: Counter)
                 row = [o for o in kept if o is not f and min(o.y1, f.y1) - max(o.y0, f.y0) > 0.5 * min(o.y1 - o.y0, f.y1 - f.y0)]
                 if any(not short(o) and (im.x0 - m <= o.x1 and o.x0 <= im.x1 + m) for o in row):
                     continue
+                # 양쪽 정렬로 낱말마다 갈라 찍힌 본문 줄("역할을 / 한다 / . / 삼각형"): 같은 줄에 붙어 이어진 조각을 합쳐
+                # 8자를 넘으면 본문(그림 옆을 감싸 흐르는 글을 그림에 넣어 글이 두 번 나왔다)
+                chain, grow = [f], True
+                while grow:
+                    grow = False
+                    for o in row:
+                        if o not in chain and any(o.x0 - c.x1 <= 1.5 * f.size and c.x0 - o.x1 <= 1.5 * f.size for c in chain):
+                            chain.append(o)
+                            grow = True
+                if sum(len("".join(g.c for g in c.glyphs if not g.is_space)) for c in chain) > 8 \
+                        or any(abs(c.x0 - x) <= 1.0 for c in chain for x in body_x):
+                    continue
                 taken.append(f)
                 im.x0, im.y0, im.x1, im.y1 = min(im.x0, f.x0), min(im.y0, f.y0), max(im.x1, f.x1), max(im.y1, f.y1)
                 grew = True
+        # 그림 바로 아래 그림 가로 범위 안의 캡션("<아웃리거-벨트 트러스 구조>", 조각 여럿으로 찍힘)도 그림에 넣는다
+        # (옆 본문 줄에 붙었다)
+        below = sorted((f for f in kept if f not in taken and 0 <= f.y0 - im.y1 <= 1.5 * f.size
+                        and im.x0 - f.size <= f.x0 and f.x1 <= im.x1 + f.size), key=lambda f: f.x0)
+        text = "".join(g.c for f in below for g in f.glyphs if not g.is_space)
+        if below and re.fullmatch(r"[<〈＜].{1,30}[>〉＞]", text):
+            taken += below
+            for f in below:
+                im.x0, im.y0, im.x1, im.y1 = min(im.x0, f.x0), min(im.y0, f.y0), max(im.x1, f.x1), max(im.y1, f.y1)
         if taken:
             stats["chart_labels"] += len(taken)
             kept = [f for f in kept if f not in taken]
+    # 그림(얼굴 + 말풍선) 위에 글자로 찍은 말풍선 글: 그림을 쪽에서 잘라 넣으면 글자도 그림에 들어가므로 글로 또 넣지
+    # 않는다(대화 그림 아래에 말풍선 글이 다시 나왔다). 그림 안에 다 들어가고 그림 폭의 80%보다 좁으며, 글들이 한쪽에
+    # 그림 폭의 20% 넘는 빈 띠(얼굴 자리)를 남길 때만(배경 그림 위 본문·시는 왼쪽 여백부터 쓴다)
+    for im in imgs:
+        w = im.x1 - im.x0
+        if w < 80 or im.y1 - im.y0 < 80:
+            continue
+        inner = [f for f in kept if im.x0 - 1 <= f.x0 and f.x1 <= im.x1 + 1 and im.y0 - 1 <= f.y0 and f.y1 <= im.y1 + 1]
+        if len(inner) < 2 or any(f.x1 - f.x0 > 0.8 * w for f in inner):
+            continue
+        if min(f.x0 for f in inner) - im.x0 < 0.2 * w and im.x1 - max(f.x1 for f in inner) < 0.2 * w:
+            continue
+        stats["picture_texts"] += len(inner)
+        kept = [f for f in kept if f not in inner]
     return kept
+
+
+def _attach_brace_markers(flow: list) -> list:
+    """두 줄을 묶는 괄호 왼쪽 가운데에 놓인 선택지 번호("①" 하나만 있는 줄): 위아래 오른쪽 두 줄 사이 높이라 읽는 순서로는
+    "ⓐ… / ① / ⓑ…"가 됐다 → 위 줄 맨 앞에 붙인다."""
+    out = list(flow)
+    for k in range(1, len(out) - 1):
+        m, a, b = out[k], out[k - 1], out[k + 1]
+        if not (isinstance(m, Line) and isinstance(a, Line) and isinstance(b, Line)):
+            continue
+        if len(m.text.strip()) != 1 or m.text.strip() not in CIRCLED_DIGITS:
+            continue
+        if not (a.x0 > m.x1 and b.x0 > m.x1 and abs(a.x0 - b.x0) < 2 and a.y0 < m.y0 < b.y0
+                and b.y0 - a.y0 < 2.5 * m.size and (a.page, a.col) == (m.page, m.col) == (b.page, b.col)):
+            continue
+        sp = Glyph(" ", m.x1, a.y0, a.x0, a.y1, a.size)
+        a.glyphs = m.glyphs + [sp] + a.glyphs
+        a.x0 = m.x0
+        m.glyphs = []
+    return [it for it in out if not (isinstance(it, Line) and not it.glyphs)]
 
 
 def _pill_label(kept: list, x0: float, y0: float, x1: float, y1: float, split_x: float) -> Optional["_Frag"]:
@@ -2333,6 +2398,10 @@ def _build_line(pno: int, col: int, frags: list[_Frag]) -> Line:
     glyphs.sort(key=lambda g: (g.x0 if not g.is_space else g.x0 - 0.001))
     out: list[Glyph] = []
     prev_solid: Optional[Glyph] = None
+    # 낱말 서넛 안의 짧은 표시 줄("(가)          (나)": 아래 나란한 그림의 이름)은 넓은 간격을 원문만큼(전각 공백 최대 12개)
+    solid_gs = [g for g in glyphs if not g.is_space]
+    words = 1 + sum(b.x0 - a.x1 > a.size for a, b in zip(solid_gs, solid_gs[1:]))
+    cap = 12 if len(solid_gs) <= 10 and words <= 3 and not all(g.c.isdigit() for g in solid_gs) else 4  # (번호 줄은 그대로)
     for g in glyphs:
         if g.is_space:
             if out and not out[-1].is_space:
@@ -2342,7 +2411,7 @@ def _build_line(pno: int, col: int, frags: list[_Frag]) -> Line:
             gap = g.x0 - prev_solid.x1
             if gap > 3.0 * g.size:  # 원문 공백 글자가 넓은 간격을 차지하면(표 모양 줄) 전각 공백을 덧붙인다
                 sp = out.pop()
-                for _ in range(min(4, max(1, round(gap / g.size) - 2))):
+                for _ in range(min(cap, max(1, round(gap / g.size) - 2))):
                     out.append(Glyph("\u2003", prev_solid.x1, g.y0, prev_solid.x1, g.y1, g.size))
                 out.append(sp)
         if prev_solid is not None and out and not out[-1].is_space:
@@ -2352,7 +2421,7 @@ def _build_line(pno: int, col: int, frags: list[_Frag]) -> Line:
                     or (size_jump and gap > 0.8):
                 # 표 모양으로 띄엄띄엄 놓인 칸(선택지 ① 수리함   좋은 사람 …)은 공백 여러 개로 간격을 살린다
                 wide = gap > 3.0 * g.size and g.c not in "①②③④⑤⑥⑦⑧⑨⑩" and not g.icon
-                for _ in range(min(4, max(1, round(gap / g.size) - 2)) if wide else 0):  # 전각 공백(U+2003)은 합쳐지지 않는다
+                for _ in range(min(cap, max(1, round(gap / g.size) - 2)) if wide else 0):  # 전각 공백(U+2003)은 합쳐지지 않는다
                     out.append(Glyph("\u2003", prev_solid.x1, g.y0, prev_solid.x1, g.y1, g.size))
                 out.append(Glyph(" ", prev_solid.x1, g.y0, g.x0, g.y1, g.size))
         out.append(g)
