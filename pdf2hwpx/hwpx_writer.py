@@ -20,6 +20,7 @@ from xml.sax.saxutils import escape
 
 from .master_template import apply_template
 from .masterpage import MARGINS_WITH_MASTER, NS as MASTER_NS, PAPER_H, PAPER_W, Logo, MasterIds, build_masterpage
+from .ir import DEFAULT_LINE_PCT
 from .model import BLANK_BOX, AnswerEntry, AuxBlock, Document, ImageEl, Para, Passage, Question, Run, TableEl
 from .style import DocStyle
 
@@ -77,6 +78,12 @@ def _new_columns(p_xml: str, cols: int, page_break: bool) -> str:
     if page_break:
         head = head.replace('pageBreak="0"', 'pageBreak="1"', 1)
     return head + f'<hp:run charPrIDRef="0"><hp:ctrl>{_colpr(cols)}</hp:ctrl></hp:run>' + p_xml[m.end():]
+
+
+def _empty_p(p_xml: str) -> bool:
+    """글자·표·그림·조판 부호 없는 빈 문단."""
+    return not any(t.strip() for t in re.findall(r"<hp:t>([^<]*)</hp:t>", p_xml)) \
+        and not re.search(r"<hp:(tbl|pic|ctrl|rect|line|container|equation)[ >/]", p_xml)
 
 
 def _tpl(name: str) -> str:
@@ -258,6 +265,8 @@ class Styles:
             x = re.sub(r'<hh:heading [^>]*/>', f'<hh:heading type="NUMBER" idRef="{int(ov["number"])}" level="0"/>', x, count=1)
         if "keep_next" in ov:
             x = re.sub(r'keepWithNext="\d"', f'keepWithNext="{int(ov["keep_next"])}"', x, count=1)
+        if "keep_lines" in ov:  # 문단 보호(문단을 쪼개지 않음)
+            x = re.sub(r'keepLines="\d"', f'keepLines="{int(ov["keep_lines"])}"', x, count=1)
         if "border" in ov:
             bf, ol, orr, ot, ob, conn = ov["border"]
             x = re.sub(r'<hh:border [^>]*/>',
@@ -329,6 +338,7 @@ class HwpxWriter:
         self.img_max_free = col_w - 600
         m = self.margins  # 그림이 한 쪽 본문 높이를 넘지 않게(전폭 쪽의 큰 도식 그림)
         self.img_max_h = PAPER_H - m["top"] - m["bottom"] - m["header"] - m["footer"] - 3000
+        self._fscale = 1.0  # 원문 쪽을 따르는 교재에서 지금 쓰는 쪽의 그림·간격 축소 비율(_page_scales)
         self.master_ids: Optional[MasterIds] = None
         self.logo: Optional[Logo] = None
         self.master_tpl: Optional[tuple[str, str]] = None  # 가져온 바탕쪽 (masterPage 속성, 안쪽 XML)
@@ -505,6 +515,29 @@ class HwpxWriter:
     def _empty(self, pp: int) -> str:
         return self._p(pp, '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>')
 
+    def _plain_border(self, p_xml: str) -> bool:
+        """문단 테두리가 일반 문단과 같다(상자 테두리를 문단 테두리로 그린 빈 문단은 상자의 일부라 빼면 안 된다)."""
+        def border(pid: int) -> str:
+            m = re.search(r'<hh:border [^>]*/>', self.styles.para_xml.get(pid, ""))
+            return m.group(0) if m else ""
+        m = re.search(r'paraPrIDRef="(\d+)"', p_xml)
+        return m is not None and border(int(m.group(1))) == border(PP["plain"])
+
+    @staticmethod
+    def _pic_align(p: Para) -> str:
+        """그림 문단 정렬: 나란히 놓인 그림 줄은 원문대로(왼쪽에 붙은 것), 그림 하나는 가운데."""
+        return p.align if p.children and p.align in ("LEFT", "CENTER") else "CENTER"
+
+    def _pics(self, p: Para, max_w: int) -> str:
+        """그림 문단: 나란히 놓인 그림들(p.children)은 한 줄에 원본 폭 비율로 이어 붙인다."""
+        if not p.children:
+            return self._pic(p.image, max_w)
+        imgs = [c.image for c in p.children]
+        tw = sum(i.width for i in imgs) or 1.0
+        gap = '<hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run>'
+        avail = max_w - 500 * (len(imgs) - 1)
+        return gap.join(self._pic(i, int(avail * i.width / tw)) for i in imgs)
+
     def _pic(self, img: ImageEl, max_w: int) -> str:
         if img.png is None:
             raise ValueError("image has no PNG data")
@@ -512,8 +545,8 @@ class HwpxWriter:
         name = f"image{idx}"
         self.images.append((name, img.png))
         self.stats["pictures"] += 1
-        w = int(img.width * PT_TO_HWP)
-        h = int(img.height * PT_TO_HWP)
+        w = int(img.width * PT_TO_HWP * self._fscale)
+        h = int(img.height * PT_TO_HWP * self._fscale)
         if w > max_w:
             h = int(h * max_w / w)
             w = max_w
@@ -573,7 +606,7 @@ class HwpxWriter:
             if p.kind == "blank":
                 out.append(self._note_p(S.derive(base, **ov), '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>'))
             elif p.kind == "image" and p.image is not None:
-                out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER"}), self._pic(p.image, inner_w)))
+                out.append(self._note_p(S.derive(base, **{**ov, "align": self._pic_align(p), **self._source_ov(p)}), self._pics(p, inner_w)))
             elif p.kind == "table" and p.table is not None:
                 out.append(self._note_p(S.derive(base, **{**ov, "align": "CENTER"}), self._table(p.table, inner_w)))
             elif p.kind == "tablerow":
@@ -586,6 +619,7 @@ class HwpxWriter:
                     o["intent"] = _indent_hwp(p.indent_pt)
                 if p.left_pt:  # 원문 위치만큼 왼쪽 여백(칸 폭을 넘지 않게)
                     o["left"] = min(int(p.left_pt * left_k), max(0, inner_w - 3000))
+                o.update(self._source_ov(p))
                 out.append(self._note_p(S.derive(base, **o), self._runs_xml(p.runs, base_bold=p.role == "heading",
                                                                                spacing=p.spacing, font_space=font_space)))
         return "".join(out) or self._note_p(base, '<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>')
@@ -605,6 +639,8 @@ class HwpxWriter:
                 xs = full[:-1] + [int(max_w)]
                 k = ky
         ys = [int(round((y - t.y0) * ky)) for y in t.ys]
+        if t.memo:  # 메모 칸 표: 쪽 본문 높이에 맞춘다(원문 비율로 키우면 쪽을 넘는다)
+            ys = [0, self.img_max_h]
         cell_ov = {"line": 130} if t.text_pt else {}
         plain = S.add_border_fill() if t.lines else S.add_border_fill(sides_on=())
         rows: list[list[str]] = [[] for _ in range(len(t.ys) - 1)]
@@ -681,7 +717,7 @@ class HwpxWriter:
                 out.append(self._empty(S.derive(base, **ov)))
                 continue
             if p.kind == "image":
-                out.append(self._p(S.derive(base, align="CENTER", **ov), self._pic(p.image, self.img_max_in_box)))
+                out.append(self._p(S.derive(base, align=self._pic_align(p), **ov), self._pics(p, self.img_max_in_box)))
                 continue
             if p.kind == "table":
                 out.append(self._p(S.derive(base, align="CENTER", **ov), self._table(p.table, self.col_w - 300)))
@@ -741,7 +777,7 @@ class HwpxWriter:
             if i == 0 and not blk.title:
                 ov.update(prev=280, offset_top=120)
             if p.kind == "image":
-                out.append(self._p(S.derive(base, align="CENTER", intent=0, **ov), self._pic(p.image, self.img_max_in_box)))
+                out.append(self._p(S.derive(base, align=self._pic_align(p), intent=0, **ov), self._pics(p, self.img_max_in_box)))
                 continue
             if p.kind == "table":
                 out.append(self._p(S.derive(base, align="CENTER", intent=0, **ov), self._table(p.table, self.col_w - 1300)))
@@ -787,8 +823,9 @@ class HwpxWriter:
         for p in a.paras:
             if p.kind != "text":
                 continue
-            # 해설은 원문의 내어쓰기("[해설]" 다음 줄부터 안쪽)를 따르지 않고 줄이 넘어가도 왼쪽에서 그대로 잇는다
-            paras.append(self._note_p(S.derive(PP["ans_expl"], left=0, intent=0),
+            # 해설은 원문의 내어쓰기("[해설]" 다음 줄부터 안쪽)를 따르지 않고 줄이 넘어가도 왼쪽에서 그대로 잇는다.
+            # 문단 보호를 끈다: 긴 해설이 남은 자리에 다 들어가지 않으면 통째로 다음 단으로 넘어가 앞에 큰 빈칸이 생긴다
+            paras.append(self._note_p(S.derive(PP["ans_expl"], left=0, intent=0, keep_lines=0),
                                       self._runs_xml(p.runs, base_bold=p.role == "heading")))
         inst = self._rng.randint(10 ** 9, 2 * 10 ** 9)
         # 앞 미주와 번호가 이어지지 않으면 '새 번호로 시작'(미주) 조판 부호를 먼저 넣는다
@@ -888,7 +925,7 @@ class HwpxWriter:
         if isinstance(b, AuxBlock):
             return self._aux(b, last)
         if b.kind == "image":
-            return [self._p(S.derive(PP["choice"], align="CENTER", left=0, intent=0), self._pic(b.image, self.img_max_free))]
+            return [self._p(S.derive(PP["choice"], align="CENTER", left=0, intent=0), self._pics(b, self.img_max_free))]
         if b.kind == "table":
             return [self._p(S.derive(PP["choice"], align="CENTER", left=0, intent=0), self._table(b.table, self.col_w - 300))]
         if b.kind == "bracket":
@@ -907,7 +944,7 @@ class HwpxWriter:
             for p in a.paras:
                 if p.kind != "text":
                     continue
-                out.append(self._p(S.derive(PP["ans_expl"], left=0, intent=0),  # 해설은 내어쓰기 없이(미주와 같게)
+                out.append(self._p(S.derive(PP["ans_expl"], left=0, intent=0, keep_lines=0),  # 해설은 내어쓰기·문단 보호 없이(미주와 같게)
                                    self._runs_xml(p.runs, base_bold=p.role == "heading")))
         return out
 
@@ -946,10 +983,17 @@ class HwpxWriter:
         if isinstance(it, AuxBlock):
             return self._aux(it, True)
         if isinstance(it, Para):
+            src = self._source_ov(it)
             if it.kind == "image":
-                return [self._p(PP["plain"], self._pic(it.image, self.img_max_free))]
+                # (쪽 첫 그림은 앞 간격이 없어 src가 비어도 원문 정렬을 따른다: 가운데 제목 띠)
+                ov = {**src, "align": it.align} if src or self.doc.faithful else {}
+                if self.doc.faithful:  # 글자처럼 놓인 그림은 줄 간격 %가 그림 높이에 곱해진다: 원문 높이 그대로(100%)
+                    ov["line"] = 100
+                if ov and it.left_pt:
+                    ov["left"] = int(it.left_pt * PT_TO_HWP)
+                return [self._p(S0.derive(PP["plain"], **ov) if ov else PP["plain"], self._pics(it, self.img_max_free))]
             if it.kind == "table":
-                return [self._p(S0.derive(PP["plain"], align="CENTER"), self._table(it.table, self.col_w - 300))]
+                return [self._p(S0.derive(PP["plain"], align="CENTER", **src), self._table(it.table, self.col_w - 300))]
             if it.kind == "tablerow":
                 return [self._p(S0.derive(PP["plain"], align="CENTER"), self._tablerow(it, self.col_w - 300))]
             if it.kind == "bracket":
@@ -960,10 +1004,45 @@ class HwpxWriter:
                 ov = {"align": it.align} if it.align in ("RIGHT", "CENTER") else {"intent": _indent_hwp(it.indent_pt)}
                 if self._keep_next:
                     ov["keep_next"] = 1
-                return [self._p(S0.derive(PP["plain"], **ov) if it.wide else PP["plain"], self._runs_xml(it.runs, spacing=it.spacing))]
+                ov.update(src)
+                return [self._p(S0.derive(PP["plain"], **ov) if it.wide or src else PP["plain"], self._runs_xml(it.runs, spacing=it.spacing))]
             if it.kind == "blank" and it.wide:
                 return [self._empty(PP["plain"])]
         return []
+
+    def _page_scales(self, items: list) -> list[float]:
+        """원문 쪽을 따르는 교재: 원문 내용 높이가 한글 본문 높이보다 크면(원문 쪽 테두리 안이 한글 쪽 본문보다 길다)
+        그 쪽의 그림 크기·문단 앞 간격·줄 간격을 같은 비율로 줄여 한 쪽에 들어가게 한다(글자 크기는 그대로)."""
+        out = [1.0] * len(items)
+        if not self.doc.faithful:
+            return out
+        m = self.margins
+        avail = 0.92 * (PAPER_H - m["top"] - m["bottom"] - m["header"] - m["footer"]) / PT_TO_HWP
+        k = 0
+        while k < len(items):
+            j = k + 1
+            while j < len(items) and not getattr(items[j], "top", False):
+                j += 1
+            srcs = [it.src for it in items[k:j] if isinstance(it, Para) and it.src]
+            if srcs:
+                span = max(s[2] for s in srcs) - min(s[1] for s in srcs)
+                if span > avail:
+                    out[k:j] = [avail / span] * (j - k)
+            k = j
+        return out
+
+    def _source_ov(self, p: Para) -> dict:
+        """원문 위치를 따르는 교재: 원문 줄 간격(여러 줄 문단)과 앞 내용과의 원문 간격(문단 앞 간격)."""
+        if not self.doc.faithful:
+            return {}
+        ov = {}
+        if p.line_pct:
+            ov["line"] = p.line_pct
+        if self._fscale < 1.0 and p.kind == "text":  # 원문이 한글 본문보다 긴 쪽: 줄 간격도 줄인다
+            ov["line"] = max(100, round((p.line_pct or DEFAULT_LINE_PCT) * self._fscale))
+        if p.gap > 0:
+            ov["prev"] = int(p.gap * self.style.body_size * 100 * self._fscale)  # 본문 글자 크기 단위 -> pt -> HWPUNIT
+        return ov
 
     def _set_width(self, wide: bool) -> None:
         """전폭 내용은 쪽 본문 폭 전체, 나머지는 한 단 폭으로 표·그림 크기를 맞춘다."""
@@ -978,7 +1057,9 @@ class HwpxWriter:
         items = self.doc.items
         first_wide = bool(items) and getattr(items[0], "wide", False)
         wide_mode = first_wide
+        scales = self._page_scales(items)
         for k, it in enumerate(items):
+            self._fscale = scales[k]
             wide = getattr(it, "wide", False)
             self._set_width(wide)
             self._styled = not isinstance(it, (Passage, Question))
@@ -1000,9 +1081,18 @@ class HwpxWriter:
                 paras[0] = _new_columns(paras[0], 1 if wide else 2, page_break=top)
                 wide_mode = wide
                 self.stats["column_switches"] += 1
-            elif wide and top:  # 전폭 부분은 원문 쪽마다 새 쪽(작품 미리보기 / 출제 포인트 / 작품 정리)
+            elif top and (wide or self.doc.faithful):
+                # 전폭 부분은 원문 쪽마다 새 쪽(작품 미리보기 / 출제 포인트 / 작품 정리). 쪽 테두리가 있는 학원 자체 교재는
+                # 두 단 쪽도 원문 쪽마다 새 쪽(PDF 한 쪽 = 한글 한 쪽)
                 paras[0] = paras[0].replace('pageBreak="0"', 'pageBreak="1"', 1)
+            elif getattr(it, "col_break", False) and not wide_mode:  # 원문 오른쪽 단의 첫 문단
+                paras[0] = paras[0].replace('columnBreak="0"', 'columnBreak="1"', 1)
+            if re.match(r'<hp:p [^>]*pageBreak="1"', paras[0]):
+                # 쪽을 나누는 문단 앞의 빈 문단은 뺀다(앞 쪽이 꽉 차면 빈 문단만 다음 쪽으로 넘어가 빈 쪽이 생겼다)
+                while body and _empty_p(body[-1]) and self._plain_border(body[-1]):
+                    body.pop()
             body.extend(paras)
+        self._fscale = 1.0
         self._set_width(False)
         mp = self.master_ids is not None or self.master_tpl is not None
         sections = [self.section_xml(body, "masterpage0" if mp else None, cols=1 if first_wide else 2)]

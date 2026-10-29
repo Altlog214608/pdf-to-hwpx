@@ -875,3 +875,775 @@ def test_answer_explanations_have_no_hanging_indent(tmp_path, endnotes):
         r'<hh:paraPr id="(\d+)".*?<hc:intent value="(-?\d+)"', head, re.S)}
     ids = re.findall(r'paraPrIDRef="(\d+)"[^>]*>(?:(?!</hp:p>).)*?\[해설\]', sec, re.S)
     assert ids and all(intent[i] == 0 for i in ids), [(i, intent[i]) for i in ids]
+    # 문단 보호 없음: 긴 해설이 통째로 다음 단으로 넘어가 앞에 큰 빈칸이 생기지 않게(실사용: 미주 1번·7번이 떨어져 보임)
+    keep = {m.group(1): m.group(2) for m in re.finditer(r'<hh:paraPr id="(\d+)".*?keepLines="(\d)"', head, re.S)}
+    assert all(keep[i] == "0" for i in ids), [(i, keep[i]) for i in ids]
+
+
+def test_page_frame_is_not_a_box(tmp_path):
+    """실사용(학원 자체 교재): 쪽마다 내용 전체를 두르는 테두리가 상자로 잡혀 다음 쪽 테두리와 이어 붙고, 단원 전체가
+    상자 하나(도형이 많아 통째로 그림)가 됐다. 내용 영역 위·아래 끝까지 닿는 쪽 크기의 사각형과 머리 띠 안의 칸은
+    상자가 아니다: 테두리 없는 원본과 같은 결과."""
+    from pdf2hwpx.extract import extract
+
+    plain, framed = tmp_path / "plain.pdf", tmp_path / "framed.pdf"
+    build(str(plain))
+    build(str(framed), page_frame=True)
+    a, b = extract(str(plain)), extract(str(framed))
+    assert b.stats["page_frames"] == b.stats["pages"]
+    box = lambda ex: [(round(x.x0), round(x.y0), round(x.x1), round(x.y1), len(x.parts)) for x in ex.flow if type(x).__name__ == "Box"]
+    assert box(a) == box(b)
+    res = convert(str(framed), out_dir=str(tmp_path), overwrite=True)
+    v = res["validation"]
+    assert v["status"] == "PASS", (v["root_causes"], v["warnings"])
+    assert v["checks"]["question_count"] == 5
+
+
+def test_mismapped_space_symbols():
+    """실사용: 제목 글꼴이 띄어쓰기 자리에 좁은 '$'·'%'·'#'·'&'를 찍거나(전략적$ 공약) 글자 정보 없는 글자
+    (전략적�공약)로 읽혔다. 진짜 기호보다 훨씬 좁은 것만 공백으로."""
+    from pdf2hwpx.extract import _mismapped_space
+
+    assert _mismapped_space("$", 2.2, 9.8) and _mismapped_space("�", 2.1, 9.8) and _mismapped_space("&", 3.9, 12.0)
+    assert not _mismapped_space("%", 7.5, 10.0)  # 30%
+    assert not _mismapped_space("#", 5.5, 10.0) and not _mismapped_space(".", 2.0, 10.0)
+
+
+def test_punctuation_fragment_inside_long_fragment():
+    """실사용: 문장부호만 다른 조각으로 찍혀(긴 조각 안쪽에 겹친 ". ") 그 뒤 조각("? 이는")과의 거리를 바로 앞 조각 끝에서
+    재 줄이 갈라지고 순서가 섞였다("…것일까 / ? 이는 ‘전략적 공약 이라 / ’"). 앞 조각들 중 가장 오른쪽 끝에서 잰다."""
+    from pdf2hwpx.extract import _Frag, _build_line, _split_far_fragments
+    from pdf2hwpx.model import Glyph
+
+    def frag(text: str, x: float, adv: float = 9.8) -> _Frag:
+        gs = [Glyph(c, x + k * adv, 170.7, x + (k + 1) * adv, 182.4, 9.8) for k, c in enumerate(text)]
+        return _Frag(gs, gs[0].x0, 170.7, gs[-1].x1, 182.4, 9.8)
+
+    long = frag("는 경우가 많다", 225.5)
+    long.glyphs += [Glyph(c, 320 + k * 9.8, 170.7, 320 + (k + 1) * 9.8, 182.4, 9.8) for k, c in enumerate("왜 이런 것일까")]
+    long.x1 = long.glyphs[-1].x1
+    dot = frag(".", long.glyphs[7].x1, 4.7)
+    q = frag("?", long.x1, 6.6)
+    rest = frag("이는", q.x1 + 3)
+    groups = _split_far_fragments([long, dot, q, rest])
+    assert len(groups) == 1
+    assert _build_line(1, 0, groups[0]).text == "는 경우가 많다. 왜 이런 것일까? 이는"
+
+
+def test_linked_box_chart_and_outline_text_rows(tmp_path, monkeypatch):
+    """실사용(학원 자체 교재): ① 지문 구조도(상자를 화살표로 이음)는 쪽 테두리에 묻혀 쪽째 그림이 됐는데, 테두리를 빼면 상자가
+    흩어지고 나란한 상자 속 글이 한 줄로 섞인다 → 선으로 이어진 상자 묶음은 테두리 없는 상자 하나(도형으로 세어 그림).
+    ② 발문을 글꼴 없이 윤곽선으로 그려 글자가 없어 통째로 빠졌다 → 윤곽선 글자 줄은 그 영역을 그림으로 넣고,
+    사이에 낀 진짜 글자("㉠∼㉤")는 그림에 포함(글로 또 넣지 않음), 바로 아래 두 글자 줄도 이어진 줄로."""
+    from pdf2hwpx.extract import OUTLINE_TEXT, extract
+    from pdf2hwpx.ir import build_document
+    from pdf2hwpx.model import AuxBlock
+    from pdf2hwpx import ocr
+    from tests.synth_pdf import build_flow_outline
+
+    monkeypatch.setattr(ocr, "_langs", lambda: frozenset())  # OCR이 없는 환경(그림으로 남는 경우)
+    pdf = tmp_path / "flow.pdf"
+    info = build_flow_outline(str(pdf))
+    ex = extract(str(pdf))
+    pm = ex.pages[0]
+    assert ex.stats["linked_box_charts"] == 1
+    chart = [b for b in pm.boxes if not b.border]
+    assert len(chart) == 1 and len(pm.boxes) == 1
+    c = chart[0]
+    assert all(c.x0 <= r.x0 and r.x1 <= c.x1 and c.y0 <= r.y0 and r.y1 <= c.y1 for r in info["boxes"])
+    outl = [im for im in pm.images if im.digest == OUTLINE_TEXT]
+    assert len(outl) == 2
+    sx0, sy0, sx1, _ = info["stem"]
+    assert outl[0].x0 <= sx0 and outl[0].x1 >= sx1 - 2
+    assert not any("㉠" in ln.text for ln in pm.lines)
+    doc = build_document(ex)
+    aux = [it for it in doc.items if isinstance(it, AuxBlock)]
+    assert len(aux) == 1 and aux[0].diagram is not None and not aux[0].border
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    v = res["validation"]
+    assert not v["root_causes"], v["root_causes"]
+
+
+def test_memo_column_pages_follow_source_pages(tmp_path):
+    """실사용(학원 자체 교재의 지문 분석 쪽): 쪽 테두리 안을 점선으로 나눠 한쪽은 빈 메모 칸, 다른 쪽에 글.
+    점선은 짧은 획 수백 개라 선으로 잡히지 않아 메모 칸이 사라졌다 → 점선을 하나의 선으로 이어 쪽 크기 두 칸 표(메모 칸 | 글)로,
+    표 높이는 쪽 본문 높이, 글은 칸 위에서부터. 쪽 테두리가 있는 교재는 원문 쪽마다 새 쪽(PDF 한 쪽 = 한글 한 쪽),
+    글 없는 메모 쪽은 다른 빈 쪽처럼 넣지 않는다."""
+    import zipfile
+
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.model import TableEl
+    from tests.synth_pdf import build_memo_pages
+
+    pdf = tmp_path / "memo.pdf"
+    info = build_memo_pages(str(pdf))
+    ex = extract(str(pdf))
+    assert ex.faithful
+    memo = [t for t in ex.flow if isinstance(t, TableEl)]
+    assert [t.page for t in memo] == [1, 3] and all(t.memo for t in memo)
+    assert [round(t.xs[1]) for t in memo] == [206, 392]
+    filled = [[bool(cl.items) for cl in t.cells] for t in memo]
+    assert filled == [[False, True], [True, False]]
+    assert all(cl.valign == "TOP" for t in memo for cl in t.cells)
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    with zipfile.ZipFile(res["hwpx"]) as z:
+        sec = z.read("Contents/section0.xml").decode("utf-8")
+    assert len(re.findall(r'<hp:tbl ', sec)) == 2
+    assert len(re.findall(r'<hp:p [^>]*pageBreak="1"', sec)) == 1  # 글 있는 두 쪽 사이에만
+    text = "".join(re.findall(r"<hp:t>([^<]*)</hp:t>", sec))
+    assert all(t in text for t in info["texts"])
+
+
+def test_ocr_fix_chars():
+    """OCR 글자 교정: 맨 앞 '윗글'(받침이 작아 '워글'로), 번호 뒤 군더더기 점, 따옴표는 여닫음을 번갈아 홑따옴표로,
+    '<보기>'의 '<'를 따옴표로 읽은 것, 닫는 따옴표를 ':'로 읽은 것."""
+    from pdf2hwpx.ocr import OcrChar, fix_chars
+
+    def chars(text: str) -> list:
+        return [OcrChar(c, 10.0 * k, 0.0, 10.0 * k + 9.0, 10.0, 90.0) for k, c in enumerate(text)]
+
+    fix = lambda t: "".join(ch.c for ch in fix_chars(chars(t)))
+    assert fix("1.워글에서") == "1.윗글에서"
+    assert fix("3.。윗글을") == "3.윗글을"
+    assert fix("“음악해석'에") == "‘음악해석’에"
+    assert fix("'보기>를") == "<보기>를"
+    assert fix("(나)의'아리스토텔레스:의") == "(나)의‘아리스토텔레스’의"
+
+
+def test_ocr_reads_korean_stem(tmp_path):
+    """Tesseract(한국어 모델)가 있으면: 글꼴 없이 그림으로 된 발문 줄을 글자로 읽는다(없는 환경에서는 건너뜀)."""
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+
+    if not ocr.available():
+        pytest.skip("Tesseract 한국어 모델 없음")
+    src = fitz.open()
+    sp = src.new_page(width=400, height=40)
+    sp.insert_text((10, 26), "1. 윗글에서 언급한 내용이 아닌 것은?", fontname="korea", fontsize=16)
+    png = sp.get_pixmap(dpi=300, alpha=False).tobytes("png")
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=40)
+    page.insert_image(page.rect, stream=png)
+    rows = ocr.read_rows(page, [(0, 0, 400, 40)], [[]])
+    text = "".join(ch.c for ch in ocr.fix_chars(rows[0]))
+    assert "윗글에서언급한내용이아닌것은?" in text, text
+
+
+
+def test_semibold_body_font_is_not_bold():
+    """SemiBold·DemiBold(글꼴 굵게 표시가 켜져 있어도)는 본문 굵기: 교재 본문 전체가 굵게 되면 글자가 넓어져 쪽이 넘친다."""
+    from pdf2hwpx.extract import _is_bold
+
+    assert not _is_bold("AAAAAI+Eulyoo1945-SemiBold", 20, 16)
+    assert not _is_bold("NotoSans-DemiBold", 20)
+    assert _is_bold("HCRDotum-Bold", 20, 16)
+    assert _is_bold("NanumSquareEB", 4)
+
+
+def test_blank_image_mask_is_not_an_icon(tmp_path):
+    """아무것도 칠하지 않는 그림(투명도가 모두 0인 이미지 마스크, 흰 그림)은 원문자 아이콘(○)으로 만들지 않는다."""
+    import pymupdf as fitz
+
+    from pdf2hwpx.extract import _blank_image
+
+    doc = fitz.open()
+    page = doc.new_page(width=100, height=100)
+    white = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)
+    white.set_rect(white.irect, (255, 255, 255))
+    dark = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)
+    dark.set_rect(dark.irect, (0, 0, 0))
+    clear = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), True)
+    clear.set_rect(clear.irect, (0, 0, 0, 0))
+    xw = page.insert_image(fitz.Rect(10, 10, 20, 20), pixmap=white)
+    xd = page.insert_image(fitz.Rect(30, 10, 40, 20), pixmap=dark)
+    xc = page.insert_image(fitz.Rect(50, 10, 60, 20), pixmap=clear)
+    assert _blank_image(doc, xw) and _blank_image(doc, xc)
+    assert not _blank_image(doc, xd)
+
+
+def test_linked_chart_absorbs_overlapping_boxes():
+    """잇는 선이 우연히 닫힌 네모를 이루면 그 네모가 상자로 잡힌다: 거기에 걸친 상자(2·3문단)도 구조도 묶음에 넣어
+    그림이 잘리지 않게 한다."""
+    from pdf2hwpx.extract import _Seg, _linked_boxes
+
+    one, two, three, four = (69, 459, 201, 539), (244, 382, 376, 461), (244, 542, 376, 622), (422, 459, 554, 539)
+    loop = (222, 422, 399, 582)  # 1문단 오른쪽에서 갈라져 2·3문단으로 가는 선과 4문단으로 모이는 선이 이룬 네모
+    segs = [_Seg(201, 499, 222, 499, 0.5, None), _Seg(399, 499, 417, 499, 0.5, None)]
+    out = _linked_boxes([one, two, three, four, loop], segs, None)
+    assert len(out) == 1
+    x0, y0, x1, y1 = out[0]
+    assert y0 <= 382 and y1 >= 622 and x0 <= 69 and x1 >= 554
+
+
+def test_ocr_align_wide_first_char_box():
+    """OCR이 단어 첫 글자에 단어 전체 상자를 붙여도('설' 438.8~474) 원문 글자 도형과 짝지어 '설 명'처럼 띄지 않는다."""
+    import pymupdf as fitz
+
+    from pdf2hwpx.extract import _align
+    from pdf2hwpx.ocr import OcrChar
+
+    chars = [OcrChar("설", 438.8, 0, 474.1, 9, 93), OcrChar("명", 447.8, 0, 456.6, 9, 91)]
+    shapes = [fitz.Rect(438.8, 0, 447.0, 9), fitz.Rect(448.3, 0, 455.9, 9)]
+    pairs = _align(chars, shapes, 9.94)
+    assert [(c.c, q.x0) for c, q in pairs] == [("설", 438.8), ("명", 448.3)]
+
+
+def test_source_gaps_column_break_and_cap():
+    """원문 쪽을 따르는 교재: 두 단 쪽에서 한참 위로 돌아가는 문단은 오른쪽 단의 첫 문단(단 나눔), 문제 사이 큰 빈칸은
+    3줄까지만(한글에서 지문이 길어지면 단이 넘친다). 전폭 쪽(표지)은 원문 간격 그대로."""
+    from pdf2hwpx.ir import _source_gaps
+    from pdf2hwpx.model import Para
+
+    a = Para(src=(1, 100, 290, 1))
+    b = Para(src=(1, 370, 390, 1))  # 80pt 아래: 8줄 -> 3줄
+    c = Para(src=(1, 105, 150, 1))  # 오른쪽 단 맨 위
+    w1, w2 = Para(src=(2, 100, 200, 2), wide=True), Para(src=(2, 300, 320, 2), wide=True)
+    _source_gaps([a, b, c, w1, w2], 10.0)
+    assert b.gap == 3.0 and not b.col_break
+    assert c.col_break and c.gap == 0.0
+    assert w2.gap == 10.0
+
+
+def test_chart_labels_join_the_picture():
+    """그래프 그림 위에 글자로 찍은 라벨(A, 눈금, 세로 축 이름)은 그림과 한 덩어리로, 그림 옆 본문 줄과 그림 위에
+    글자가 없는 그림(선택지 그림)은 그대로."""
+    from collections import Counter
+
+    from pdf2hwpx.extract import _absorb_chart_labels, _Frag
+    from pdf2hwpx.model import Glyph, ImageEl
+
+    def frag(text, x0, y0, size=9.0):
+        gs = [Glyph(c, x0 + k * size, y0, x0 + (k + 1) * size, y0 + size, size) for k, c in enumerate(text)]
+        return _Frag(gs, x0, y0, gs[-1].x1, y0 + size, size)
+
+    chart = ImageEl(1, 1, 367, 178, 526, 320, "g", 1)
+    plain = ImageEl(1, 0, 60, 400, 200, 500, "p", 2)
+    a, hundred, axis = frag("A", 408, 214), frag("100", 340, 187), frag("원", 353, 209)
+    ticks, unit = frag("12345", 400, 309), frag("시간(억년)", 420, 322)
+    body = frag("암석", 324, 339) , frag("가 생성될 때 방사성 동위원소를 함유하고", 352, 339)
+    choice = frag("①", 45, 440)
+    kept = [a, hundred, axis, ticks, unit, *body, choice]
+    left = _absorb_chart_labels([chart, plain], kept, Counter())
+    assert left == [*body, choice]
+    assert (chart.x0, chart.y0, chart.x1, chart.y1) == (340, 178, 526, 331)
+    assert (plain.x0, plain.y1) == (60, 500)
+
+
+def test_negative_words_underlined_like_other_stems():
+    """어느 발문이라도 부정어에 밑줄을 그은 문서는 밑줄이 빠진 발문의 부정어(않은·아닌·먼)에도 긋고, OCR이 붙인
+    "하지않은"·띄운 "않 은"은 바로잡는다. 그런 관례가 없는 문서는 그대로."""
+    from pdf2hwpx.ir import _underline_negatives
+    from pdf2hwpx.model import Para, Run
+
+    def ul(p):
+        return "".join(f"[{r.text}]" if r.underline else r.text for r in p.runs)
+
+    marked = Para(runs=[Run("2. 적절하지 "), Run("않은", underline=True), Run(" 것은?")])
+    plain = Para(runs=[Run("1. 윗글에서 언급한 내용이 아닌 것은?")])
+    glued = Para(runs=[Run("3. 적절하지않은 것은?")])
+    split = Para(runs=[Run("4. 적절하지 "), Run("않", underline=True), Run(" 은 것은?")])
+    far = Para(runs=[Run("5. 의미가 가장 먼 것은?")])
+    _underline_negatives([marked, plain, glued, split, far])
+    assert ul(plain) == "1. 윗글에서 언급한 내용이 [아닌] 것은?"
+    assert ul(glued) == "3. 적절하지 [않은] 것은?"
+    assert ul(split) == "4. 적절하지 [않은] 것은?"
+    assert ul(far) == "5. 의미가 가장 [먼] 것은?"
+
+    alone = Para(runs=[Run("1. 적절하지 않은 것은?")])
+    _underline_negatives([alone])
+    assert ul(alone) == "1. 적절하지 않은 것은?"
+
+
+def test_stroke_on_every_char_is_not_bold():
+    """칠하고 테두리까지 그린 글자(가짜 굵게)라도 한 글꼴의 거의 모든 글자가 그렇다면 그 글꼴의 보통 모양이다."""
+    from pdf2hwpx.extract import _plain_strokes
+    from pdf2hwpx.model import Glyph
+
+    every = [Glyph("가", 0, 0, 10, 10, 10, True) for _ in range(300)]
+    some = [Glyph("주", 0, 0, 10, 10, 10, True) for _ in range(50)]
+    _plain_strokes({"Batang": [302, 300, every], "Eulyoo1945-Regular": [1200, 50, some]})
+    assert not any(g.bold for g in every)
+    assert all(g.bold for g in some)
+
+
+def test_linked_chart_diagonal_lines():
+    """실사용(교재 '플라톤' 지문 구조): 상자를 비스듬한 선으로 이은 구조도((가) 1문단 아래 변 -> 2문단 위 변 -> 3문단 아래 변)가
+    가로·세로 선만 보던 탓에 묶이지 않아, 상자 넷이 글 상자로 흩어지고 선이 사라졌다 → 양 끝이 서로 다른 상자 변에 닿는
+    비스듬한 선도 잇는 선. 한쪽 끝만 상자에 닿은 비스듬한 선(그래프 선 등)은 아니다."""
+    from pdf2hwpx.extract import _Seg, _linked_boxes
+
+    one, two, three, four = (46, 399, 178, 478), (142, 502, 273, 582), (273, 399, 405, 478), (403, 502, 535, 582)
+    segs = [_Seg(112, 477, 202, 502, 0.36, None), _Seg(208, 478, 333, 503, 0.36, None),
+            _Seg(339, 477, 464, 502, 0.36, None)]
+    out = _linked_boxes([one, two, three, four], segs, None)
+    assert len(out) == 1
+    x0, y0, x1, y1 = out[0]
+    assert x0 <= 46 and y0 <= 399 and x1 >= 535 and y1 >= 582
+    assert _linked_boxes([one, two], [_Seg(100, 477, 112, 520, 0.36, None)], None) == []
+
+
+def test_ocr_rereads_row_alone_when_glyphs_missed(monkeypatch):
+    """실사용: 발문 줄 여러 개를 한 장에 이어 읽으면 큰 번호 "1." 때문에 한 줄을 여러 글줄로 쪼개 읽어 앞부분을 잃었다
+    ("1. 윗글에서 언급된 …" -> "급된 내용이 아닌 것것은?") → 원문 글자 도형을 여럿 덮지 못한 줄은 그 줄만 한 글줄로 다시 읽는다."""
+    from collections import Counter
+
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+    from pdf2hwpx.extract import _ocr_rows
+    from tests.synth_pdf import _outline_glyph
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=60)
+    text = "윗글에서언급된것"
+    xs = [20 + 12 * k for k in range(len(text))]
+    for x in xs:
+        _outline_glyph(page, x, 20, 10, 10)
+
+    def chars(part):
+        return [ocr.OcrChar(c, xs[k], 20, xs[k] + 10, 30, 95.0, 0) for k, c in enumerate(text) if k in part]
+    calls = []
+
+    def read_rows(page, rects, masks, allow="", line=False):
+        calls.append(line)
+        if allow:
+            return [[] for _ in rects]
+        return [chars(range(len(text)) if line else range(5, len(text)))]
+    monkeypatch.setattr(ocr, "read_rows", read_rows)
+    stats = Counter()
+    frag = _ocr_rows(page, [(15, 15, 120, 35)], [], stats)[0]
+    assert stats["ocr_line_retry"] == 1 and True in calls
+    assert "".join(g.c for g in frag.glyphs if not g.is_space) == text
+
+
+def test_heading_above_wide_chart_leaves_columns(tmp_path):
+    """실사용(교재 '플라톤' 정리 쪽): 짧은 두 단(핵심 정리) 아래 왼쪽에 '지문 구조' 칸, 그 바로 아래 쪽 너비 구조도.
+    소제목 칸을 두 단의 왼쪽 단 끝에 두니 한글이 단 높이를 맞추며 오른쪽 단 맨 위로 옮겼다 → 다른 단 내용보다 아래에서
+    가로지르는 상자에 붙은 한쪽 단 항목은 아래 전폭 구간으로."""
+    import pymupdf as fitz
+
+    from pdf2hwpx.extract import extract
+    from tests.synth_pdf import Writer
+
+    w = Writer()
+    w.doc.delete_page(-1)
+    w.new_page(divider=False)
+    page = w.page
+    page.draw_line(fitz.Point(297.6, 140), fitz.Point(297.6, 240), width=0.3)  # 정리 부분에만 짧은 구분선
+    for k in range(4):
+        w.text(70, 150 + 25 * k, f"왼쪽 단 정리 내용 {k + 1}번째 줄입니다 가나다라마")
+        w.text(320, 150 + 25 * k, f"오른쪽 단 정리 내용 {k + 1}번째 줄입니다 가나다")
+    page.draw_rect(fitz.Rect(69, 300, 146, 322), color=(0, 0, 0), width=0.8)
+    w.text(80, 316, "지문 구조", 11)
+    a, b = fitz.Rect(70, 340, 230, 400), fitz.Rect(370, 340, 530, 400)
+    for r in (a, b):
+        page.draw_rect(r, color=(0, 0, 0), width=0.9)
+        w.text(r.x0 + 40, r.y0 + 30, "문단 요약", 10)
+    page.draw_line(fitz.Point(230, 370), fitz.Point(370, 370), width=0.4)
+    pdf = tmp_path / "wide_head.pdf"
+    w.doc.save(str(pdf))
+    ex = extract(str(pdf))
+    head = next(it for it in ex.flow if it.page == 1 and abs(it.y0 - 300) < 3)
+    assert id(head) in ex.wide_ids
+    right = [it for it in ex.flow if getattr(it, "col", None) == 1 and it.y0 < 260]
+    assert right and ex.flow.index(head) > max(ex.flow.index(it) for it in right)
+
+
+def test_ocr_big_question_number_kept_with_stem():
+    """실사용(교재 발문): 윤곽선으로 그린 큰 문제 번호가 문제로 잡히지 않았다 → 번호를 발문 줄에 넣는다.
+    ① "4.  <보기>는 …": 번호 뒤를 넓게 띄어 번호만 따로 떨어진 줄이 됐다(글자 하나 줄은 버림)
+    ② "4. <보기>의 …"처럼 번호만 윤곽선이고 발문은 진짜 글자: 번호가 통째로 빠졌다
+    ③ "3.  ⓐ~ⓒ에 …": 번호와 진짜 글자 ⓐ 사이가 넓어 번호 줄과 발문 줄이 합쳐지지 않았다"""
+    import pymupdf as fitz
+
+    from pdf2hwpx.extract import _Frag, _merge_outline_rows, _outline_rows
+    from pdf2hwpx.model import Glyph
+    from tests.synth_pdf import _outline_glyph
+
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=200)
+    _outline_glyph(page, 312.6, 20, 7, 11)  # ① 큰 번호, 19pt 띄고 발문
+    for k in range(6):
+        _outline_glyph(page, 338.6 + 9 * k, 22, 8, 9)
+    rows = _outline_rows(page.get_drawings())
+    assert [round(r[0], 1) for r in rows] == [312.6] and rows[0][4] == 7
+
+    def frag(cs, x, y, w=9.6):
+        gs = [Glyph(c, x + w * k, y, x + w * (k + 1), y + 10, 10.0, False) for k, c in enumerate(cs)]
+        return _Frag(gs, gs[0].x0, y, gs[-1].x1, y + 10, 10.0)
+    left = frag("왼쪽단글", 240, 110)  # 왼쪽 단 글(번호 왼쪽으로 1.5배 넘게 떨어짐)
+    out = _merge_outline_rows([[312.6, 109.6, 319.7, 120.4, 1]], [left, frag("보기의문장", 336, 110)])
+    assert len(out) == 1 and out[0][0] < 312.6  # ② 번호만 윤곽선
+    assert _merge_outline_rows([[312.6, 109.6, 319.7, 120.4, 1]], [left]) == []  # 뒤에 글이 없는 외톨이 도형은 아니다
+    reals = [frag("ⓐ", 338.9, 488), frag("ⓒ", 352.1, 488)]  # ③
+    out = _merge_outline_rows([[312.6, 485.3, 319.6, 496.6, 1], [361.6, 488.3, 521.7, 497.2, 16]], reals)
+    assert len(out) == 1 and out[0][0] < 312.6 and out[0][2] > 521
+
+
+def test_ocr_tilde_between_real_glyphs(monkeypatch):
+    """실사용: "ⓐ~ⓔ의", "㉠~㉤의"의 '~'가 글자 도형보다 작게 칠한 도형이라 읽히지 않아 "ⓐ ⓔ의"가 됐다 →
+    OCR 줄 안 진짜 글자 둘 사이 가운데 높이의 작은 가로 도형은 '~'."""
+    from collections import Counter
+
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+    from pdf2hwpx.extract import _Frag, _ocr_rows
+    from pdf2hwpx.model import Glyph
+    from tests.synth_pdf import _outline_glyph
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=60)
+    xs = [95 + 9 * k for k in range(4)]
+    for x in xs:
+        _outline_glyph(page, x, 21, 8, 9)
+    page.draw_rect(fitz.Rect(75.7, 23.7, 80.2, 25.7), color=None, fill=(0, 0, 0))
+    a = Glyph("ⓐ", 65, 22.4, 74.6, 32.3, 10.0, True)
+    e = Glyph("ⓔ", 82.4, 22.4, 92.0, 32.3, 10.0, True)
+    kept = [_Frag([a], a.x0, a.y0, a.x1, a.y1, 10.0), _Frag([e], e.x0, e.y0, e.x1, e.y1, 10.0)]
+
+    def read_rows(page, rects, masks, allow="", line=False):
+        if allow:
+            return [[] for _ in rects]
+        return [[ocr.OcrChar(c, x, 21, x + 8, 30, 95.0, 0) for c, x in zip("의사전적", xs)]]
+    monkeypatch.setattr(ocr, "read_rows", read_rows)
+    stats = Counter()
+    frag = _ocr_rows(page, [(60, 18, 135, 35)], kept, stats)[0]
+    assert stats["ocr_tilde"] == 1
+    assert "".join(g.c for g in frag.glyphs if not g.is_space) == "~의사전적"
+    t = next(g for g in frag.glyphs if g.c == "~")
+    assert a.x1 <= t.x0 and t.x1 <= e.x0
+
+
+def test_ocr_fix_gajang():
+    """발문의 '가장 적절한'을 OCR이 '기장'으로 읽는 것을 고친다(다른 '기장'은 그대로)."""
+    from pdf2hwpx import ocr
+
+    def chars(s):
+        return [ocr.OcrChar(c, k, 0, k + 1, 1, 90.0, 0) for k, c in enumerate(s)]
+    assert "".join(c.c for c in ocr.fix_chars(chars("1.윗글에대한설명으로기장적절한것은?"))).endswith("가장적절한것은?")
+    assert "".join(c.c for c in ocr.fix_chars(chars("기장이말했다"))) == "기장이말했다"
+
+
+def test_hancom_equation_font_chars():
+    """실사용(교재 '크기의 과학'): 한글 수식 글꼴(HancomEQN)은 글자를 사용자 영역에 매겨 "L², 1/12³"이 한글에서 "'"처럼
+    깨졌다 → 영문 대문자·숫자·'/'로 바꾸고, 작게 올려 쓴 숫자는 위첨자로."""
+    from pdf2hwpx.extract import HANCOM_EQN, SUPERSCRIPT
+
+    assert "".join(HANCOM_EQN[c] for c in "") == "L1/123"
+    assert "23".translate(SUPERSCRIPT) == "²³"
+
+
+def test_ocr_short_row_takes_page_stem_size(monkeypatch):
+    """실사용: 발문 둘째 줄 "은?"처럼 도형이 두셋뿐인 짧은 줄은 OCR 상자로 크기를 재 6pt가 됐다 → 쪽의 발문 크기로.
+    받침을 놓친 "으?"는 "은?"으로."""
+    from collections import Counter
+
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+    from pdf2hwpx.extract import _ocr_rows
+    from tests.synth_pdf import _outline_glyph
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=100)
+    long_xs = [20 + 10 * k for k in range(8)]
+    for x in long_xs:
+        _outline_glyph(page, x, 20, 8.8, 8.8)
+    for x in (20, 30):
+        _outline_glyph(page, x, 50, 8.8, 8.8)
+
+    def read_rows(page, rects, masks, allow="", line=False):
+        if allow:
+            return [[] for _ in rects]
+        return [[ocr.OcrChar(c, x, 20, x + 8.8, 28.8, 95.0, 0) for c, x in zip("윗글에서알수있는", long_xs)],
+                [ocr.OcrChar("으", 20, 51, 28, 56, 95.0, 0), ocr.OcrChar("?", 30, 51, 34, 56, 95.0, 0)]]
+    monkeypatch.setattr(ocr, "read_rows", read_rows)
+    a, b = _ocr_rows(page, [(15, 17, 105, 32), (15, 47, 45, 62)], [], Counter())
+    assert abs(b.size - a.size) < 0.01 and a.size > 9
+    assert "".join(g.c for g in b.glyphs if not g.is_space) == "은?"
+
+
+def test_big_number_tight_pitch_lines_do_not_overlap(tmp_path):
+    """실사용: 큰 문제 번호(15pt)가 든 발문을 원문 줄 간격(13pt)으로 재면 번호 기준 95%가 되어 한글에서 둘째 줄이 첫 줄에
+    겹쳤다 → 번호보다 좁은 간격은 본문 크기 기준(130%)."""
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.ir import build_document
+    from pdf2hwpx.model import Para
+    from tests.synth_pdf import Writer
+
+    w = Writer()
+    page = w.page
+    page.insert_text((60, 120), "4.", fontname="korea", fontsize=15)
+    w.text(78, 120, "<보기>의 문장들을 표준 형식의 명제로 고친 것으로", 10)
+    w.text(78, 128, "적절하지 않은 것은?", 10)
+    for k in range(5):
+        w.text(78, 155 + 16 * k, f"{'①②③④⑤'[k]} 선택지 내용 {k + 1}", 10)
+    pdf = tmp_path / "tight.pdf"
+    w.doc.save(str(pdf))
+    doc = build_document(extract(str(pdf)))
+    stems = [q.stem for q in doc.questions] + [it for it in doc.items if isinstance(it, Para) and it.text.startswith("4.")]
+    assert stems and all(p.line_pct >= 120 for p in stems), [p.line_pct for p in stems]
+
+
+def test_ocr_masks_are_page_aligned(tmp_path):
+    """잘라 낸 줄 그림의 픽셀 좌표는 쪽 기준이라, 지울 영역(진짜 글자 자리·상자 선)을 0 기준으로 계산하면 하나도 지워지지
+    않았다(㉠ 자리를 "ㅇ"·"3"으로 읽고, 낱말 상자의 오른쪽 선을 글자 획으로 읽어 "불구지천"이 "불구지첩")."""
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+
+    if not ocr.available():
+        pytest.skip("Tesseract 한국어 모델 없음")
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=200)
+    page.insert_text((210, 120), "가나다라마바사", fontname="korea", fontsize=16)
+    rect = (200, 100, 360, 128)
+    full = "".join(c.c for c in ocr.read_rows(page, [rect], [[]])[0])
+    cut = "".join(c.c for c in ocr.read_rows(page, [rect], [[(208, 100, 360, 128, 0.0)]])[0])
+    assert len(full) >= 5 and cut == ""
+
+
+def test_outline_rows_joined_by_symbol():
+    """'<'처럼 획이 적어 글자 도형으로 치지 않는 기호가 끼면 "할 때, <보기>의"가 두 줄로 갈려 '<'를 잃었다 → 기호는 글자
+    2개 넘는 두 줄을 잇고(글자 수에는 넣지 않는다)."""
+    import pymupdf as fitz
+
+    from pdf2hwpx.extract import _outline_rows
+    from tests.synth_pdf import _outline_glyph
+
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=100)
+    for k in range(4):
+        _outline_glyph(page, 20 + 9 * k, 20, 8, 9)
+    sh = page.new_shape()  # '<' (선분 6개로 칠한 기호), 앞 줄 끝에서 13pt
+    sh.draw_polyline([fitz.Point(60, 24.5), fitz.Point(65, 21), fitz.Point(65, 22.5), fitz.Point(62, 24.5),
+                      fitz.Point(65, 26.5), fitz.Point(65, 28), fitz.Point(60, 24.5)])
+    sh.finish(color=None, fill=(0, 0, 0), closePath=True)
+    sh.commit()
+    for k in range(4):  # 앞 줄과 15pt(줄로 잇는 1.5배 넘게) 떨어진 다음 줄
+        _outline_glyph(page, 70 + 9 * k, 20, 8, 9)
+    rows = _outline_rows(page.get_drawings())
+    assert len(rows) == 1 and rows[0][4] == 8 and rows[0][0] <= 20 and rows[0][2] >= 105
+
+
+def test_align_keeps_hangul_off_tiny_marks():
+    """OCR 상자가 어긋나면 "이다."의 '다'를 마침표 도형과 짝지어, 남은 '다' 도형을 다시 읽어 "이이다"가 됐다 → 한글 글자는
+    글자 크기의 3분의 1보다 작은 도형과 짝짓지 않는다."""
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+    from pdf2hwpx.extract import _align
+
+    shapes = [fitz.Rect(217.7, 112, 225.3, 121), fitz.Rect(226.7, 112, 234.7, 121), fitz.Rect(235.4, 119, 236.8, 120.3)]
+    chars = [ocr.OcrChar("이", 222, 112, 228, 121, 33.0, 0), ocr.OcrChar("다", 231, 112, 237, 121, 33.0, 0)]
+    pairs = {ch.c: q for ch, q in _align(chars, shapes, 10.0)}
+    assert pairs["다"] is shapes[1] and all(q is not shapes[2] for q in pairs.values())
+
+
+def test_reread_bracket_labels_marks_and_latin(monkeypatch):
+    """윤곽선 발문의 '[A]' 표시('[' ']'는 좁은 직선 도형)는 그 사이 도형을 영문 대문자로 읽어 "[A]"로(OCR은 "[시", "[ A",
+    "[4 ]티^["로), OCR이 놓친 작은 도형은 위쪽이면 따옴표·아래쪽 네모면 마침표로, 한글 아닌 낱자가 섞인 곳("1ㄴ00")은
+    영문 대문자·숫자로 다시 읽는다("TLCD")."""
+    from collections import Counter
+
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+    from pdf2hwpx.extract import _reread_glyphs
+
+    page = fitz.open().new_page(width=400, height=200)
+    lb, a, rb = fitz.Rect(65.6, 106, 68.0, 114.8), fitz.Rect(68.5, 106.8, 74.9, 114.0), fitz.Rect(75.1, 106, 77.5, 114.8)
+    reul = fitz.Rect(78.7, 106.2, 87.0, 114.7)
+    dot = fitz.Rect(88.0, 112.5, 89.6, 114.1)
+    tl = [fitz.Rect(100 + 7 * k, 106, 106 + 7 * k, 114.8) for k in range(4)]
+    own = [lb, a, rb, reul, dot] + tl
+    chars = [ocr.OcrChar("[", 65, 106, 70, 115, 0.0, 0), ocr.OcrChar("시", 70, 106, 78, 115, 40.0, 0),
+             ocr.OcrChar("를", 78.7, 106, 87, 115, 93.0, 0)]
+    chars += [ocr.OcrChar(c, q.x0, q.y0, q.x1, q.y1, 90.0, 1) for c, q in zip("1ㄴ00", tl)]
+
+    def read_rows(page, rects, masks, allow="", line=False):
+        if allow == "ABCDEFGHIJ":
+            return [[ocr.OcrChar("A", 0, 0, 1, 1, 90.0, 0)] for _ in rects]
+        if "Z" in allow:
+            return [[ocr.OcrChar(c, 0, 0, 1, 1, 90.0, 0) for c in "TLCD"] for _ in rects]
+        return [[] for _ in rects]
+    monkeypatch.setattr(ocr, "read_rows", read_rows)
+    staged = [((60, 104, 140, 117), chars, [], own, 10.0, True, {})]
+    _reread_glyphs(page, staged, {id(lb), id(rb)}, Counter())
+    assert "".join(ch.c for ch in chars) == "[A]를.TLCD"
+
+
+def test_reread_skips_parentheses_and_multi_glyph_brackets(monkeypatch):
+    """괄호 '(가)'(곡선)와 '[과학]'(괄호 안 여러 글자)은 '[A]' 표시가 아니다("[J]", "[H]"로 읽었다)."""
+    from collections import Counter
+
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+    from pdf2hwpx.extract import _reread_glyphs
+
+    page = fitz.open().new_page(width=400, height=200)
+    lb, g1, g2, rb = (fitz.Rect(65.6, 106, 68.0, 114.8), fitz.Rect(69, 106, 77, 114.8), fitz.Rect(78, 106, 86, 114.8),
+                      fitz.Rect(87, 106, 89.4, 114.8))
+
+    def read_rows(page, rects, masks, allow="", line=False):
+        return [[ocr.OcrChar("H", 0, 0, 1, 1, 90.0, 0)] for _ in rects]
+    monkeypatch.setattr(ocr, "read_rows", read_rows)
+    chars = [ocr.OcrChar(c, q.x0, q.y0, q.x1, q.y1, 95.0, 0) for c, q in zip("[과학]", (lb, g1, g2, rb))]
+    _reread_glyphs(page, [((60, 104, 140, 117), chars, [], [lb, g1, g2, rb], 10.0, True, {})], {id(lb), id(rb)}, Counter())
+    assert "".join(ch.c for ch in chars) == "[과학]"
+    paren = [ocr.OcrChar(c, q.x0, q.y0, q.x1, q.y1, 95.0, 0) for c, q in zip("(가)", (lb, g1, rb))]
+    _reread_glyphs(page, [((60, 104, 140, 117), paren, [], [lb, g1, rb], 10.0, True, {})], set(), Counter())
+    assert "".join(ch.c for ch in paren) == "(가)"
+
+
+def test_vocab_fixes_and_line_end_spaces():
+    """OCR 낱말이 본문에 없고 본문에 여러 번 나오는 낱말과 받침 ㅁ/ㅂ만 다르면 고친다("스놈"→"스놉"; "설명한"→"설명할"처럼
+    다른 받침은 건드리지 않는다). OCR 줄 끝은 본문 어휘로 띄어쓰기를 정한다: 붙인 말이 본문에 있으면 붙이고("적절하/지"),
+    다음 줄이 조사면 붙이고("반응/으로"), 앞 낱말이 조사·어미·관형형으로 끝나면 띄운다("것으로/적절하지")."""
+    from pdf2hwpx.extract import PageModel, _Frag, _fix_by_vocab, _ocr_line_end_spaces
+    from pdf2hwpx.model import Glyph, Line, PageInfo
+
+    def glyphs(text, x, y):
+        out, cx = [], x
+        for c in text:
+            if c == " ":
+                out.append(Glyph(" ", cx, y, cx + 3, y + 10, 10.0))
+                cx += 3
+                continue
+            out.append(Glyph(c, cx, y, cx + 9, y + 10, 10.0))
+            cx += 9
+        return out
+
+    def line(gs):
+        return Line(1, 0, gs, gs[0].x0, gs[0].y0, gs[-1].x1, gs[-1].y1, 10.0, 10.0)
+    body = [line(glyphs("스놉 효과 스놉 효과 스놉 효과 설명할 설명할 설명할 적절하지 대화의 것으로 반응", 40, 300))]
+    texts = ["스놈 설명한 적절하", "지 않은", "이해한 것으로", "적절하지 않은", "보인 반응", "으로 적절한"]
+    gss = [glyphs(t, 40, 100 + 14 * k + 12 * (k // 2)) for k, t in enumerate(texts)]
+    frags = [_Frag([g for g in gs if not g.is_space], gs[0].x0, gs[0].y0, gs[-1].x1, gs[-1].y1, 10.0) for gs in gss]
+    ocr_lines = [line(gs) for gs in gss]
+    pm = PageModel(PageInfo(1, 595, 842, 297, 0, 842, (36, 280), (300, 560)), ocr_lines + body, [], [])
+    assert _fix_by_vocab(frags, [pm]) == 1
+    assert "".join(g.c for g in gss[0] if not g.is_space) == "스놉설명한적절하"
+    _ocr_line_end_spaces(frags, [pm])
+    assert [ln.trailing_space for ln in ocr_lines[::2]] == [False, True, False]
+
+
+def test_boxed_letter_and_fullwidth_punct():
+    """네모(□) 안에 따로 찍은 글자("□"+"A")는 글자 테두리를 친 그 글자 하나로("□A 에게"가 "A에게"). OCR의 전각 쉼표는 보통 쉼표로."""
+    import pymupdf as fitz
+
+    from pdf2hwpx import ocr
+    from pdf2hwpx.extract import _page_fragments
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=100)
+    page.insert_text((20, 50), "□", fontname="korea", fontsize=10)
+    page.insert_text((22.2, 48), "A", fontname="helv", fontsize=6)
+    page.insert_text((31, 50), "에게", fontname="korea", fontsize=10)
+    frags = _page_fragments(page)
+    gs = sorted((g for f in frags for g in f.glyphs if not g.is_space), key=lambda g: g.x0)
+    assert [g.c for g in gs] == ["A", "에", "게"]
+    assert gs[0].boxed and gs[0].size == 10.0
+    chars = [ocr.OcrChar(c, k, 0, k + 1, 1, 90.0, 0) for k, c in enumerate("때，세")]
+    assert "".join(c.c for c in ocr.fix_chars(chars)) == "때,세"
+
+
+def test_side_by_side_pictures_in_one_row(tmp_path):
+    """실사용(교재 '추상회화' 2번): <보기> 안 (가)·(나) 그림이 나란히 있는데 세로로 쌓이고 (나)가 먼저 나왔다(그림 영역이
+    여백 때문에 10pt 겹쳤다) → 같은 높이의 그림은 한 문단에 왼쪽부터 나란히, 겹친 곳은 왼쪽 그림에서 잘라 낸다."""
+    import zipfile
+
+    import pymupdf as fitz
+
+    from tests.synth_pdf import Writer, _picture_png
+
+    w = Writer()
+    page = w.page
+    w.text(70, 100, "1. 다음 두 그림을 보고 답하시오.", 10)
+    page.insert_image(fitz.Rect(180, 120, 290, 200), stream=_picture_png(60, 40, (0.2, 0.4, 0.8)), keep_proportion=False)
+    page.insert_image(fitz.Rect(60, 120, 190, 210), stream=_picture_png(60, 40, (0.8, 0.3, 0.2)), keep_proportion=False)
+    for k, c in enumerate("①②③④⑤"):
+        w.text(70, 230 + 16 * k, f"{c} 선택지 {k + 1}번 내용입니다", 10)
+    pdf = tmp_path / "row.pdf"
+    w.doc.save(str(pdf))
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True)
+    with zipfile.ZipFile(res["hwpx"]) as z:
+        sec = z.read("Contents/section0.xml").decode("utf-8")
+    paras = [p for p in re.findall(r"<hp:p [^>]*>.*?</hp:p>", sec, re.S) if "<hp:pic " in p]
+    assert len(paras) == 1 and paras[0].count("<hp:pic ") == 2
+
+
+def test_box_continuation_needs_same_fill():
+    """실사용: 차례 쪽의 쪽보다 큰 빨간 배경 상자가 다음 쪽 맨 위 검은 제목 띠를 '이어지는 상자'로 삼켜 제목 띠가 차례 쪽
+    끝에 붙었다 → 둘 다 칠해져 있고 색이 다르면 잇지 않는다(한쪽만 칠 정보가 있으면 예전처럼 잇는다)."""
+    import inspect
+
+    from pdf2hwpx import extract as E
+
+    src = inspect.getsource(E.extract)
+    assert "not (last.fill and it.fill and last.fill != it.fill)" in src
+
+
+def test_empty_paragraph_dropped_before_page_break():
+    """앞 쪽이 꽉 찬 뒤 쪽을 나누는 문단 앞의 빈 문단은 그것만 다음 쪽으로 넘어가 빈 쪽이 생겼다 → 뺀다(테두리 있는 빈
+    문단은 상자의 일부라 둔다)."""
+    from pdf2hwpx.hwpx_writer import _empty_p
+
+    empty = '<hp:p id="0" paraPrIDRef="3" styleIDRef="0" pageBreak="0"><hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>' \
+            '<hp:linesegarray><hp:lineseg textpos="0"/></hp:linesegarray></hp:p>'
+    text = empty.replace("<hp:t></hp:t>", "<hp:t>글</hp:t>")
+    pic = empty.replace("<hp:t></hp:t>", '<hp:pic id="1"/>')
+    assert _empty_p(empty) and not _empty_p(text) and not _empty_p(pic)
+
+
+def test_bubble_text_and_wrap_text_around_pictures():
+    """실사용: ① 대화 그림(얼굴 + 말풍선) 위에 글자로 찍은 말풍선 글이 그림 아래 다시 나왔다 → 그림 안에 다 들고 한쪽에
+    빈 띠(얼굴 자리)를 남기면 그림에 넣는다. ② 그림 옆을 감싸 흐르는 본문("역할을 / 한다 / . / 삼각형")은 낱말마다 짧게
+    찍혀 그래프 라벨로 흡수돼 그림이 본문까지 넓어졌다 → 본문 줄 시작 자리에서 이어진 조각은 본문. ③ 그림 바로 아래
+    여러 조각으로 찍은 캡션 "<…>"은 그림에 넣는다."""
+    from collections import Counter
+
+    from pdf2hwpx.extract import _Frag, _absorb_chart_labels
+    from pdf2hwpx.model import Glyph, ImageEl
+
+    def frag(text, x, y, size=10.0):
+        gs = [Glyph(c, x + k * size, y, x + (k + 1) * size, y + size, size) for k, c in enumerate(text)]
+        return _Frag(gs, x, y, gs[-1].x1, y + size, size)
+    bubble = ImageEl(1, 1, 309, 157, 557, 526, "x", 0)
+    talk = [frag("가격과성능", 378, 185), frag("이비슷한제품", 378, 200), frag("심리적갈등", 379, 250)]
+    body = [frag("본문줄이다길게이어지는글", 40, 600 + 12 * k) for k in range(4)]
+    left = _absorb_chart_labels([bubble], talk + body, Counter())
+    assert all(f not in left for f in talk) and all(f in left for f in body)
+
+    fig = ImageEl(1, 1, 426, 248, 530, 357, "y", 0)
+    wrap = [frag("역할을", 317, 244), frag("한다", 356, 244), frag("삼각형", 389, 244)]
+    long = [frag("본문줄이다길게이어진", 317, 380 + 12 * k) for k in range(3)] + [frag("본문줄이다길게이어진", 317, 244)]
+    label = frag("코어", 440, 300)
+    cap = [frag("<", 426, 364, 8.0), frag("아웃리거", 431, 364, 8.0), frag("구조>", 470, 364, 8.0)]
+    left = _absorb_chart_labels([fig], wrap + long + [label] + cap, Counter())
+    assert all(f in left for f in wrap) and label not in left and all(f not in left for f in cap)
+    assert fig.x0 >= 420 and fig.y1 >= 372
+
+
+def test_brace_marker_and_marker_sublines(tmp_path):
+    """실사용(교재 4번 "ⓐ, ⓑ의 의미로 쓰인 예"): 선택지마다 두 줄(ⓐ: … / ⓑ: …)을 괄호로 묶고 번호는 괄호 왼쪽 가운데라
+    읽는 순서가 "ⓐ… / ① / ⓑ…"가 됐다 → 번호는 위 줄 앞에 붙이고, ⓑ 줄은 그 선택지의 아랫줄(다섯째 선택지 것도)."""
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.ir import MARKER_RE
+    from tests.synth_pdf import Writer
+
+    w = Writer()
+    w.text(46, 110, "4. ⓐ, ⓑ의 의미로 쓰인 예가 바르게 짝지어진 것은?", 10)
+    for k, c in enumerate("①②③④⑤"):
+        y = 135 + 32 * k
+        w.text(78, y, f"ⓐ: 첫째 예문 {k + 1}입니다.", 10)
+        w.text(48, y + 9, c, 10)
+        w.text(78, y + 16, f"ⓑ: 둘째 예문 {k + 1}입니다.", 10)
+    pdf = tmp_path / "brace.pdf"
+    w.doc.save(str(pdf))
+    texts = [ln.text for ln in extract(str(pdf)).flow]
+    assert texts[1:] == [t for k, c in enumerate("①②③④⑤") for t in (f"{c} ⓐ: 첫째 예문 {k + 1}입니다.", f"ⓑ: 둘째 예문 {k + 1}입니다.")]
+    assert MARKER_RE.match("ⓑ: 둘째") and not MARKER_RE.match("ⓑ둘째")

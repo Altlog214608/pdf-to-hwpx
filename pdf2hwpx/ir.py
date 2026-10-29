@@ -26,7 +26,7 @@ EXPL_RE = re.compile(r"^\s*\[\s*해설\s*\]")
 LABEL_RE = re.compile(r"^\s*(\([가-힣A-Za-z]\)|\[[A-Z가-힣]\]|<[가-힣]\>)\s*$")
 # 줄 머리에 오면 새 문단을 시작하는 표지 (원문자/목록/화자/섹션 라벨 등)
 MARKER_RE = re.compile(
-    r"^\s*(?:[①-⑳]|[㉠-㉻ⓐ-ⓩ](?=\s)|\([가-힣A-Za-z0-9]\)(?=\s|$)|[ㄱ-ㅎ]\s*\.|[A-Z]\s*\.|\d{1,2}\s*\.(?!\d)"
+    r"^\s*(?:[①-⑳]|[㉠-㉻ⓐ-ⓩ](?=\s|:)|\([가-힣A-Za-z0-9]\)(?=\s|$)|[ㄱ-ㅎ]\s*\.|[A-Z]\s*\.|\d{1,2}\s*\.(?!\d)"
     r"|[-–—•·▪◦○●□■◇◆※]\s|[가-힣A-Za-z]{1,6}\s?:|S#|\[[^\]]{1,20}\])")
 
 BodyBounds = Callable[[Line], tuple[float, float]]
@@ -103,6 +103,15 @@ def _hangul_spacing(lines: list[Line]) -> int:
         return 0
     v = round(min(vals) * 100)
     return max(-20, v) if v <= -2 else 0
+
+
+def _side_by_side(a: ImageEl, b: ImageEl) -> bool:
+    """같은 쪽·단에서 세로로 절반 넘게 겹치고 가로로는 대부분 떨어진 두 그림(여백 때문에 상자가 조금 겹치기도 한다)."""
+    if (a.page, a.col) != (b.page, b.col):
+        return False
+    ov_y = min(a.y1, b.y1) - max(a.y0, b.y0)
+    ov_x = min(a.x1, b.x1) - max(a.x0, b.x0)
+    return ov_y > 0.5 * min(a.y1 - a.y0, b.y1 - b.y0) and ov_x < 0.25 * min(a.x1 - a.x0, b.x1 - b.x0)
 
 
 def _same_row(prev: Line, ln: Line) -> bool:
@@ -217,7 +226,7 @@ class Builder:
         for e in entries:
             if isinstance(e, ImageEl):
                 flush()
-                paras.append(Para(kind="image", image=e, align="CENTER"))
+                paras.append(Para(kind="image", image=e, align="CENTER", src=(e.page, e.y0, e.y1, e.page)))
                 continue
             if isinstance(e, TableEl):
                 flush()
@@ -229,7 +238,7 @@ class Builder:
                         paras[-1] = prev_t = Para(kind="tablerow", children=[prev_t], align="CENTER")
                     prev_t.children.append(Para(kind="table", table=self.table(e), align="CENTER"))
                     continue
-                paras.append(Para(kind="table", table=self.table(e), align="CENTER"))
+                paras.append(Para(kind="table", table=self.table(e), align="CENTER", src=(e.page, e.y0, e.y1, e.page)))
                 continue
             if isinstance(e, _BracketGroup):
                 flush()
@@ -249,6 +258,10 @@ class Builder:
             brk = False
             blank = False
             same_area = (prev.page, prev.col) == (e.page, e.col)
+            # 번호 붙은 줄("2. 윗글을 …")의 내어 쓴 다음 줄("은?"): 줄 간격이 본문보다 넓은 발문도 한 문단으로
+            hang = same_area and re.match(r"\s*\d{1,2}\s?\.\s", cur[0].text) is not None and self._is_full(prev) \
+                and 0.8 * e.size <= self.rx(e) - self.rx(cur[0]) <= 3 * e.size and 0 < e.y0 - prev.y0 <= 3 * e.size \
+                and (len(cur) == 1 or abs(self.rx(e) - self.rx(cur[1])) < 0.4 * e.size)
             if _same_row(prev, e) and re.fullmatch(r"\(.{0,6}\)", e.text.strip()):
                 # 같은 줄 오른쪽 끝에 떨어져 놓인 "( ✕ )" 같은 표시: 그 줄 문단 끝에 붙인다
                 cur.append(e)
@@ -256,7 +269,7 @@ class Builder:
                 continue
             if same_area:
                 dy = e.y0 - prev.y0
-                if dy > 1.3 * pitch:
+                if dy > 1.3 * pitch and not hang:
                     brk = True
                     blank = stanza and dy > 1.7 * pitch
             elif stanza and self._cross_area_blank(prev, e, pitch):
@@ -273,7 +286,7 @@ class Builder:
                 brk = True
             if e.frame != prev.frame:  # 띠 테두리 줄(낱말 띠)은 따로 한 문단
                 brk = True
-            if abs(e.size - prev.size) > 0.15 * max(e.size, prev.size):  # 글자 크기가 바뀌면(본문 -> 작은 해설) 새 문단
+            if abs(e.size - prev.size) > 0.15 * max(e.size, prev.size) and not hang:  # 글자 크기가 바뀌면(본문 -> 작은 해설) 새 문단
                 brk = True
             # (단이 바뀌면 단 왼쪽 경계가 몇 pt 다를 수 있어 여유를 더 둔다)
             if len(cur) >= 2 and self.rx(e) > self.rx(cur[1]) + (0.4 if same_area else 1.0) * e.size:
@@ -380,7 +393,40 @@ class Builder:
             p.indent_pt = 0.0
         if LABEL_RE.match(p.text):
             p.role = "label"
+        size = statistics.median(l.size for l in whole)
+        pitches = [b.y0 - a.y0 for a, b in zip(lines, lines[1:]) if (a.page, a.col) == (b.page, b.col) and b.y0 > a.y0]
+        if pitches:
+            # 한글은 줄 간격 %를 그 줄에서 가장 큰 글자에 곱한다: 첫 줄의 큰 문제 번호("3.") 기준으로 재야 원문 간격이 된다
+            big = max((g.size for g in lines[0].glyphs if not g.is_space and not g.icon), default=size)
+            p.line_pct = round(statistics.median(pitches) / max(size, big) * 100)
+            # 큰 번호보다 좁은 간격(원문은 번호가 줄 위로 튀어나온 것)은 본문 크기로 잰다: 95%로 두면 둘째 줄이 첫 줄에 겹쳤다
+            if p.line_pct < 105:
+                p.line_pct = round(statistics.median(pitches) / size * 100)
+        last = lines[-1]
+        p.src = (lines[0].page, lines[0].y0, last.y0 + (p.line_pct or DEFAULT_LINE_PCT) / 100 * size, last.page)
         return p
+
+    def faithful_box(self, box: Box) -> Optional[Para]:
+        """원문 위치를 따르는 교재의 전폭 쪽: 선으로 이은 상자 묶음(구조도)과 색을 칠한 짧은 제목 칸(검은 제목 띠,
+        노란 '핵심 정리' 칸)은 원문 모양 그대로 그림으로(한글 문단 테두리로는 폭·여백이 원문과 달라진다)."""
+        if not self.ex.faithful:
+            return None
+        lines = [x for x in box.items if isinstance(x, Line)]
+        chart = not box.border and not box.fill and box.inner_drawings >= 4  # (안에 겹테두리 칸이 따로 잡혀도)
+        # 칠한 제목 칸: 두 줄 제목 띠("‘포틀래치 관습’과 / ‘레비스트로스 구조주의’")까지
+        label = box.fill and not box.parts and 1 <= len(lines) <= 3 and len("".join(l.text for l in lines).strip()) <= 20 * len(lines) \
+            and box.y1 - box.y0 < 25 * len(lines) + 10 and len(lines) == len(box.items)
+        if not (chart or label):
+            return None
+        pad = 1.5
+        img = ImageEl(box.page, box.col, box.x0 - pad, box.y0 - pad, box.x1 + pad, box.y1 + pad, "faithful", 0)
+        img.png = self.ex.render(box.page, (img.x0, img.y0, img.x1, img.y1), sharp=True)
+        self.image_only_lines.extend(lines)
+        info = self.ex.pages[box.page - 1].info
+        left, right = info.col_left
+        centered = abs((box.x0 + box.x1) / 2 - info.width / 2) < 0.04 * info.width  # 쪽 가운데(검은 제목 띠)
+        return Para(kind="image", image=img, align="CENTER" if centered else "LEFT",
+                    left_pt=0.0 if centered else max(0.0, box.x0 - left), src=(box.page, box.y0, box.y1, box.page))
 
     def single_para(self, lines: list[Line], bold: bool = False) -> Para:
         """문제 발문/선택지처럼 한 문단으로 묶이는 줄들."""
@@ -402,6 +448,12 @@ class Builder:
             items = items[1:]
         kind = "조건" if "조건" in title else ("보기" if "보기" in title or not title else "기타")
         blk = AuxBlock(title=title, kind=kind, fill=box.fill, border_color=box.border_color, border=box.border)
+        for part in [box] + box.parts:  # 상자 안 그림은 상자 안쪽만(여백이 넓은 그림 영역이 테두리 선까지 잘라 왔다)
+            for im in part.items:
+                if isinstance(im, ImageEl) and im.page == part.page and part.y0 < im.y1 < part.y1 + 12:
+                    im.y1 = min(im.y1, part.y1 - 1.0)
+                    im.y0 = max(im.y0, part.y0 + 1.0)
+                    im.x0, im.x1 = max(im.x0, part.x0 + 1.0), min(im.x1, part.x1 - 1.0)
         drawings = box.inner_drawings + sum(p.inner_drawings for p in box.parts)
         diagram = drawings >= 4
         n_imgs = sum(1 for x in items if isinstance(x, ImageEl))
@@ -652,6 +704,30 @@ def _is_question_header(ln: Line, expected: int, body: float) -> bool:
     return _question_number(ln, body) == expected
 
 
+DEFAULT_LINE_PCT = 155  # 본문 문단(plain)의 한글 줄 간격(%)
+
+
+def _source_gaps(items: list, body: float) -> None:
+    """원문 위치를 따르는 교재: 같은 쪽에서 앞 문단 다음 줄이 원래 올 자리보다 아래에서 시작하는 문단은 그 차이를
+    문단 앞 간격(Para.gap, 본문 글자 크기 단위)으로.
+    두 단 쪽에서 앞 문단보다 한참 위에서 시작하는 문단은 원문 오른쪽 단의 첫 문단: 한글에서도 단을 나눈다."""
+    prev = None
+    for it in items:
+        src = getattr(it, "src", None)
+        if src is None:
+            prev = None
+            continue
+        if prev is not None and prev[3] == src[0] and src[1] > prev[2]:
+            it.gap = round((src[1] - prev[2]) / body, 2)
+            if not getattr(it, "wide", False):
+                # 두 단 쪽의 문제 사이 큰 빈칸은 3줄까지만: 한글에서 지문이 원문보다 한두 줄 길어지면 그 빈칸이 그대로
+                # 더해져 단이 넘친다(문제가 단 맨 위에서 시작하는 것은 단 나눔이 지킨다)
+                it.gap = min(it.gap, 3.0)
+        elif prev is not None and prev[3] == src[0] and src[1] < prev[2] - 3 * body and not getattr(it, "wide", False):
+            it.col_break = True
+        prev = src
+
+
 def build_document(ex: Extraction) -> Document:
     flow = ex.flow
     body = ex.body_size
@@ -702,6 +778,13 @@ def build_document(ex: Extraction) -> Document:
         if best is None or len(found[0]) > len(best[0]):
             best = found
     headers, header_numbers, skipped = best
+    restarted = False
+    if ex.faithful:
+        # 원문 쪽을 따르는 교재(학원 자체 교재)는 단원마다 번호가 1번부터 다시 시작하기도 한다: 이어지는 번호로 찾은 문제가
+        # 문제 머리 모양 줄의 절반이 안 되면 일부만 문제로 묶지 않고(구조가 섞인다) 원문 번호 그대로 둔다
+        heads = sum(1 for it in flow[:answer_idx] if isinstance(it, Line) and _question_number(it, body) is not None)
+        if heads and len(headers) < 0.5 * heads:
+            headers, header_numbers, skipped, restarted = [], [], [], True
 
     # 원문자 아이콘 판별 후 치환
     labels = _label_icons(ex, headers, answer_idx)
@@ -721,9 +804,19 @@ def build_document(ex: Extraction) -> Document:
                    source_fixes=b.source_fixes)
     if unresolved:
         doc.warnings.append(f"판별하지 못한 원문자 아이콘 {unresolved}개를 ○로 표시함")
+    if restarted:
+        doc.warnings.append("문제 번호가 단원마다 다시 시작하는 교재 — 자동 번호 대신 원문 번호를 그대로 넣었습니다")
+    if ex.stats.get("ocr_rows"):
+        low = ex.stats.get("ocr_low_chars", 0)
+        doc.warnings.append(f"글꼴 없이 그려진 글자 {ex.stats['ocr_rows']}줄을 OCR로 읽었습니다"
+                            + (f" — 확신이 낮은 글자 {low}개(발문을 원문과 한 번 대조해 주세요)" if low else ""))
 
     header_set = set(headers)
     single_pages = {pm.info.number for pm in ex.pages if pm.info.single}
+    doc.faithful = ex.faithful
+
+    def same_page(j: int) -> bool:  # 원문 쪽마다 새 쪽인 교재는 쪽을 넘어 문단을 잇지 않는다
+        return not ex.faithful or flow[j].page == flow[j - 1].page
     i = 0
     current_passage: Optional[Passage] = None
     passage_id = 0
@@ -760,7 +853,7 @@ def build_document(ex: Extraction) -> Document:
             # 전폭 쪽(작품 개관·표·구조도): 한 단으로 읽었으므로 이어지는 줄은 문단으로 잇고, 출력은 새 쪽에 한 단으로
             j = i + 1
             if not isinstance(it, Box):
-                while j < answer_idx and j not in header_set and (flow[j].page in single_pages or id(flow[j]) in ex.wide_ids) \
+                while j < answer_idx and j not in header_set and (flow[j].page in single_pages or id(flow[j]) in ex.wide_ids) and same_page(j) \
                         and not isinstance(flow[j], Box) and not (isinstance(flow[j], Line) and GUIDE_RE.match(flow[j].text)):
                     j += 1
             nb = flow[i + 1] if i + 1 < answer_idx else None
@@ -773,7 +866,8 @@ def build_document(ex: Extraction) -> Document:
                 out = [Para(kind="table", table=b.table(t), align="CENTER")]
                 j = i + 2
             else:
-                out = [b.aux_from_box(it, wide=True)] if isinstance(it, Box) else b.paragraphs(flow[i:j])
+                fb = b.faithful_box(it) if isinstance(it, Box) else None
+                out = [fb] if fb else [b.aux_from_box(it, wide=True)] if isinstance(it, Box) else b.paragraphs(flow[i:j])
             for x in out:
                 x.wide = True
             doc.items.extend(out)
@@ -788,7 +882,7 @@ def build_document(ex: Extraction) -> Document:
             j = i + 1
             while j < answer_idx and j not in header_set and isinstance(flow[j], Line) \
                     and not (GUIDE_RE.match(flow[j].text) and flow[j].box is None) \
-                    and not (flow[j].page in single_pages or id(flow[j]) in ex.wide_ids):
+                    and not (flow[j].page in single_pages or id(flow[j]) in ex.wide_ids) and same_page(j):
                 j += 1
             doc.items.extend(b.paragraphs(flow[i:j]))
         doc.loose_notes.extend(f"p{x.page}: {getattr(x, 'text', '[그림/박스]')[:30]}" for x in flow[i:j])
@@ -797,6 +891,22 @@ def build_document(ex: Extraction) -> Document:
     for k, fi in marks.items():
         if k < len(doc.items) and (fi == 0 or flow[fi - 1].page != flow[fi].page):
             doc.items[k].top = True
+    if ex.faithful:
+        # 빈 문단(연 구분)은 빼고 원문 간격으로 띄운다(빈 문단이 있으면 간격을 잴 앞 문단을 잃는다)
+        items = []
+        for it in doc.items:
+            if isinstance(it, Para) and it.kind == "blank":
+                continue
+            items.append(it)
+        for k, it in enumerate(doc.items):  # 쪽 첫 내용 표시는 다음 항목으로 옮긴다
+            if it.top and isinstance(it, Para) and it.kind == "blank" and k + 1 < len(doc.items):
+                doc.items[k + 1].top = True
+        doc.items = items
+        _source_gaps(doc.items, b.size)
+        for it in doc.items:
+            if isinstance(it, Para) and it.kind == "table" and it.table is not None and it.table.memo:
+                for cl in it.table.cells:
+                    _source_gaps(cl.paras, b.size)
 
     # 정답/해설
     ans_lines: list[Line] = []
@@ -814,9 +924,13 @@ def build_document(ex: Extraction) -> Document:
             q.answer = ANSWER_HEAD_RE.sub("", head, count=1).strip()
             q.explanation = a.paras
 
+    _underline_negatives([q.stem for q in doc.questions]
+                         + [it for it in doc.items if isinstance(it, Para) and STEM_RE.match(it.text) and "?" in it.text])
+
     for r in _iter_runs(doc):  # 원문 본문 크기 대비 글자 크기(문제 밖 내용의 작은 설명 글 등)
         r.rel = round(r.size / body, 2) if r.size and body else 1.0
 
+    _image_rows(doc, b)
     # 그림 렌더링 (박스 안/지문/문제 그림)
     for img in _iter_images(doc):
         if img.png is None:
@@ -999,7 +1113,9 @@ def _build_question(b: Builder, number: int, items: list, passage: Optional[Pass
             elif state == "choices" and choice_lines:
                 prev = choice_lines[-1][-1]
                 far = (prev.page, prev.col) != (ln.page, ln.col) or ln.y0 - prev.y0 > 2.5 * ln.size
-                if len(choice_lines) >= 5 and (far or not b._is_full(prev)):
+                # (다섯째 선택지 아래 들여 쓴 표지 줄 "⑤ ⓐ: … / ⓑ: …"의 ⓑ 줄은 그 선택지)
+                sub = not far and re.match(r"\s*[㉠-㉻ⓐ-ⓩ]", t) is not None and ln.x0 > choice_lines[-1][0].x0 + 0.5 * ln.size
+                if len(choice_lines) >= 5 and (far or not b._is_full(prev)) and not sub:
                     state = "after"
                     pending.append(ln)
                 else:
@@ -1085,6 +1201,48 @@ def _build_answers(b: Builder, lines: list[Line]) -> list[AnswerEntry]:
     return entries
 
 
+STEM_RE = re.compile(r"\s*\d{1,2}\s?\.\s")
+# 발문의 부정어·'먼'("적절하지 않은 것은?", "가장 먼 것은?"). OCR이 "않 은"으로 띄어 읽기도 한다
+NEGATIVE_RE = re.compile(r"(않\s?[은는]|(?<![가-힣])(?:아\s?닌|없\s?는|먼))(?=\s?것)")
+
+
+def _underline_negatives(stems: list[Para]) -> None:
+    """발문 부정어 밑줄을 문서 안에서 고르게: 어느 발문이라도 부정어에 밑줄을 그었으면(원문이 그 관례를 쓰면) 밑줄이
+    빠진 발문의 부정어에도 긋는다(같은 교재 안에서도 지문마다 빠진 곳이 있다). 관례를 안 쓰는 문서는 그대로 둔다."""
+    def matches(p: Para):
+        return list(NEGATIVE_RE.finditer(p.text))
+
+    def underlined(p: Para, m) -> bool:
+        pos = 0
+        for r in p.runs:
+            if r.underline and pos < m.end() and m.start() < pos + len(r.text):
+                return True
+            pos += len(r.text)
+        return False
+    if not any(underlined(p, m) for p in stems for m in matches(p)):
+        return
+    for p in stems:
+        ms = matches(p)
+        if not ms:
+            continue
+        chars = [(c, r) for r in p.runs for c in r.text]
+        out: list[Run] = []
+        k = 0
+        for m in ms + [None]:
+            end = m.start() if m else len(chars)
+            for c, r in chars[k:end]:
+                _append_runs(out, [dataclasses.replace(r, text=c)])
+            if m is None:
+                break
+            word = m.group(0).replace(" ", "")  # OCR이 띄운 "않 은"은 붙인다
+            r0 = next((r for c, r in chars[m.start():m.end()] if not c.isspace()), chars[m.start()][1])
+            if word[0] == "않" and m.start() and "가" <= chars[m.start() - 1][0] <= "힣":  # OCR이 붙인 "적절하지않은"
+                _append_runs(out, [dataclasses.replace(r0, text=" ", underline=False)])
+            _append_runs(out, [dataclasses.replace(r0, text=word, underline=True)])
+            k = m.end()
+        p.runs = out
+
+
 def _iter_runs(doc: Document):
     """문서의 모든 글자 런(지문·문제·박스·표 칸·정답 포함)."""
     def from_paras(ps):
@@ -1109,6 +1267,51 @@ def _iter_runs(doc: Document):
         yield from from_paras([a.head] + a.paras)
 
 
+def _merge_image_row(paras: list, b: "Builder") -> list:
+    """같은 높이에 나란히 놓인 그림 문단((가) | (나))을 한 문단으로(왼쪽부터). 겹친 곳(왼쪽 그림의 여백)은 왼쪽 그림에서
+    잘라 내고, 원문에서 상자·단 왼쪽에 붙어 있으면 왼쪽 정렬(위 "(가)  (나)" 표시와 맞게)."""
+    out: list = []
+    for p in paras:
+        prev = out[-1] if out else None
+        if isinstance(p, Para) and p.kind == "image" and p.image is not None and not p.children                 and isinstance(prev, Para) and prev.kind == "image" and prev.image is not None:
+            row = prev.children or [Para(kind="image", image=prev.image, align="CENTER")]
+            if all(_side_by_side(r.image, p.image) for r in row):
+                row = sorted(row + [Para(kind="image", image=p.image, align="CENTER")], key=lambda r: r.image.x0)
+                for x, y in zip(row, row[1:]):
+                    if x.image.x1 > y.image.x0:
+                        x.image.x1 = y.image.x0 - 0.5
+                prev.children, prev.image = row, row[0].image
+                first = row[0].image
+                box = b.box_by_id.get(first.box) if first.box is not None else None
+                left = box.x0 if box is not None else b.col_bounds(first)[0]
+                prev.align = "LEFT" if first.x0 - left <= 1.5 * b.size else "CENTER"
+                continue
+        out.append(p)
+    return out
+
+
+def _image_rows(doc: Document, b: "Builder") -> None:
+    def fix(ps: list) -> list:
+        ps = _merge_image_row(ps, b)
+        for p in ps:
+            if isinstance(p, Para) and p.kind in ("bracket", "tablerow"):
+                p.children = fix(p.children)
+            elif isinstance(p, Para) and p.kind == "table" and p.table is not None:
+                for cl in p.table.cells:
+                    cl.paras = fix(cl.paras)
+        return ps
+    for it in doc.items:
+        if isinstance(it, (Passage, AuxBlock)):
+            it.paras = fix(it.paras)
+        elif isinstance(it, Question):
+            it.blocks = fix(it.blocks)
+            it.after = fix(it.after)
+            for x in it.blocks + it.after:
+                if isinstance(x, AuxBlock):
+                    x.paras = fix(x.paras)
+    doc.items = fix(doc.items)
+
+
 def _iter_images(doc: Document):
     def from_paras(ps):
         for p in ps:
@@ -1116,6 +1319,9 @@ def _iter_images(doc: Document):
                 continue
             if p.kind == "image" and p.image is not None:
                 yield p.image
+                for c in p.children:
+                    if c.image is not None and c.image is not p.image:
+                        yield c.image
             elif p.kind == "table" and p.table is not None:
                 for cl in p.table.cells:
                     yield from from_paras(cl.paras)

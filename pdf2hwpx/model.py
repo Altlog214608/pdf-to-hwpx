@@ -152,6 +152,7 @@ class TableEl:
     lines: bool = True  # False: 선 없는 배치용 표(전폭 상자 안 좌우 두 칸)
     nested: bool = False  # 다른 표의 칸 안에 든 표(그 칸의 items 에 들어 있다)
     text_pt: float = 0.0  # 원문 위치를 살리는 배치용 표: 본문 글자 크기(pt). 칸 폭·왼쪽 여백을 글자 크기 비율로 키운다
+    memo: bool = False  # 쪽 크기 한 행 표(메모 칸 | 본문 칸): 쪽 본문 높이에 맞추고 글은 칸 위에서부터
 
     @property
     def x0(self) -> float:
@@ -216,6 +217,11 @@ class Para:
     spacing: int = 0  # 원문 자간(%): 한글 글자 사이 간격으로 잰 값(원문 모양을 살리는 문제 밖 내용에만 쓴다)
     wide: bool = False  # 전폭 쪽(PageInfo.single)의 문제 밖 내용: 새 쪽에 한 단(가운데 선 없음)으로
     top: bool = False  # 원문 쪽의 첫 내용(전폭 부분은 여기서 쪽을 나눈다)
+    # 원문 위치를 따르는 교재(Document.faithful)에서만 쓰는 값
+    src: Optional[tuple] = None  # (쪽, 첫 줄 위 y, 다음 내용이 원래 시작할 y): 앞 내용과의 간격을 잴 때
+    line_pct: int = 0  # 원문 줄 간격(글자 크기 대비 %), 여러 줄 문단만
+    gap: float = 0.0  # 앞 내용과의 원문 간격 중 기본 줄 간격을 넘는 만큼(본문 글자 크기 단위)
+    col_break: bool = False  # 원문 쪽을 따르는 교재: 원문에서 오른쪽 단 맨 위에서 시작하는 문단(한글에서 단 나눔)
 
     @property
     def text(self) -> str:
@@ -303,6 +309,7 @@ class Document:
     image_only_lines: list = field(default_factory=list)
     # 원문 대조용으로 글자를 고친 줄: id(Line) -> 고친 글. 예) 마침표 없던 문제 번호 "1 위 작품의…" -> "1. 위 작품의…"
     source_fixes: dict = field(default_factory=dict)
+    faithful: bool = False  # 원문 쪽마다 새 쪽(쪽 테두리가 있는 학원 자체 교재)
     loose_notes: list[str] = field(default_factory=list)  # 문제/지문 밖 내용(단원 제목 등) 기록  # 도식 박스처럼 그림으로 대체된 원문 줄
 
     @property

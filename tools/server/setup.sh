@@ -16,10 +16,12 @@ if ! swapon --show | grep -q .; then
   grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
 
-# ---- 패키지: python venv, Caddy, 보안 자동 업데이트
+# ---- 패키지: python venv, Caddy, 보안 자동 업데이트, Tesseract(글꼴 없이 그린 발문 OCR: 한국어 + 기본 영어)
 need=()
 dpkg -s python3-venv >/dev/null 2>&1 || need+=(python3-venv)
 dpkg -s unattended-upgrades >/dev/null 2>&1 || need+=(unattended-upgrades)
+dpkg -s tesseract-ocr >/dev/null 2>&1 || need+=(tesseract-ocr)
+dpkg -s tesseract-ocr-kor >/dev/null 2>&1 || need+=(tesseract-ocr-kor)
 if [ ${#need[@]} -gt 0 ] || ! command -v caddy >/dev/null; then
   say "패키지 설치: ${need[*]} caddy"
   apt-get update -q
