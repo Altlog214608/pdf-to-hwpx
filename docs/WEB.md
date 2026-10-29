@@ -26,7 +26,7 @@ pip install -r requirements.txt -r webapp\requirements.txt; python .\webapp\serv
 |---|---|---|
 | `JOB_TTL_MIN` | 30 | 업로드 후 작업(원본 PDF·결과)을 서버에 두는 최대 시간(분) |
 | `DOWNLOAD_TTL_MIN` | 10 | 변환 후 다운로드 링크가 유효한 시간(분) |
-| `MAX_MB` / `MAX_PAGES` | 40 / 80 | 업로드 제한(파일 하나당) |
+| `MAX_MB` / `MAX_PAGES` | 40 / 200 | 업로드 제한(파일 하나당) |
 | `MAX_FILES` | 10 | 한 번에 올리는 PDF 수 |
 | `MAX_TOTAL_PAGES` | 200 | 통합본 전체 쪽수 |
 | `USAGE_DB` | `DATA_DIR` 옆 `pdf2hwpx_usage.sqlite3` | 이용 기록 파일(SQLite) |
