@@ -1103,3 +1103,65 @@ def test_source_gaps_column_break_and_cap():
     assert b.gap == 3.0 and not b.col_break
     assert c.col_break and c.gap == 0.0
     assert w2.gap == 10.0
+
+
+def test_chart_labels_join_the_picture():
+    """그래프 그림 위에 글자로 찍은 라벨(A, 눈금, 세로 축 이름)은 그림과 한 덩어리로, 그림 옆 본문 줄과 그림 위에
+    글자가 없는 그림(선택지 그림)은 그대로."""
+    from collections import Counter
+
+    from pdf2hwpx.extract import _absorb_chart_labels, _Frag
+    from pdf2hwpx.model import Glyph, ImageEl
+
+    def frag(text, x0, y0, size=9.0):
+        gs = [Glyph(c, x0 + k * size, y0, x0 + (k + 1) * size, y0 + size, size) for k, c in enumerate(text)]
+        return _Frag(gs, x0, y0, gs[-1].x1, y0 + size, size)
+
+    chart = ImageEl(1, 1, 367, 178, 526, 320, "g", 1)
+    plain = ImageEl(1, 0, 60, 400, 200, 500, "p", 2)
+    a, hundred, axis = frag("A", 408, 214), frag("100", 340, 187), frag("원", 353, 209)
+    ticks, unit = frag("12345", 400, 309), frag("시간(억년)", 420, 322)
+    body = frag("암석", 324, 339) , frag("가 생성될 때 방사성 동위원소를 함유하고", 352, 339)
+    choice = frag("①", 45, 440)
+    kept = [a, hundred, axis, ticks, unit, *body, choice]
+    left = _absorb_chart_labels([chart, plain], kept, Counter())
+    assert left == [*body, choice]
+    assert (chart.x0, chart.y0, chart.x1, chart.y1) == (340, 178, 526, 331)
+    assert (plain.x0, plain.y1) == (60, 500)
+
+
+def test_negative_words_underlined_like_other_stems():
+    """어느 발문이라도 부정어에 밑줄을 그은 문서는 밑줄이 빠진 발문의 부정어(않은·아닌·먼)에도 긋고, OCR이 붙인
+    "하지않은"·띄운 "않 은"은 바로잡는다. 그런 관례가 없는 문서는 그대로."""
+    from pdf2hwpx.ir import _underline_negatives
+    from pdf2hwpx.model import Para, Run
+
+    def ul(p):
+        return "".join(f"[{r.text}]" if r.underline else r.text for r in p.runs)
+
+    marked = Para(runs=[Run("2. 적절하지 "), Run("않은", underline=True), Run(" 것은?")])
+    plain = Para(runs=[Run("1. 윗글에서 언급한 내용이 아닌 것은?")])
+    glued = Para(runs=[Run("3. 적절하지않은 것은?")])
+    split = Para(runs=[Run("4. 적절하지 "), Run("않", underline=True), Run(" 은 것은?")])
+    far = Para(runs=[Run("5. 의미가 가장 먼 것은?")])
+    _underline_negatives([marked, plain, glued, split, far])
+    assert ul(plain) == "1. 윗글에서 언급한 내용이 [아닌] 것은?"
+    assert ul(glued) == "3. 적절하지 [않은] 것은?"
+    assert ul(split) == "4. 적절하지 [않은] 것은?"
+    assert ul(far) == "5. 의미가 가장 [먼] 것은?"
+
+    alone = Para(runs=[Run("1. 적절하지 않은 것은?")])
+    _underline_negatives([alone])
+    assert ul(alone) == "1. 적절하지 않은 것은?"
+
+
+def test_stroke_on_every_char_is_not_bold():
+    """칠하고 테두리까지 그린 글자(가짜 굵게)라도 한 글꼴의 거의 모든 글자가 그렇다면 그 글꼴의 보통 모양이다."""
+    from pdf2hwpx.extract import _plain_strokes
+    from pdf2hwpx.model import Glyph
+
+    every = [Glyph("가", 0, 0, 10, 10, 10, True) for _ in range(300)]
+    some = [Glyph("주", 0, 0, 10, 10, 10, True) for _ in range(50)]
+    _plain_strokes({"Batang": [302, 300, every], "Eulyoo1945-Regular": [1200, 50, some]})
+    assert not any(g.bold for g in every)
+    assert all(g.bold for g in some)

@@ -21,7 +21,7 @@ from typing import Optional
 import pymupdf as fitz
 
 from . import ocr
-from .model import BLANK_BOX, Box, Bracket, Cell, FlowItem, Glyph, ICON_PUA_BASE, ImageEl, Line, PageInfo, TableEl
+from .model import BLANK_BOX, CIRCLED_DIGITS, Box, Bracket, Cell, FlowItem, Glyph, ICON_PUA_BASE, ImageEl, Line, PageInfo, TableEl
 
 HIDDEN_TEXT_MAX_SIZE = 3.0  # 크기 3pt 미만 글자는 숨은 텍스트(예: "zb1)")
 GAP_SPACE_RATIO = 0.25  # 글자 사이 간격이 글자 크기의 이 비율을 넘으면 공백으로 본다
@@ -157,6 +157,16 @@ def _is_bold(font: str, flags: int, char_flags: int = 0) -> bool:
             or (char_flags & 48) == 48)
 
 
+def _plain_strokes(strokes: dict) -> None:
+    """칠하고 테두리까지 그린 글자는 보통 가짜 굵게지만, 한 글꼴의 거의 모든 글자를 그렇게 찍은 문서(한글이 바탕체
+    선택지·보기를 늘 가는 테두리와 함께 내보낸 교재)에서는 그 글꼴의 보통 모양이다: 굵게로 보지 않는다
+    (한 교재의 선택지 556개가 모두 굵게 들어갔다). 일부 글자만 그런 글꼴('주제'만 테두리)은 그대로 강조."""
+    for total, stroked, glyphs in strokes.values():
+        if total >= 50 and stroked >= 0.85 * total:
+            for g in glyphs:
+                g.bold = False
+
+
 WHITE = "#FFFFFF"
 
 
@@ -189,7 +199,8 @@ def _mismapped_space(c: str, width: float, size: float) -> bool:
     return c in MISMAPPED_SPACE and width < 0.36 * size
 
 
-def _page_fragments(page: fitz.Page) -> list[_Frag]:
+def _page_fragments(page: fitz.Page, strokes: Optional[dict] = None) -> list[_Frag]:
+    """strokes: 글꼴별 [전체 글자 수, 칠하고 테두리까지 그린 글자 수, 그래서 굵게 본 글자들]을 모은다(_plain_strokes)."""
     frags: list[_Frag] = []
     raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_COLLECT_STYLES)
     for block in raw.get("blocks", []):
@@ -201,9 +212,12 @@ def _page_fragments(page: fitz.Page) -> list[_Frag]:
                 size = float(span.get("size") or 0)
                 if size < HIDDEN_TEXT_MAX_SIZE:
                     continue
-                bold = _is_bold(span.get("font", ""), int(span.get("flags") or 0), int(span.get("char_flags") or 0))
+                font, flags, cflags = span.get("font", ""), int(span.get("flags") or 0), int(span.get("char_flags") or 0)
+                bold = _is_bold(font, flags, cflags)
                 color = _color(int(span.get("color") or 0))
-                wingdings = "wingdings" in span.get("font", "").lower()
+                wingdings = "wingdings" in font.lower()
+                st = strokes.setdefault(font, [0, 0, []]) if strokes is not None else None
+                stroked = (cflags & 48) == 48
                 for ch in span.get("chars", []):
                     c = ch.get("c") or ""
                     if not c:
@@ -214,6 +228,11 @@ def _page_fragments(page: fitz.Page) -> list[_Frag]:
                     if c == " " or _mismapped_space(c, x1 - x0, size):
                         c = " "
                     glyphs.append(Glyph(c, x0, y0, x1, y1, size, bold, color=color))
+                    if st is not None and c != " ":
+                        st[0] += 1
+                        st[1] += stroked
+                        if stroked and bold and not _is_bold(font, flags):
+                            st[2].append(glyphs[-1])
             if not glyphs or all(g.is_space for g in glyphs):
                 continue
             solid = [g for g in glyphs if not g.is_space]
@@ -401,6 +420,11 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
     for k, (chars, real) in enumerate(zip(rows, inside)):
         # 진짜 글자 자리(지운 자리의 자국)의 OCR 글자, 그 바로 옆의 확신도 낮은 기호는 버린다
         def stray(ch) -> bool:
+            for g in real:
+                # 지운 자리와 바로 뒤 글자를 한 상자로 읽은 것("㉠과"의 '과'): 진짜 글자 밖으로 반 글자 넘게 나가면
+                # 글자로 남기고 상자를 진짜 글자 뒤로 줄인다
+                if ch.x0 < g.x1 and ch.x1 - max(ch.x0, g.x1) >= 0.5 * g.size and "가" <= ch.c <= "힣" and ch.x0 >= g.x0 - 0.1 * g.size:
+                    ch.x0 = g.x1
             cx = (ch.x0 + ch.x1) / 2
             for g in real:
                 if g.x0 - 0.1 * g.size <= cx <= g.x1 + 0.1 * g.size:
@@ -440,25 +464,31 @@ def _ocr_rows(page: fitz.Page, rects: list, kept: list[_Frag], stats: Counter) -
             rows[k] = sorted([ch for ch in rows[k] if ch not in old] + new, key=lambda ch: ch.x0)
     shapes = [fitz.Rect(d["rect"]) for d in page.get_drawings() if _glyph_path(d)]
 
-    def row_size(chars) -> float:
+    owns = [sorted((q for q in shapes if r[0] <= (q.x0 + q.x1) / 2 <= r[2] and r[1] <= (q.y0 + q.y1) / 2 <= r[3]),
+                   key=lambda q: q.x0) for r in rects]
+
+    def row_size(chars, own) -> float:
+        # 원문 글자 도형 높이로 잰다(OCR은 단어 끝 글자에 단어 상자 높이를 붙이기도 해서, 그런 글자가 많은 짧은 줄은
+        # "적절한 것은?"이 22pt로 잡혔다). 받침 없는 글자·기호는 낮으므로 위에서 4분의 1 자리 높이로. 도형이 적으면 OCR 한글 높이로
+        tall = sorted(q.height for q in own if q.height >= 0.6 * max(q.height for q in own)) if own else []
+        if len(tall) >= 3:
+            return tall[int(0.75 * (len(tall) - 1))] / 0.88
         hangul = [ch.y1 - ch.y0 for ch in chars if "가" <= ch.c <= "힣"]
         return statistics.median(hangul) / 0.88 if hangul else statistics.median(ch.y1 - ch.y0 for ch in chars) / 0.8
     # 한 쪽의 발문은 같은 크기: 줄마다 잰 크기가 쪽 가운데값과 12% 안이면 가운데값으로("은?"처럼 짧은 줄은 잰 값이 흔들린다)
-    page_sizes = [row_size(chars) for chars in rows if chars]
+    page_sizes = [row_size(chars, own) for chars, own in zip(rows, owns) if chars]
     page_size = statistics.median(page_sizes) if page_sizes else 0.0
     out: list[Optional[_Frag]] = []
-    for r, chars, real in zip(rects, rows, inside):
+    for r, chars, real, own in zip(rects, rows, inside, owns):
         # 확신도 낮은 글자가 많은 줄(무늬·밑줄이 겹친 줄 등)은 잘못 읽은 것이 많아 그림으로 둔다
         if not chars or sum(ch.conf < ocr.LOW_CONF for ch in chars) > 0.25 * len(chars):
             out.append(None)
             continue
-        size = row_size(chars)
+        size = row_size(chars, own)
         if abs(size - page_size) < 0.12 * page_size:
             size = page_size
         # 글자 위치는 원문 윤곽선 글자 도형에 맞춘다(글자 하나 = 도형 하나, OCR 상자는 단어를 나눈 것이라 부정확):
         # 띄어쓰기를 원문 간격 그대로 잴 수 있다
-        own = sorted((q for q in shapes if r[0] <= (q.x0 + q.x1) / 2 <= r[2] and r[1] <= (q.y0 + q.y1) / 2 <= r[3]),
-                     key=lambda q: q.x0)
         pairs = {id(ch): q for ch, q in _align(chars, own, size)}
         snapped = len(pairs) >= 0.8 * len(chars)
         for k, ch in enumerate(chars):
@@ -754,9 +784,22 @@ def _linked_boxes(rects: list[tuple[float, float, float, float]], segs: list[_Se
                         and r[2] - r[0] < x1 - x0 and r[3] - r[1] < y1 - y0 and not (x0 <= r[0] and r[2] <= x1 and y0 <= r[1] and r[3] <= y1):
                     x0, y0, x1, y1 = min(x0, r[0] - 2), min(y0, r[1] - 2), max(x1, r[2] + 2), max(y1, r[3] + 2)
                     grown = True
-        if colsep is not None and x0 < colsep - 10 < colsep + 10 < x1:
-            continue
         out.append((x0, y0, x1, y1))
+    # 서로 겹치는 묶음은 한 구조도다(4·5문단 -> 6문단을 잇는 선이 닫힌 네모를 이뤄 따로 묶이면 4·5문단이 두 번 나온다)
+    merged = True
+    while merged:
+        merged = False
+        for a in out:
+            for b in out:
+                if a is not b and a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]:
+                    out.remove(b)
+                    out[out.index(a)] = (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+                    merged = True
+                    break
+            if merged:
+                break
+    if colsep is not None:
+        out = [r for r in out if not r[0] < colsep - 10 < colsep + 10 < r[2]]
     return out
 
 
@@ -1003,11 +1046,12 @@ def extract(pdf_path: str) -> Extraction:
     doc = fitz.open(pdf_path)
     raw_pages = []
     band_texts: Counter = Counter()
+    strokes: dict = {}
 
     # ---- 1차: 페이지별 원자료 수집 ----
     for pno, page in enumerate(doc, start=1):
         W, H = page.rect.width, page.rect.height
-        frags = _page_fragments(page)
+        frags = _page_fragments(page, strokes)
         drawings = page.get_drawings()
         segs, others = _page_segments(page, drawings)
         outlines = _outline_rows(drawings)
@@ -1043,6 +1087,7 @@ def extract(pdf_path: str) -> Extraction:
             if f.y1 <= 0.12 * H or f.y0 >= 0.88 * H:
                 band_texts[_repeat_key(f)] += 1
         raw_pages.append((pno, W, H, frags, segs, others, imgs, top, bottom, fills, outlines))
+    _plain_strokes(strokes)
 
     repeat_min = max(2, int(0.4 * len(raw_pages)))
     # 문제 번호("3.")처럼 짧은 숫자 조각은 반복돼도 머리글이 아니다.
@@ -1247,6 +1292,7 @@ def extract(pdf_path: str) -> Extraction:
                 continue
             col = 0 if (x0 + x1) / 2 < split_x else 1
             content_imgs.append(ImageEl(pno, col, x0, y0, x1, y1, digest, xref))
+        kept = _absorb_chart_labels(content_imgs, kept, stats)
         for x0, y0, x1, y1 in outline_rects:
             content_imgs.append(ImageEl(pno, 0 if (x0 + x1) / 2 < split_x else 1, x0, y0, x1, y1, OUTLINE_TEXT, 0))
 
@@ -1681,6 +1727,43 @@ def extract(pdf_path: str) -> Extraction:
 OUTLINE_TEXT = "outline-text"  # 윤곽선 글자 줄을 영역째 그린 그림(ImageEl.digest)
 PILL_MARK = "\ue0ff"  # 알약 번호 그림 자리표(문서를 다 읽은 뒤 "예제1 " 같은 글자로 바뀐다)
 PILL_WORD_RE = re.compile(r"\[\s*([가-힣]{1,4})\s?(\d{1,2})\s*\]")
+
+
+def _absorb_chart_labels(imgs: list[ImageEl], kept: list[_Frag], stats: Counter) -> list[_Frag]:
+    """그래프 그림 위에 글자로 찍은 라벨(A·B, 눈금 숫자, 세로로 쓴 축 이름 "원/소/의/함/량")은 그림과 한 덩어리로:
+    글로 따로 빼면 그림 아래에 "100 원 A 소 …"로 흩어진다. 그림 안에 글자가 하나라도 찍혀 있는 그림만(라벨 붙은
+    그래프) 그 안과 둘레(글자 크기의 1.5배 안, 넓혀 가며)의 짧은 글 조각을 그림 영역에 넣는다. 같은 높이에 긴 글이
+    있는 조각(그림 옆 본문 줄)이나 원문자(선택지 번호)는 넣지 않는다."""
+    def short(f: _Frag) -> bool:
+        text = "".join(g.c for g in f.glyphs if not g.is_space)
+        return 0 < len(text) <= 8 and not any(c in CIRCLED_DIGITS for c in text)
+
+    def inside(f: _Frag, im) -> bool:
+        return im.x0 <= (f.x0 + f.x1) / 2 <= im.x1 and im.y0 <= (f.y0 + f.y1) / 2 <= im.y1
+
+    for im in imgs:
+        if im.x1 - im.x0 < 40 or im.y1 - im.y0 < 40 or not any(short(f) and inside(f, im) for f in kept):
+            continue
+        taken: list[_Frag] = []
+        grew = True
+        while grew:
+            grew = False
+            for f in kept:
+                if f in taken or not short(f):
+                    continue
+                m = 1.5 * f.size
+                if not (im.x0 - m <= f.x1 and f.x0 <= im.x1 + m and im.y0 - m <= f.y1 and f.y0 <= im.y1 + m):
+                    continue
+                row = [o for o in kept if o is not f and min(o.y1, f.y1) - max(o.y0, f.y0) > 0.5 * min(o.y1 - o.y0, f.y1 - f.y0)]
+                if any(not short(o) and (im.x0 - m <= o.x1 and o.x0 <= im.x1 + m) for o in row):
+                    continue
+                taken.append(f)
+                im.x0, im.y0, im.x1, im.y1 = min(im.x0, f.x0), min(im.y0, f.y0), max(im.x1, f.x1), max(im.y1, f.y1)
+                grew = True
+        if taken:
+            stats["chart_labels"] += len(taken)
+            kept = [f for f in kept if f not in taken]
+    return kept
 
 
 def _pill_label(kept: list, x0: float, y0: float, x1: float, y1: float, split_x: float) -> Optional["_Frag"]:

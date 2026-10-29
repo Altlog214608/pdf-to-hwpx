@@ -906,6 +906,9 @@ def build_document(ex: Extraction) -> Document:
             q.answer = ANSWER_HEAD_RE.sub("", head, count=1).strip()
             q.explanation = a.paras
 
+    _underline_negatives([q.stem for q in doc.questions]
+                         + [it for it in doc.items if isinstance(it, Para) and STEM_RE.match(it.text) and "?" in it.text])
+
     for r in _iter_runs(doc):  # 원문 본문 크기 대비 글자 크기(문제 밖 내용의 작은 설명 글 등)
         r.rel = round(r.size / body, 2) if r.size and body else 1.0
 
@@ -1175,6 +1178,48 @@ def _build_answers(b: Builder, lines: list[Line]) -> list[AnswerEntry]:
         (cur_body if in_body else cur_head).append(ln)
     flush()
     return entries
+
+
+STEM_RE = re.compile(r"\s*\d{1,2}\s?\.\s")
+# 발문의 부정어·'먼'("적절하지 않은 것은?", "가장 먼 것은?"). OCR이 "않 은"으로 띄어 읽기도 한다
+NEGATIVE_RE = re.compile(r"(않\s?[은는]|(?<![가-힣])(?:아\s?닌|없\s?는|먼))(?=\s?것)")
+
+
+def _underline_negatives(stems: list[Para]) -> None:
+    """발문 부정어 밑줄을 문서 안에서 고르게: 어느 발문이라도 부정어에 밑줄을 그었으면(원문이 그 관례를 쓰면) 밑줄이
+    빠진 발문의 부정어에도 긋는다(같은 교재 안에서도 지문마다 빠진 곳이 있다). 관례를 안 쓰는 문서는 그대로 둔다."""
+    def matches(p: Para):
+        return list(NEGATIVE_RE.finditer(p.text))
+
+    def underlined(p: Para, m) -> bool:
+        pos = 0
+        for r in p.runs:
+            if r.underline and pos < m.end() and m.start() < pos + len(r.text):
+                return True
+            pos += len(r.text)
+        return False
+    if not any(underlined(p, m) for p in stems for m in matches(p)):
+        return
+    for p in stems:
+        ms = matches(p)
+        if not ms:
+            continue
+        chars = [(c, r) for r in p.runs for c in r.text]
+        out: list[Run] = []
+        k = 0
+        for m in ms + [None]:
+            end = m.start() if m else len(chars)
+            for c, r in chars[k:end]:
+                _append_runs(out, [dataclasses.replace(r, text=c)])
+            if m is None:
+                break
+            word = m.group(0).replace(" ", "")  # OCR이 띄운 "않 은"은 붙인다
+            r0 = next((r for c, r in chars[m.start():m.end()] if not c.isspace()), chars[m.start()][1])
+            if word[0] == "않" and m.start() and "가" <= chars[m.start() - 1][0] <= "힣":  # OCR이 붙인 "적절하지않은"
+                _append_runs(out, [dataclasses.replace(r0, text=" ", underline=False)])
+            _append_runs(out, [dataclasses.replace(r0, text=word, underline=True)])
+            k = m.end()
+        p.runs = out
 
 
 def _iter_runs(doc: Document):
