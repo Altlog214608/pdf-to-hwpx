@@ -330,6 +330,19 @@ def _mismapped_space(c: str, width: float, size: float) -> bool:
     return c in MISMAPPED_SPACE and width < 0.36 * size
 
 
+def _unknown_glyph(page: fitz.Page, bbox, size: float) -> str:
+    """글자 정보가 없는 글자(\ufffd, 한글에서 "\ufffd"로 깨진다)는 그려 본 모양으로: 잉크가 없으면 공백, 글자 한 자보다
+    훨씬 작은 점(면적이 글자 크기 제곱의 6% 이하)이면 글머리표 "•", 그 밖은 그대로 둔다."""
+    try:
+        pix = page.get_pixmap(clip=fitz.Rect(bbox), matrix=fitz.Matrix(8, 8), colorspace=fitz.csGRAY, alpha=False)
+    except Exception:
+        return "\ufffd"
+    ink = sum(1 for v in pix.samples if v < 128) / 64.0  # pt²
+    if ink == 0:
+        return " "
+    return "•" if ink <= 0.06 * size * size else "\ufffd"
+
+
 def _page_fragments(page: fitz.Page, strokes: Optional[dict] = None) -> list[_Frag]:
     """strokes: 글꼴별 [전체 글자 수, 칠하고 테두리까지 그린 글자 수, 그래서 굵게 본 글자들]을 모은다(_plain_strokes)."""
     frags: list[_Frag] = []
@@ -363,6 +376,8 @@ def _page_fragments(page: fitz.Page, strokes: Optional[dict] = None) -> list[_Fr
                     x0, y0, x1, y1 = ch["bbox"]
                     if c == " " or _mismapped_space(c, x1 - x0, size):
                         c = " "
+                    elif c == "\ufffd":
+                        c = _unknown_glyph(page, (x0, y0, x1, y1), size)
                     glyphs.append(Glyph(c, x0, y0, x1, y1, size, bold, color=color))
                     if st is not None and c != " ":
                         st[0] += 1

@@ -1689,3 +1689,18 @@ def test_space_past_cell_border(tmp_path):
     texts = [x.text for cl in tables[0].cells for x in cl.items if isinstance(x, Line)]
     assert any("보니," in t for t in texts)
     assert all(x.text.strip() for it in ex.flow if isinstance(it, Line) for x in [it])
+
+
+def test_unknown_glyph_by_shape():
+    """실사용(어문 규정 발전문제): 글머리표를 글자 정보 없는 글자(U+FFFD)로 찍어 한글에서 "�"로 16군데 깨졌다 → 그려 본
+    모양으로: 글자보다 훨씬 작은 점은 "•", 잉크가 없으면 공백, 글자 한 자만 한 것은 그대로."""
+    import pymupdf as fitz
+
+    from pdf2hwpx.extract import _unknown_glyph
+
+    page = fitz.open().new_page(width=200, height=100)
+    page.draw_circle(fitz.Point(24.4, 50), 1.0, color=None, fill=(0, 0, 0))
+    page.insert_text((60, 55), "가", fontname="korea", fontsize=9.1)
+    assert _unknown_glyph(page, (20, 44, 28.8, 55.8), 9.1) == "•"
+    assert _unknown_glyph(page, (120, 44, 128.8, 55.8), 9.1) == " "
+    assert _unknown_glyph(page, (59.5, 46, 69.5, 57), 9.1) == "�"
