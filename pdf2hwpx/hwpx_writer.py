@@ -643,12 +643,15 @@ class HwpxWriter:
             ys = [0, self.img_max_h]
         cell_ov = {"line": 130} if t.text_pt else {}
         plain = S.add_border_fill() if t.lines else S.add_border_fill(sides_on=())
+        none_bf = S.add_border_fill(sides_on=()) if any(cl.open for cl in t.cells) else plain
         rows: list[list[str]] = [[] for _ in range(len(t.ys) - 1)]
         for cl in sorted(t.cells, key=lambda c: (c.row, c.col)):
             w = xs[cl.col + cl.colspan] - xs[cl.col]
             h = max(600, ys[cl.row + cl.rowspan] - ys[cl.row])
             bf = S.add_border_fill(fill=cl.fill, sides_on=("left", "right", "top", "bottom") if t.lines else cl.sides) \
                 if cl.fill or (not t.lines and cl.sides) else plain
+            if cl.open:  # 나란한 두 표 사이 틈 칸: 선 없이(바깥 표 테두리도 이 칸 위·아래로는 긋지 않는다)
+                bf = S.add_border_fill(fill=cl.fill, sides_on=()) if cl.fill else none_bf
             # 칸 정렬은 IR에서 칸 단위로 정한 문단 정렬을 따른다
             # 원문 위치 표의 앞 칸들은 좌우 여백 없이(원문에서 괄호 바로 앞까지 닿는 풀이 줄이 넘어가지 않게)
             tight = bool(t.text_pt) and cl.col + cl.colspan < len(t.xs) - 1
@@ -658,7 +661,7 @@ class HwpxWriter:
                                                           left_k=k if t.text_pt else 90.0, font_space=bool(t.text_pt)),
                                          margin=margin, valign=cl.valign or ("CENTER" if t.lines else "TOP")))
         rows = [r for r in rows if r] or [[]]
-        return self._tbl(rows, len(t.xs) - 1, xs[-1], max(600, ys[-1]), plain)
+        return self._tbl(rows, len(t.xs) - 1, xs[-1], max(600, ys[-1]), none_bf)
 
     def _tablerow(self, p: Para, width: int) -> str:
         """나란히 놓인 표들(초장 | 중장 | 종장): 한 문단에 글자처럼 이어 붙인다(원본 폭 비율)."""
@@ -867,7 +870,9 @@ class HwpxWriter:
                 if x.role == "credit":  # 오른쪽 정렬 출전
                     xp = S.derive(xb, align="RIGHT", left=1100, intent=0)
                 else:  # 서술형 하위 물음 아래 "(a) :" 같은 줄: 선택지 글 첫머리에 맞춘다
-                    xp = S.derive(xb, left=1100 + self._hang(1430), intent=0)
+                    # 선택지마다 "→ 풀이" 줄이 붙어 긴 문제는 선택지(+풀이) 사이에서 단을 넘을 수 있게(통째로 넘어가 앞 단이 비었다)
+                    free = k == len(c.extra) - 1 and not last_extra and x.text.lstrip()[:1] in "→⇒"
+                    xp = S.derive(xb, left=1100 + self._hang(1430), intent=0, **({"keep_next": 0} if free else {}))
                 out.append(self._p(xp, self._runs_xml(x.runs)))
         for i, b in enumerate(q.after):
             out.extend(self._block(b, i == len(q.after) - 1))

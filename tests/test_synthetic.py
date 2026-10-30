@@ -1704,3 +1704,62 @@ def test_unknown_glyph_by_shape():
     assert _unknown_glyph(page, (20, 44, 28.8, 55.8), 9.1) == "•"
     assert _unknown_glyph(page, (120, 44, 128.8, 55.8), 9.1) == " "
     assert _unknown_glyph(page, (59.5, 46, 69.5, 57), 9.1) == "�"
+
+
+def test_side_by_side_tables_bridged_by_arrows(tmp_path):
+    """실사용(어문 규정 발전문제 3번): 왼쪽 표(㉠~㉤ | ⓐ)와 오른쪽 한 칸 표(ⓑ 풀이)가 행 경계를 맞추고 화살표 "→" 틈을
+    두고 나란히 있는데, 한 칸 표는 표로 치지 않아 풀이가 화살표와 뒤섞인 줄글이 됐다 → 가로선을 틈 너머로 이어 한 표로,
+    틈 칸은 선 없이."""
+    import pymupdf as fitz
+
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.model import TableEl
+    from tests.synth_pdf import Writer
+
+    w = Writer()
+    ys = [100, 116, 140, 164, 188]
+    for xa, xb in ((60, 140), (155, 270)):
+        for y in ys:
+            w.page.draw_line(fitz.Point(xa, y), fitz.Point(xb, y), width=0.24)
+    for x in (60, 82, 140, 155, 270):
+        w.page.draw_line(fitz.Point(x, ys[0]), fitz.Point(x, ys[-1]), width=0.24)
+    w.text(105, 112, "ⓐ", 9)
+    w.text(205, 112, "ⓑ", 9)
+    for k, (lab, a, b) in enumerate((("㉠", "백분율", "자음 뒤에서는"), ("㉡", "세율", "합성어인 경우"), ("㉢", "선율", "모음 뒤에서는"))):
+        y = ys[k + 1] + 15
+        w.text(66, y, lab, 9)
+        w.text(90, y, a, 9)
+        w.text(143, y, "→", 9)
+        w.text(160, y, b, 9)
+    pdf = tmp_path / "side.pdf"
+    w.doc.save(str(pdf))
+    ex = extract(str(pdf))
+    tables = [it for it in ex.flow if isinstance(it, TableEl)]
+    assert len(tables) == 1 and len(tables[0].xs) == 5
+    gap = [cl for cl in tables[0].cells if cl.open]
+    assert gap and all(abs(cl.x0 - 140) < 1 and abs(cl.x1 - 155) < 1 for cl in gap)
+    assert not any(cl.open for cl in tables[0].cells if cl.x0 < 139 or cl.x0 > 141)
+
+
+def test_arrow_lines_under_choices(tmp_path):
+    """실사용(같은 PDF 2번): 선택지마다 아래 "→ 풀이" 줄이 있는데 선택지 글 끝에 이어 붙고("…봐.→ 보조 용언인"), ⑤의 풀이
+    줄은 선택지 밖으로 빠져 혼자 다음 단으로 넘어갔다 → 화살표 줄부터 그 선택지 아래 따로 문단(이어지는 줄은 그 문단)."""
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.ir import build_document
+    from tests.synth_pdf import Writer
+
+    w = Writer()
+    w.text(46, 110, "1.", 12)
+    w.text(62, 110, "띄어쓰기에 대해 이해한 내용으로 적절하지 않은 것은?", 10)
+    y = 135
+    for k, c in enumerate("①②③④⑤"):
+        w.text(52, y, f"{c} 예문 {k + 1}입니다.", 10)
+        w.text(52, y + 14, f"→ 풀이 {k + 1}의 첫 줄은 단 끝까지 길게", 10)
+        w.text(62, y + 28, "둘째 줄입니다.", 10)
+        y += 46
+    pdf = tmp_path / "arrow.pdf"
+    w.doc.save(str(pdf))
+    q = build_document(extract(str(pdf))).questions[0]
+    assert [c.para.text.strip() for c in q.choices] == [f"{c} 예문 {k + 1}입니다." for k, c in enumerate("①②③④⑤")]
+    assert all(len(c.extra) == 1 and c.extra[0].text.startswith("→") and "둘째 줄" in c.extra[0].text for c in q.choices)
+    assert not q.after

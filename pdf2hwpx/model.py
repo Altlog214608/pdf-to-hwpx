@@ -136,6 +136,7 @@ class Cell:
     fill: Optional[str] = None  # 칸 배경색 "#RRGGBB"
     sides: tuple = ()  # 선 없는 배치용 표에서 이 칸에만 긋는 변(시 풀이의 닫는 괄호 칸은 위·오른쪽·아래)
     valign: str = ""  # 칸 세로 정렬("CENTER" 등). 비우면 표 종류를 따른다
+    open: bool = False  # 선 있는 표에서 선 없이 두는 칸(나란한 두 표를 이은 틈의 화살표 칸)
     items: list = field(default_factory=list)  # Line | ImageEl (원문 순서)
     paras: list = field(default_factory=list)  # IR 단계에서 채움: list[Para]
 

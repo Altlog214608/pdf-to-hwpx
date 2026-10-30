@@ -23,6 +23,7 @@ from .model import (CIRCLED_DIGITS, AnswerEntry, AuxBlock, Box, Cell, Choice, Ch
 GUIDE_RE = re.compile(r"^\s*(※|\[\s*\d+\s*[~∼～\-–]\s*\d+\s*\])")
 ANSWER_HEAD_RE = re.compile(r"^\s*(\d{1,3})\s*\)\s*\[?\s*정답\s*\]?")  # "1) [정답] ④" / "1) 정답 ④"
 EXPL_RE = re.compile(r"^\s*\[\s*해설\s*\]")
+ARROW_RE = re.compile(r"\s*[→⇒]")  # 선택지 아래 풀이 줄 "→ 보조 용언인 …"
 ANSWER_NO_RE = re.compile(r"^\s*\d{1,3}\s*\)\s*$")  # 번호만 따로 찍은 정답 머리줄 "1)"
 ANSWER_TAG_RE = re.compile(r"^\s*\[?\s*정답\s*\]")
 LABEL_RE = re.compile(r"^\s*(\([가-힣A-Za-z]\)|\[[A-Z가-힣]\]|<[가-힣]\>)\s*$")
@@ -1134,7 +1135,8 @@ def _build_question(b: Builder, number: int, items: list, passage: Optional[Pass
                 prev = choice_lines[-1][-1]
                 far = (prev.page, prev.col) != (ln.page, ln.col) or ln.y0 - prev.y0 > 2.5 * ln.size
                 # (다섯째 선택지 아래 들여 쓴 표지 줄 "⑤ ⓐ: … / ⓑ: …"의 ⓑ 줄은 그 선택지)
-                sub = not far and re.match(r"\s*[㉠-㉻ⓐ-ⓩ]", t) is not None and ln.x0 > choice_lines[-1][0].x0 + 0.5 * ln.size
+                sub = not far and (re.match(r"\s*[㉠-㉻ⓐ-ⓩ]", t) is not None and ln.x0 > choice_lines[-1][0].x0 + 0.5 * ln.size
+                                   or ARROW_RE.match(t) is not None)  # (선택지 풀이 줄 "→ …"도 그 선택지)
                 if len(choice_lines) >= 5 and (far or not b._is_full(prev)) and not sub:
                     state = "after"
                     pending.append(ln)
@@ -1160,10 +1162,16 @@ def _build_question(b: Builder, number: int, items: list, passage: Optional[Pass
     choices = []
     for k, cl in enumerate(choice_lines):
         # "① …쓰시오. / (a) : / (b) :"처럼 앞 줄이 일찍 끝나고 표지로 시작하는 줄은 선택지 글에 잇지 않고 따로 둔다
-        cut = next((m for m in range(1, len(cl)) if MARKER_RE.match(cl[m].text)
+        cut = next((m for m in range(1, len(cl)) if (MARKER_RE.match(cl[m].text) or ARROW_RE.match(cl[m].text))
                     and (not b._is_full(cl[m - 1]) or WRITE_RE.search(cl[m - 1].text))), len(cl))
         p = b.single_para(cl[:cut])
-        subs = [b.single_para([ln]) for ln in cl[cut:]]
+        groups: list[list[Line]] = []  # 표지·화살표로 시작하는 줄마다 새 문단, 이어지는 줄은 그 문단("→ …이므로 / 로 붙여 쓸 수 없다.")
+        for ln in cl[cut:]:
+            if not groups or MARKER_RE.match(ln.text) or ARROW_RE.match(ln.text) or not ARROW_RE.match(groups[-1][0].text):
+                groups.append([ln])
+            else:
+                groups[-1].append(ln)
+        subs = [b.single_para(g) for g in groups]
         for x in subs:
             x.align, x.role, x.indent_pt = "LEFT", "subline", 0.0
         extra = b.paragraphs(credit_lines[k]) if k in credit_lines else []

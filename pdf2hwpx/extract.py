@@ -1307,6 +1307,36 @@ def _frame_grid(xs: list[float], ys: list[float]) -> bool:
     return thin_x and thin_y and xs[2] - xs[1] > 60
 
 
+def _bridge_side_tables(H: list, V: list) -> tuple[list, list]:
+    """나란한 두 표가 행 경계를 똑같이 맞추고 좁은 틈(화살표 "→" 칸)을 두고 붙어 있으면(왼쪽 표 ㉠~㉤ | → | 오른쪽 표
+    ⓑ 풀이), 같은 높이의 가로선을 틈 너머로 이어 한 표로 본다. 오른쪽 표가 세로 칸 하나뿐이면 표로 치지 않아 풀이가
+    화살표와 뒤섞인 줄글이 됐다. 이은 틈은 (왼쪽 x, 오른쪽 x, 위 y, 아래 y)로 돌려주고 그 칸은 선 없이 둔다.
+    틈 양쪽에 두 표의 세로 변이 있고, 같은 틈으로 이어지는 가로선이 3개 이상(행 2개 이상)일 때만."""
+    def vcover(x: float, y: float) -> bool:
+        return any(abs(v[0] - x) <= 2.0 and v[1] - 2 <= y <= v[2] + 2 for v in V)
+    cand: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+    order = sorted(range(len(H)), key=lambda k: (round(H[k][0]), H[k][1]))
+    for a, b in zip(order, order[1:]):
+        ha, hb = H[a], H[b]
+        gap = hb[1] - ha[2]
+        if abs(ha[0] - hb[0]) <= 1.5 and 3.0 < gap <= 24.0 and vcover(ha[2], ha[0]) and vcover(hb[1], hb[0]):
+            cand[(round(ha[2]), round(hb[1]))].append((a, b))
+    out, gaps, drop = list(H), [], set()
+    for (xa, xb), pairs in cand.items():
+        # 틈 양쪽 표의 가로선이 하나도 빠짐없이 짝을 이룰 것(행이 다른 두 표 "교목 | 화자의 의지 ⇨ '교목'의 기능"은 잇지 않는다)
+        ylo, yhi = min(H[a][0] for a, _ in pairs) - 2, max(H[a][0] for a, _ in pairs) + 2
+        left = sum(1 for h in H if abs(h[2] - xa) <= 2 and ylo <= h[0] <= yhi)
+        right = sum(1 for h in H if abs(h[1] - xb) <= 2 and ylo <= h[0] <= yhi)
+        if len(pairs) < 3 or not len(pairs) == left == right:
+            continue
+        ys = [H[a][0] for a, _ in pairs]
+        for a, b in pairs:
+            out[a] = (H[a][0], H[a][1], H[b][2])
+            drop.add(b)
+        gaps.append((H[pairs[0][0]][2], H[pairs[0][1]][1], min(ys), max(ys)))
+    return [h for k, h in enumerate(out) if k not in drop], gaps
+
+
 def _detect_tables(segs: list[_Seg], fills: list[tuple[fitz.Rect, Optional[str]]], top: float, bottom: float, W: float,
                    skip_vertical_x: Optional[float], wide: bool = False) -> list[tuple[list[float], list[float], list[Cell]]]:
     """가로/세로 선분이 서로 맞물려 격자를 이루면 표로 본다.
@@ -1317,6 +1347,7 @@ def _detect_tables(segs: list[_Seg], fills: list[tuple[fitz.Rect, Optional[str]]
           and not (skip_vertical_x is not None and abs(s.x0 - skip_vertical_x) < 1.0)]
     H = [r for r in _merge_runs(hs, tol=1.5) if r[2] - r[1] >= 4]
     V = [r for r in _merge_runs(vs, tol=1.5) if r[2] - r[1] >= 4]
+    H, gaps = _bridge_side_tables(H, V)
     n = len(H) + len(V)
     parent = list(range(n))
 
@@ -1413,6 +1444,9 @@ def _detect_tables(segs: list[_Seg], fills: list[tuple[fitz.Rect, Optional[str]]
                 inter = rect & fitz.Rect(cl.x0, cl.y0, cl.x1, cl.y1)
                 if not inter.is_empty and inter.width * inter.height >= 0.7 * area:
                     cl.fill = color
+        for cl in cells:  # 나란한 두 표 사이 틈 칸(화살표 칸)은 선 없이
+            cl.open = any(abs(cl.x0 - ga) <= 2 and abs(cl.x1 - gb) <= 2 and gy0 - 2 <= cl.y0 and cl.y1 <= gy1 + 2
+                          for ga, gb, gy0, gy1 in gaps)
         tables.append((xs, ys, cells))
     return tables
 
