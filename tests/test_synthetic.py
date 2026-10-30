@@ -1647,3 +1647,45 @@ def test_brace_marker_and_marker_sublines(tmp_path):
     texts = [ln.text for ln in extract(str(pdf)).flow]
     assert texts[1:] == [t for k, c in enumerate("①②③④⑤") for t in (f"{c} ⓐ: 첫째 예문 {k + 1}입니다.", f"ⓑ: 둘째 예문 {k + 1}입니다.")]
     assert MARKER_RE.match("ⓑ: 둘째") and not MARKER_RE.match("ⓑ둘째")
+
+
+
+def test_split_answer_heads(tmp_path):
+    """실사용(어문 규정 발전문제): 정답 머리줄을 "1)"과 "[정답] ③" 두 줄로 따로 찍어 정답부를 못 찾고 정답·해설을 통째로
+    버렸다 → 번호만 있는 줄 바로 아래(같은 단·같은 왼쪽) 정답 줄은 한 줄("1) [정답] ③")로 잇는다."""
+    pdf = tmp_path / "split.pdf"
+    build(str(pdf), answer_style="split")
+    res = convert(str(pdf), out_dir=str(tmp_path), overwrite=True, style=DocStyle(answers_as_endnotes=True))
+    v = res["validation"]
+    assert v["status"] == "PASS", v
+    assert v["checks"]["answer_count"] == v["checks"]["endnotes"] == 5
+
+
+def test_space_past_cell_border(tmp_path):
+    """실사용(같은 PDF, 웹 업로드 자체가 실패): 표 칸 글 줄 끝 공백("보니, ")이 칸 오른쪽 테두리를 넘어 칸 밖의 공백뿐인
+    조각이 되어 줄 만들기에서 멈췄다(min() 빈 목록) → 공백뿐인 조각은 버린다."""
+    import pymupdf as fitz
+
+    from pdf2hwpx.extract import extract
+    from pdf2hwpx.model import Line, TableEl
+    from tests.synth_pdf import Writer, tl
+
+    w = Writer()
+    y = 100
+    rows = [y, y + 20, y + 40, y + 60]
+    for k, (a, b) in enumerate((("의문", "앞의 낱말을 보니, "), ("가설", "뒤에서 쓴다고 본다"), ("결론", "가설은 완전하다"))):
+        w.text(62, rows[k] + 14, a, 10)
+        w.text(102, rows[k] + 14, b, 10)
+    right = 102 + tl("앞의 낱말을 보니,", 10) + 0.6  # 끝 공백 글자의 가운데가 칸 밖
+    for yy in rows:
+        w.page.draw_line(fitz.Point(58, yy), fitz.Point(right, yy), width=0.6)
+    for xx in (58, 98, right):
+        w.page.draw_line(fitz.Point(xx, rows[0]), fitz.Point(xx, rows[-1]), width=0.6)
+    pdf = tmp_path / "cell.pdf"
+    w.doc.save(str(pdf))
+    ex = extract(str(pdf))
+    tables = [it for it in ex.flow if isinstance(it, TableEl)]
+    assert tables, "표를 찾지 못함"
+    texts = [x.text for cl in tables[0].cells for x in cl.items if isinstance(x, Line)]
+    assert any("보니," in t for t in texts)
+    assert all(x.text.strip() for it in ex.flow if isinstance(it, Line) for x in [it])

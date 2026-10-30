@@ -1672,7 +1672,9 @@ def extract(pdf_path: str) -> Extraction:
                     else:
                         groups.append((cl, [g]))
                 for cl, gs in groups:
-                    solid = [g for g in gs if not g.is_space] or gs
+                    solid = [g for g in gs if not g.is_space]
+                    if not solid:  # 칸 테두리에 걸쳐 칸 밖으로 떨어진 공백뿐인 조각은 버린다(글자 없는 줄이 되어 멈췄다)
+                        continue
                     nf = _Frag(gs, min(g.x0 for g in solid), min(g.y0 for g in solid), max(g.x1 for g in solid),
                                max(g.y1 for g in solid), f.size) if len(groups) > 1 else f
                     if cl is None:
@@ -1772,10 +1774,13 @@ def extract(pdf_path: str) -> Extraction:
             cf = [f for f in kept if (0 if (f.x0 + f.x1) / 2 < split_x else 1) == col]
             for g in _group_lines(cf):
                 for sub in _split_far_fragments(g):
-                    lines.append(_build_line(pno, col, sub))
+                    if any(not x.is_space for f in sub for x in f.glyphs):  # 공백뿐인 줄은 만들지 않는다
+                        lines.append(_build_line(pno, col, sub))
         for t in tables:
             for cl in t.cells:
                 for g in _group_lines(cell_frags.get(id(cl), [])):
+                    if not any(not x.is_space for f in g for x in f.glyphs):
+                        continue
                     ln = _build_line(pno, t.col, sorted(g, key=lambda f: f.x0))
                     ln.cell = (cl.x0, cl.x1)
                     cl.items.append(ln)

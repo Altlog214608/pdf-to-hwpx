@@ -234,6 +234,7 @@ def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tu
           bare_numbers: bool = False, credit_nospace: bool = False, written_parts: bool = False,
           intro_page: bool = False, wide_top: bool = False, hanging_expl: bool = False, page_frame: bool = False) -> dict:
     """answer_style: 'bracket' = '1) [정답] ③ / [해설] …', 'plain' = '1) 정답 ③ / 오답 point / …'(최다오답·최상위 공략형)
+        'split' = '1)' 한 줄 + '[정답] ③ / [해설] …'(번호를 따로 찍은 정답 머리줄)
     start: 첫 문제 번호(단원 중간부터 시작하는 문제집 일부, 예: 13번부터)
     white_bg: 발문 줄 뒤에 선 없는 흰 사각형(한글이 내보내는 문단 배경, 보이지 않음)이 깔린 문제(몇 번째, 1부터)
     notice: 첫 쪽 맨 위에 출판사 저작권·콘텐츠 보호 고지문(© 마크 포함)
@@ -442,6 +443,10 @@ def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tu
     w.new_page()
     for n, ans in enumerate(["③", "⑤", "①", "주제는 그리움이다.", "①"], start=start):
         head = f"{n}) [정답] " if answer_style == "bracket" else f"{n}) 정답 "
+        if answer_style == "split":  # 번호 "1)"만 한 줄, 그 아래 "[정답] ③"(어문 규정 발전문제형)
+            w.text(w.left + 10, w.y + 9, f"{n})")
+            w.y += 13
+            head = "[정답] "
         w.text(w.left + 10, w.y + 9, head)
         if ans in ICONS:
             w.icon(ans, w.left + 10 + tl(head), w.y + 9)
@@ -451,7 +456,7 @@ def build(path: str, answer_style: str = "bracket", start: int = 1, white_bg: tu
         if answer_style == "plain":
             w.text(w.left + 10, w.y + 9, "오답 point")
             w.y += 13
-        lead = "[해설] 해설 첫 줄입니다. " if answer_style == "bracket" else "해설 첫 줄입니다. "
+        lead = "[해설] 해설 첫 줄입니다. " if answer_style in ("bracket", "split") else "해설 첫 줄입니다. "
         w.text(w.left + 10, w.y + 9, lead)
         w.icon("②", w.left + 10 + tl(lead), w.y + 9)
         w.text(w.left + 22 + tl(lead), w.y + 9, "는 오답이다.")
