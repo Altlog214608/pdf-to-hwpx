@@ -23,6 +23,8 @@ from .model import (CIRCLED_DIGITS, AnswerEntry, AuxBlock, Box, Cell, Choice, Ch
 GUIDE_RE = re.compile(r"^\s*(※|\[\s*\d+\s*[~∼～\-–]\s*\d+\s*\])")
 ANSWER_HEAD_RE = re.compile(r"^\s*(\d{1,3})\s*\)\s*\[?\s*정답\s*\]?")  # "1) [정답] ④" / "1) 정답 ④"
 EXPL_RE = re.compile(r"^\s*\[\s*해설\s*\]")
+ANSWER_NO_RE = re.compile(r"^\s*\d{1,3}\s*\)\s*$")  # 번호만 따로 찍은 정답 머리줄 "1)"
+ANSWER_TAG_RE = re.compile(r"^\s*\[?\s*정답\s*\]")
 LABEL_RE = re.compile(r"^\s*(\([가-힣A-Za-z]\)|\[[A-Z가-힣]\]|<[가-힣]\>)\s*$")
 # 줄 머리에 오면 새 문단을 시작하는 표지 (원문자/목록/화자/섹션 라벨 등)
 MARKER_RE = re.compile(
@@ -728,7 +730,25 @@ def _source_gaps(items: list, body: float) -> None:
         prev = src
 
 
+def _join_split_answer_heads(flow: list) -> list:
+    """정답 머리줄을 번호("1)")와 정답("[정답] ④") 두 줄로 따로 찍은 문제집: 번호만 있는 줄 바로 아래, 같은 단에서 왼쪽이
+    맞는 정답 줄과 한 줄("1) [정답] ④")로 잇는다(정답부를 못 찾아 정답·해설을 통째로 버렸다)."""
+    out: list = []
+    for it in flow:
+        prev = out[-1] if out else None
+        if isinstance(it, Line) and isinstance(prev, Line) and ANSWER_NO_RE.match(prev.text) \
+                and ANSWER_TAG_RE.match(it.text) and prev.page == it.page and prev.col == it.col \
+                and abs(it.x0 - prev.x0) < 2 * it.size and 0 <= it.y0 - prev.y0 < 3 * it.size:
+            sp = Glyph(" ", prev.x1, it.y0, it.x0, it.y1, it.size)
+            out[-1] = dataclasses.replace(it, glyphs=prev.glyphs + [sp] + it.glyphs, x0=min(prev.x0, it.x0), y0=prev.y0,
+                                          lead_size=prev.lead_size)
+            continue
+        out.append(it)
+    return out
+
+
 def build_document(ex: Extraction) -> Document:
+    ex.flow = _join_split_answer_heads(ex.flow)  # (아이콘 투표 등 ex.flow를 보는 곳과 위치를 맞춘다)
     flow = ex.flow
     body = ex.body_size
 
